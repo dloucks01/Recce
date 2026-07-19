@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Engagement output (never commit scan data / client artifacts)
+engagement/
+demo_engagement/
+demo_out/
+*.sqlite
+*.xlsx
+raw/
