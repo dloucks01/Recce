@@ -535,6 +535,46 @@ class WriteupTest(unittest.TestCase):
             summary = build_writeups(self._hosts(), out, min_severity="high")
             self.assertEqual(summary["total"], 1)   # only the critical
 
+    def test_auto_walkthrough_steps(self):
+        from recce.report_docx import group_findings, _walkthrough_steps
+        findings = group_findings(self._hosts())
+        tls = next(f for f in findings if "SSL" in f.title)
+        steps = _walkthrough_steps(tls)
+        self.assertTrue(steps)
+        joined = " ".join(steps)
+        self.assertIn("nmap -sV", joined)         # discovery step
+        self.assertIn("ssl-enum-ciphers", joined)  # tailored confirmation step
+
+    def test_walkthrough_uses_searchsploit_exploit(self):
+        from recce.models import Vuln, Exploit
+        from recce.report_docx import group_findings, _walkthrough_steps
+        h = Host(ip="10.0.20.6", ports=[Port(portid=21, service="ftp",
+                 product="vsftpd", version="2.3.4")],
+                 vulns=[Vuln(ip="10.0.20.6", port=21, protocol="tcp",
+                             script_id="version-db", title="vsftpd 2.3.4 backdoor",
+                             severity="critical", source="version-db",
+                             ids=["CVE-2011-2523"])],
+                 exploits=[Exploit(ip="10.0.20.6", port=21, edb_id="17491",
+                                   title="vsftpd 2.3.4 backdoor")])
+        f = group_findings([h])[0]
+        self.assertIn("17491", " ".join(_walkthrough_steps(f)))
+
+    def test_combined_report(self):
+        from recce.report_docx import build_combined
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "combined.docx")
+            res = build_combined(self._hosts(), out, title="Test Engagement")
+            self.assertEqual(res["total"], 2)
+            text, parts = _docx_text(out)
+            import zipfile
+            with zipfile.ZipFile(out) as z:
+                body = z.read("word/document.xml").decode()
+            self.assertIn("<w:tbl>", body)              # has tables
+            self.assertIn("Test Engagement", text)      # title
+            self.assertIn("Summary", text)
+            self.assertIn("F-001", text)                # findings numbered
+            self.assertIn("vsftpd 2.3.4 backdoor", text)
+
     def test_screenshot_url_classification(self):
         from recce import screenshot
         self.assertTrue(screenshot._web_url(Port(portid=443, service="https")))
