@@ -118,6 +118,13 @@ class Store:
         # Host-level scripts: dedup by id.
         hs_seen = {s.id for s in old.host_scripts}
         merged.host_scripts.extend(s for s in new.host_scripts if s.id not in hs_seen)
+        # Ingested on-target findings: dedup by (category, vector).
+        lf_seen = {(f.get("category"), f.get("vector")) for f in old.local_findings}
+        for f in new.local_findings:
+            k = (f.get("category"), f.get("vector"))
+            if k not in lf_seen:
+                lf_seen.add(k)
+                merged.local_findings.append(f)
         # Roles / ntlm / signing enrichment.
         merged.roles = sorted(set(old.roles) | set(new.roles))
         merged.ntlm = {**new.ntlm, **old.ntlm}

@@ -455,6 +455,9 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
                         reached that the user account did not.
     """
     issues: list[dict] = []
+    # Per-account authentication outcome, so the phase can print a loud
+    # success/fail table: label -> {"auth": bool, "admin": bool, "tried": bool}.
+    auth: dict[str, dict] = {}
 
     def note(phase, err):
         if err:
@@ -464,6 +467,9 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
     if _creds_ok(creds) and _smb_ports(host):
         data, err = run_nxc_smb(host.ip, creds)
         note("cred-smb", err)
+        auth["user"] = {"tried": True,
+                        "auth": bool(data and data.get("auth")),
+                        "admin": bool(data and data.get("admin"))}
         if data:
             _fold_nxc(host, data, label="user account")
     if _creds_ok(creds) and _is_dc(host):
@@ -476,6 +482,7 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
     if ssh and ssh.get("username") and _ssh_port(host):
         facts, err = run_ssh_local(host.ip, ssh)
         note("ssh-local", err)
+        auth["ssh"] = {"tried": True, "auth": bool(facts), "admin": False}
         if facts:
             _fold_ssh(host, facts)
 
@@ -486,6 +493,9 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
     if _creds_ok(admin_creds) and _smb_ports(host):
         data, err = run_nxc_smb(host.ip, admin_creds)
         note("cred-smb-admin", err)
+        auth["admin"] = {"tried": True,
+                         "auth": bool(data and data.get("auth")),
+                         "admin": bool(data and data.get("admin"))}
         if data:
             _fold_nxc(host, data, label="privileged account", admin_only=True)
     if _creds_ok(dump_creds) and _smb_ports(host):
@@ -494,4 +504,4 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
         _fold_secrets(host, dumped, dump_creds.get("domain", ""))
 
     host.cred_enumerated = True
-    return issues
+    return issues, auth
