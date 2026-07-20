@@ -466,6 +466,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("vulns [targets]", "Phase 2: vuln-scan open ports (safe; --aggressive for more)."),
         ("db [targets]", "Database enumeration + vuln scan."),
         ("privesc [targets]", "Priv-esc playbook (+ --scan for remote checks)."),
+        ("credenum -u U -p P -d DOM", "Authenticated enum (netexec/impacket/ssh) "
+                                      "- shares, roasting, local admin, hashes."),
         ("status / report", "Show progress / rebuild this workbook from the datastore."),
     ]:
         sh.write([cmd, desc])

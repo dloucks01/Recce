@@ -415,6 +415,90 @@ class WeakConfigFindingTest(unittest.TestCase):
         self.assertEqual(v.severity, "critical")
 
 
+class CredEnumTest(unittest.TestCase):
+    NXC = (
+        r"SMB  10.0.0.10  445  DC01  [*] Windows Server 2019 Build 17763 "
+        r"(name:DC01) (domain:corp.local) (signing:True)" "\n"
+        r"SMB  10.0.0.10  445  DC01  [+] corp.local\admin:Pw (Pwn3d!)" "\n"
+        r"SMB  10.0.0.10  445  DC01  [*] Enumerated shares" "\n"
+        r"SMB  10.0.0.10  445  DC01  Share    Permissions   Remark" "\n"
+        r"SMB  10.0.0.10  445  DC01  -----    -----------   ------" "\n"
+        r"SMB  10.0.0.10  445  DC01  ADMIN$   READ,WRITE    Remote Admin" "\n"
+        r"SMB  10.0.0.10  445  DC01  [*] Enumerated domain user(s)" "\n"
+        r"SMB  10.0.0.10  445  DC01  corp.local\Administrator  badpwdcount: 0" "\n"
+        r"SMB  10.0.0.10  445  DC01  [+] Dumping password info for domain: CORP" "\n"
+        r"SMB  10.0.0.10  445  DC01  Account lockout threshold: None"
+    )
+
+    def test_parse_nxc_smb(self):
+        from recce import credenum as c
+        d = c.parse_nxc_smb(self.NXC)
+        self.assertTrue(d["admin"])
+        self.assertIn("ADMIN$", [s["name"] for s in d["shares"]])
+        self.assertIn("Administrator", [u["name"] for u in d["users"]])
+        self.assertEqual(d["passpol"]["account lockout threshold"], "none")
+
+    def test_parse_roasting(self):
+        from recce import credenum as c
+        spns = c.parse_getuserspns(
+            "MSSQL/dc.corp.local  sqlsvc  Domain Users  2020\n"
+            "$krb5tgs$23$*sqlsvc$CORP.LOCAL$MSSQL*$deadbeef")
+        self.assertEqual(spns[0]["name"], "sqlsvc")
+        self.assertTrue(spns[0]["hash"].startswith("$krb5tgs$"))
+        asrep = c.parse_getnpusers("$krb5asrep$23$svc-web@CORP.LOCAL:abcd")
+        self.assertEqual(asrep[0]["name"], "svc-web")
+
+    def test_parse_secretsdump_and_ssh(self):
+        from recce import credenum as c
+        sd = c.parse_secretsdump(
+            "Administrator:500:aad3b435b51404eeaad3b435b51404ee:"
+            "31d6cfe0d16ae931b73c59d7e0c089c0:::")
+        self.assertEqual(sd[0]["name"], "Administrator")
+        self.assertEqual(sd[0]["nt"], "31d6cfe0d16ae931b73c59d7e0c089c0")
+        ssh = c.parse_ssh_enum(
+            "===ID===\nuid=0(root)\n===SUDO===\n(ALL) NOPASSWD: ALL\n"
+            "===SUID===\n/usr/bin/find\n/usr/bin/sudo")
+        self.assertIn("uid=0(root)", ssh["id"])
+        self.assertTrue(ssh["sudo"])
+        self.assertIn("/usr/bin/find", ssh["suid"])
+
+    def test_fold_into_host_and_quickwins(self):
+        from recce import credenum as c
+        d = c.parse_nxc_smb(self.NXC)
+        h = Host(ip="10.0.0.10", os_family="Windows", roles=["Domain Controller"],
+                 ports=[Port(portid=445, state="open"),
+                        Port(portid=389, state="open")])
+        c._fold_nxc(h, d)
+        c._fold_roast(h, [{"name": "sqlsvc", "spn": "MSSQL/dc", "hash": "$krb5tgs$x"}],
+                      [{"name": "svc-web", "hash": "$krb5asrep$x"}], "corp.local")
+        srcs = {a.source for a in h.accounts}
+        self.assertEqual(srcs, {"netexec", "impacket"})
+        titles = [v.title for v in h.vulns]
+        self.assertTrue(any("Local admin" in t for t in titles))
+        # Roasted accounts flow into the AD quick-wins.
+        self.assertIn("sqlsvc", [a.name for a in ad.kerberoastable([h])])
+        self.assertIn("svc-web", [a.name for a in ad.asrep_roastable([h])])
+
+    def test_ssh_finding_and_facts_recorded(self):
+        from recce import credenum as c
+        h = Host(ip="10.0.0.5", ports=[Port(portid=22, state="open")])
+        c._fold_ssh(h, {"id": "uid=0(root)", "kernel": "Linux 5.4", "os": "Ubuntu",
+                        "sudo": ["(ALL) NOPASSWD: ALL"], "suid": ["/opt/weird"]})
+        self.assertTrue(any(s.id == "ssh-local-enum" for s in h.host_scripts))
+        titles = [v.title for v in h.vulns]
+        self.assertTrue(any("Sudo" in t for t in titles))
+        self.assertTrue(any("SUID" in t for t in titles))
+
+    def test_tool_gating_no_crash_when_absent(self):
+        # With no external tools present, runners return (None/[], None) - no raise.
+        from recce import credenum as c
+        h = Host(ip="10.0.0.9", os_family="Windows",
+                 ports=[Port(portid=445, state="open")])
+        issues = c.enrich_host(h, {"username": "u", "password": "p"}, None)
+        self.assertTrue(h.cred_enumerated)
+        self.assertIsInstance(issues, list)
+
+
 class ScanHardeningTest(unittest.TestCase):
     def test_timeout_and_version_args(self):
         p = scanner.PROFILES["standard"]
@@ -992,6 +1076,7 @@ class CliSmokeTest(unittest.TestCase):
         # Parse a representative invocation of each command without executing.
         for argv in (["enum", "10.0.0.1", "-y"], ["vulns", "10.0.0.0/24"],
                      ["db", "-o", "x"], ["privesc", "--scan"], ["scan", "10.0.0.1"],
+                     ["credenum", "-u", "a", "-p", "b", "-d", "corp.local"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
                      ["demo"], ["doctor", "--no-self-scan"]):
             ns = p.parse_args(argv)
