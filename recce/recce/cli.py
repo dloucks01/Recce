@@ -25,7 +25,7 @@ from . import parser as np
 from . import scanner
 from . import tracking as tr
 from .models import Host
-from .report_excel import read_workbook_tracking, update_workbook
+from .report_excel import read_workbook_edits, update_workbook
 from .report_markdown import build_csv, build_markdown
 from .store import Store
 from .targets import apply_exclusions, ip_matcher, load_targets
@@ -119,13 +119,24 @@ def _import_excel_tracking(store: Store, paths: dict[str, str],
     workbook can lag the tool's fresh progress and would look like manual edits."""
     if not os.path.exists(paths["xlsx"]):
         return
-    edits = read_workbook_tracking(paths["xlsx"])
+    edits, statuses = read_workbook_edits(paths["xlsx"])
     if not edits:
         return
     step_edits = {k: v for k, v in edits.items() if k.startswith("step:")}
-    non_step = {k: v for k, v in edits.items() if not k.startswith("step:")}
-    if non_step:
-        store.bulk_set_tracking(non_step)
+    plain: dict = {}
+    status_items: dict = {}
+    for k, (rev, note) in edits.items():
+        if k.startswith("step:"):
+            continue
+        if k in statuses:
+            # Per-port tri-state: persist the status + derived reviewed + notes.
+            status_items[k] = (statuses[k], rev, note)
+        else:
+            plain[k] = (rev, note)
+    if plain:
+        store.bulk_set_tracking(plain)
+    if status_items:
+        store.bulk_set_status(status_items)
     if reconcile_steps and step_edits:
         _reconcile_steps(store, step_edits)
 
@@ -153,7 +164,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     tracking = store.get_tracking()
     domains = _resolve_domains(store, hosts)
     update_workbook(paths["xlsx"], hosts, meta={"subtitle": title},
-                    domains=domains, tracking=tracking, scope=store.get_scope())
+                    domains=domains, tracking=tracking, scope=store.get_scope(),
+                    statuses=store.get_statuses())
     build_markdown(hosts, paths["md"], title=title, domains=domains)
     build_csv(hosts, paths["csv"])
     if not quiet:

@@ -225,6 +225,93 @@ class TrackingRoundTripTest(unittest.TestCase):
         self.assertFalse(back[tr.host_key("10.0.20.6")][0])
 
 
+class PortStatusTest(unittest.TestCase):
+    """Per-port tri-state work status on the Services sheet."""
+
+    def _host(self):
+        return Host(ip="10.0.0.5", subnet="10.0.0.0/24", enumerated=True,
+                    ports=[Port(portid=80, service="http", state="open"),
+                           Port(portid=443, service="https", state="open")])
+
+    def test_services_sheet_has_status_column_and_dropdown(self):
+        from recce.report_excel import (build_workbook, STATUS_VALUES,
+                                         STATUS_TODO)
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([self._host()], out)
+            rows = xlsx.read_sheets(out)["Services"]
+            hdr = rows[0]
+            self.assertIn("Status", hdr)
+            self.assertIn("Notes", hdr)
+            si = hdr.index("Status")
+            # Every port row defaults to "Not started".
+            for r in rows[1:]:
+                self.assertEqual(r[si], STATUS_TODO)
+            # The dropdown offers all three states (find the sheet whose
+            # data-validation lists them, not merely any sheet mentioning them).
+            import zipfile
+            listing = ",".join(STATUS_VALUES)
+            with zipfile.ZipFile(out) as z:
+                xmls = [z.read(n).decode() for n in z.namelist()
+                        if "worksheets/sheet" in n]
+            self.assertTrue(any(f'<formula1>"{listing}"</formula1>' in x
+                                for x in xmls),
+                            "Services Status dropdown not found")
+
+    def test_status_roundtrip_and_reviewed_mapping(self):
+        from recce.report_excel import (build_workbook, read_workbook_edits,
+                                         STATUS_WIP, STATUS_DONE)
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(os.path.join(d, "t.sqlite"))
+            store.upsert_host(self._host())
+            paths = {"xlsx": os.path.join(d, "wb.xlsx")}
+            k80 = tr.svc_key("10.0.0.5", "tcp", 80)
+            k443 = tr.svc_key("10.0.0.5", "tcp", 443)
+            # Persist an in-progress port and a done port.
+            store.bulk_set_status({k80: (STATUS_WIP, False, "poking at it"),
+                                   k443: (STATUS_DONE, True, "")})
+            # Regenerate from the store, then read the sheet back.
+            build_workbook(store.all_hosts(), paths["xlsx"],
+                           tracking=store.get_tracking(),
+                           statuses=store.get_statuses())
+            edits, statuses = read_workbook_edits(paths["xlsx"])
+            self.assertEqual(statuses[k80], STATUS_WIP)
+            self.assertEqual(statuses[k443], STATUS_DONE)
+            # In-progress is not "reviewed"; done is.
+            self.assertFalse(edits[k80][0])
+            self.assertTrue(edits[k443][0])
+            self.assertEqual(edits[k80][1], "poking at it")
+            # Coverage counts only the done port.
+            cov = tr.compute_coverage(store.all_hosts(), store.get_tracking())
+            self.assertEqual(cov["services"]["done"], 1)
+            store.close()
+
+    def test_status_column_not_misread_as_checkbox(self):
+        # The Status column sits at index 0 (where a checkbox used to be); a
+        # "Not started" cell must not be read as reviewed=True.
+        from recce.report_excel import build_workbook, read_workbook_edits
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([self._host()], out)
+            edits, _ = read_workbook_edits(out)
+            self.assertFalse(edits[tr.svc_key("10.0.0.5", "tcp", 80)][0])
+
+    def test_status_survives_store_migration(self):
+        # A datastore created before the status column still gains it.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "old.sqlite")
+            import sqlite3
+            con = sqlite3.connect(path)
+            con.executescript(
+                "CREATE TABLE tracking (key TEXT PRIMARY KEY, reviewed INTEGER "
+                "DEFAULT 0, notes TEXT DEFAULT '', updated TEXT DEFAULT '');")
+            con.commit(); con.close()
+            store = Store(path)   # __init__ migrates
+            store.bulk_set_status({"svc:x": ("◐ In progress", False, "")})
+            self.assertEqual(store.get_statuses()["svc:x"], "◐ In progress")
+            store.close()
+
+
 class InPlaceUpdateTest(unittest.TestCase):
     def _hosts(self, ips):
         out = []
@@ -722,6 +809,15 @@ class StepCheckboxTest(unittest.TestCase):
         self.assertFalse(tr.step_applies(win, "privesc"))
         win.privesc_checked = True
         self.assertTrue(tr.step_applies(win, "privesc"))
+
+    def test_smbad_is_manual_signoff(self):
+        # SMB/AD applies to a domain host but never auto-checks - it's a manual
+        # review sign-off, so it starts unchecked even after enumeration.
+        win = Host(ip="10.0.0.8", os_family="Windows", enumerated=True,
+                   roles=["Domain Controller"],
+                   ports=[Port(portid=445, service="microsoft-ds")])
+        self.assertTrue(tr.step_applies(win, "smbad"))
+        self.assertFalse(tr.step_auto(win, "smbad"))
 
     def test_web_step_auto_done_when_web_ports_scanned(self):
         h = Host(ip="10.0.0.9", enumerated=True,

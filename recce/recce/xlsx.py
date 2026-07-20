@@ -72,7 +72,7 @@ STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
 </cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-<dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf></dxfs>
+<dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFEB9C"/></patternFill></fill></dxf></dxfs>
 </styleSheet>"""
 
 _CONTENT_TYPES = (
@@ -110,8 +110,8 @@ class Sheet:
         self.hidden_cols: set[int] = set()
         self.freeze_header = False
         self.autofilter_cols = 0
-        self._dv_ranges: list[str] = []       # sqref strings for TRUE/FALSE dropdown
-        self._cf_ranges: list[str] = []       # sqref strings for green-when-TRUE
+        self._dv_rules: list[tuple[str, str]] = []   # (sqref, comma-joined list values)
+        self._cf_rules: list[tuple[str, str, int]] = []  # (sqref, equals-value, dxfId)
 
     def write(self, cells: list) -> None:
         """Append a row. Each cell is a value or a (value, style_name) tuple."""
@@ -129,25 +129,36 @@ class Sheet:
         if hidden:
             self.hidden_cols.add(idx)
 
-    def dropdown(self, col_idx: int, first_row: int, last_row: int,
-                 sqref: str | None = None) -> None:
+    def _resolve_sqref(self, col_idx: int, first_row: int, last_row: int,
+                       sqref: str | None) -> str | None:
         # `sqref` (a space-separated cell/range list) overrides the contiguous
-        # range - used to skip N/A cells that must not get the ☑/☐ validation.
+        # range - used to skip N/A cells that must not get list validation.
         if sqref is not None:
-            if sqref:
-                self._dv_ranges.append(sqref)
-        elif last_row >= first_row:
+            return sqref or None
+        if last_row >= first_row:
             letter = col_letter(col_idx)
-            self._dv_ranges.append(f"{letter}{first_row}:{letter}{last_row}")
+            return f"{letter}{first_row}:{letter}{last_row}"
+        return None
+
+    def dropdown(self, col_idx: int, first_row: int, last_row: int,
+                 sqref: str | None = None, values: list[str] | None = None) -> None:
+        """Attach a list-validation. Defaults to the ☑/☐ pair; pass `values` for a
+        multi-state dropdown (e.g. a not-started / in-progress / done status)."""
+        ref = self._resolve_sqref(col_idx, first_row, last_row, sqref)
+        if ref:
+            self._dv_rules.append((ref, ",".join(values or [CHECK_OFF, CHECK_ON])))
+
+    def highlight_when_equal(self, col_idx: int, first_row: int, last_row: int,
+                             value: str, dxf_id: int = 0,
+                             sqref: str | None = None) -> None:
+        """Conditional fill when a cell equals `value` (dxf_id: 0=green, 1=amber)."""
+        ref = self._resolve_sqref(col_idx, first_row, last_row, sqref)
+        if ref:
+            self._cf_rules.append((ref, value, dxf_id))
 
     def green_when_true(self, col_idx: int, first_row: int, last_row: int,
                         sqref: str | None = None) -> None:
-        if sqref is not None:
-            if sqref:
-                self._cf_ranges.append(sqref)
-        elif last_row >= first_row:
-            letter = col_letter(col_idx)
-            self._cf_ranges.append(f"{letter}{first_row}:{letter}{last_row}")
+        self.highlight_when_equal(col_idx, first_row, last_row, CHECK_ON, 0, sqref)
 
     @property
     def nrows(self) -> int:
@@ -202,19 +213,19 @@ class Sheet:
             autofilter = f'<autoFilter ref="A1:{col_letter(self.autofilter_cols)}1"/>'
 
         cf = ""
-        for sq in self._cf_ranges:
+        for i, (sq, value, dxf_id) in enumerate(self._cf_rules):
             cf += (f'<conditionalFormatting sqref="{sq}">'
-                   f'<cfRule type="cellIs" dxfId="0" priority="1" operator="equal">'
-                   f'<formula>"{CHECK_ON}"</formula></cfRule></conditionalFormatting>')
+                   f'<cfRule type="cellIs" dxfId="{dxf_id}" priority="{i + 1}" operator="equal">'
+                   f'<formula>"{value}"</formula></cfRule></conditionalFormatting>')
 
         dv = ""
-        if self._dv_ranges:
+        if self._dv_rules:
             body = ""
-            for sq in self._dv_ranges:
+            for sq, values in self._dv_rules:
                 body += (f'<dataValidation type="list" allowBlank="1" showInputMessage="1" '
-                         f'showErrorMessage="1" sqref="{sq}"><formula1>"{CHECK_OFF},{CHECK_ON}"</formula1>'
+                         f'showErrorMessage="1" sqref="{sq}"><formula1>"{values}"</formula1>'
                          f'</dataValidation>')
-            dv = f'<dataValidations count="{len(self._dv_ranges)}">{body}</dataValidations>'
+            dv = f'<dataValidations count="{len(self._dv_rules)}">{body}</dataValidations>'
 
         return (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'

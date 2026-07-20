@@ -137,14 +137,16 @@ the step actually applies to the host:**
     host has no open ports).
   - **Web** — only on hosts serving HTTP/HTTPS.
   - **SMB/AD** — only on Windows / domain-facing hosts (SMB/LDAP/Kerberos or a
-    discovered role). A plain Linux box never shows an AD box.
+    discovered role). A plain Linux box never shows an AD box. This one is a
+    **manual sign-off** — it starts unchecked and you tick it once you've actually
+    reviewed users/shares/roasting/relay (the tool can't know when you're done).
   - **DB** — only on hosts running a database.
   - **Priv-esc** — appears once you've run the `privesc` phase against the host
     (i.e. you have a foothold to escalate from); `—` until then, so it isn't a
     column of permanently-empty boxes.
-- Each **auto-checks (turns green)** when the tool completes that step — `enum`
-  ticks Enumerated and SMB/AD, `vulns` ticks Vuln-scan/Web once the relevant
-  ports are scanned, `db` ticks DB, `privesc` ticks Priv-esc.
+- Each (except the manual SMB/AD box) **auto-checks (turns green)** when the tool
+  completes that step — `enum` ticks Enumerated, `vulns` ticks Vuln-scan/Web once
+  the relevant ports are scanned, `db` ticks DB, `privesc` ticks Priv-esc.
 - You can **tick or untick any real box by hand** — mark a step you did manually,
   or untick one to flag "redo." Your manual choice **persists and overrides the
   tool** on later report refreshes.
@@ -162,6 +164,26 @@ guarantee no subnet — or surface — is missed.
 
 The **Reviewed** checkbox is your per-host sign-off (ticking it here or on the
 Hosts tab both count). `status` prints per-step completion counts.
+
+### The Services tab — per-port status
+
+The Checklist tracks whole hosts; the **Services** tab tracks **each open port**.
+One row per `IP:port`, grouped by IP, each with its own **tri-state Status**
+dropdown so you can mark exactly where you are on that specific port:
+
+| Status | IP | Port | Service | Product | … | Notes |
+|---|---|---|---|---|---|---|
+| ☑ Done | 10.0.20.5 | 80 | http | Apache 2.4.41 | | creds found, admin panel |
+| ◐ In progress | 10.0.20.5 | 443 | https | | | testing TLS + login |
+| ☐ Not started | 10.0.20.5 | 22 | ssh | OpenSSH 8.2 | | |
+
+- Pick **☐ Not started / ◐ In progress / ☑ Done** from the dropdown on each port.
+  Done rows turn **green**, In-progress rows **amber**, so a host's remaining work
+  is obvious at a glance.
+- Every port has its own **Notes** cell for findings, creds, payloads, next steps.
+- Your status + notes **persist in the datastore** and survive every rescan and
+  report rebuild, exactly like the checklist boxes. Filter `Status = ☐ Not
+  started` to see every port nobody has touched yet.
 
 > Because the tool rewrites the sheet, "manual wins" works by recording a step
 > override only when your box differs from the tool's current state — so re-tick a
