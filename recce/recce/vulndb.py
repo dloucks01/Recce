@@ -649,6 +649,93 @@ SIGNATURES: list[dict] = [
                     "(15672).",
      "desc": "RabbitMQ's default guest/guest account (management UI on 15672) exposes "
              "queues and often the application credentials passing through them."},
+
+    # === Edge / VPN / firewall appliances (heavily targeted, mass-exploited) ====
+    {"product": ["ivanti", "connect secure", "pulse connect"], "severity": "critical",
+     "advisory": True,
+     "title": "Ivanti Connect Secure exposed - auth-bypass + command-injection chain",
+     "cves": ["CVE-2023-46805", "CVE-2024-21887", "CVE-2024-21893"],
+     "cwe": ["CWE-287", "CWE-77"],
+     "remediation": "Patch Ivanti Connect Secure; run the Integrity Checker; rotate "
+                    "all secrets and assume compromise if it was unpatched.",
+     "desc": "Ivanti Connect Secure (formerly Pulse) had a mass-exploited pre-auth "
+             "chain: authentication bypass (CVE-2023-46805) + command injection "
+             "(CVE-2024-21887) = unauthenticated RCE, plus SSRF (CVE-2024-21893)."},
+    {"product": ["sonicwall"], "severity": "critical", "advisory": True,
+     "title": "SonicWall SSL-VPN / SMA exposed - access control / SQLi",
+     "cves": ["CVE-2024-40766", "CVE-2021-20016", "CVE-2023-0656"],
+     "cwe": ["CWE-284", "CWE-89"],
+     "remediation": "Patch SonicOS/SMA; rotate VPN credentials; restrict management "
+                    "exposure.",
+     "desc": "SonicWall SSL-VPN has an improper-access-control flaw (CVE-2024-40766, "
+             "exploited by Akira ransomware) and SMA100 pre-auth SQLi "
+             "(CVE-2021-20016). Confirm firmware and assume credential theft."},
+    {"product": ["big-ip", "bigip", "f5 big-ip"], "severity": "critical",
+     "advisory": True,
+     "title": "F5 BIG-IP exposed - TMUI / iControl REST auth-bypass RCE",
+     "cves": ["CVE-2020-5902", "CVE-2022-1388", "CVE-2023-46747"],
+     "cwe": ["CWE-22", "CWE-288"],
+     "remediation": "Patch BIG-IP; never expose TMUI / the management interface; "
+                    "restrict iControl REST.",
+     "desc": "BIG-IP has pre-auth RCE via the TMUI config utility (CVE-2020-5902) and "
+             "iControl REST authentication bypass (CVE-2022-1388, CVE-2023-46747) - "
+             "full device compromise."},
+    {"product": ["cisco asa", "cisco adaptive security", "cisco anyconnect"],
+     "severity": "critical", "advisory": True,
+     "title": "Cisco ASA/AnyConnect exposed - file disclosure / WebVPN RCE",
+     "cves": ["CVE-2020-3452", "CVE-2018-0101", "CVE-2023-20269"],
+     "cwe": ["CWE-22", "CWE-787"],
+     "remediation": "Patch ASA/FTD; restrict WebVPN exposure; enforce MFA on remote "
+                    "access.",
+     "desc": "Cisco ASA WebVPN has unauth path-traversal file disclosure "
+             "(CVE-2020-3452), historic pre-auth RCE (CVE-2018-0101), and a "
+             "remote-access brute-force flaw (CVE-2023-20269)."},
+    {"product": ["cisco smart install", "smart install"], "severity": "critical",
+     "advisory": True,
+     "title": "Cisco Smart Install exposed - unauth config theft / RCE",
+     "cves": ["CVE-2018-0171"], "cwe": ["CWE-306", "CWE-863"],
+     "remediation": "Disable Smart Install ('no vstack'); firewall 4786/tcp.",
+     "desc": "Smart Install (4786/tcp) accepts unauthenticated commands - config "
+             "download (credentials), config replacement, and RCE (CVE-2018-0171). "
+             "Trivially abused with SIET."},
+    {"product": ["mikrotik", "routeros", "winbox"], "severity": "high",
+     "advisory": True,
+     "title": "MikroTik RouterOS exposed - Winbox credential disclosure / privesc",
+     "cves": ["CVE-2018-14847", "CVE-2023-30799"], "cwe": ["CWE-22", "CWE-798"],
+     "remediation": "Upgrade RouterOS; restrict Winbox (8291) and the API; change "
+                    "default admin credentials.",
+     "desc": "Winbox (8291) path traversal (CVE-2018-14847) reads the credential DB "
+             "unauthenticated; RouterOS also has admin-to-super-admin privesc "
+             "(CVE-2023-30799). Router compromise enables traffic interception."},
+    {"product": ["zyxel"], "severity": "critical", "advisory": True,
+     "title": "Zyxel firewall/VPN exposed - unauth command injection / RCE",
+     "cves": ["CVE-2022-30525", "CVE-2023-28771"], "cwe": ["CWE-77", "CWE-78"],
+     "remediation": "Patch Zyxel firmware; restrict WAN management and IKE exposure.",
+     "desc": "Zyxel ZyWALL/USG/ATP have unauthenticated OS command injection "
+             "(CVE-2022-30525) and an unauth IKE RCE (CVE-2023-28771) - both "
+             "mass-exploited into botnets."},
+    {"product": ["draytek", "vigor"], "severity": "critical", "advisory": True,
+     "title": "DrayTek Vigor exposed - unauthenticated RCE",
+     "cves": ["CVE-2020-8515", "CVE-2024-41592"], "cwe": ["CWE-78", "CWE-120"],
+     "remediation": "Patch Vigor firmware; disable remote management; restrict WAN "
+                    "access.",
+     "desc": "DrayTek Vigor routers have unauthenticated RCE via the web management "
+             "interface (CVE-2020-8515) and buffer overflows (CVE-2024-41592)."},
+    {"product": ["sophos"], "severity": "critical", "advisory": True,
+     "title": "Sophos Firewall exposed - auth-bypass RCE / SQLi",
+     "cves": ["CVE-2022-1040", "CVE-2020-12271"], "cwe": ["CWE-287", "CWE-89"],
+     "remediation": "Patch Sophos Firewall; restrict the user/admin portal exposure.",
+     "desc": "Sophos Firewall has an authentication-bypass RCE in the User Portal/"
+             "Webadmin (CVE-2022-1040) and a pre-auth SQLi (CVE-2020-12271) used to "
+             "steal credentials (Asnarok)."},
+    {"product": ["barracuda"], "severity": "critical", "advisory": True,
+     "title": "Barracuda Email Security Gateway exposed - RCE (CVE-2023-2868)",
+     "cves": ["CVE-2023-2868"], "cwe": ["CWE-77"],
+     "remediation": "Replace the appliance per vendor guidance (patching was deemed "
+                    "insufficient); investigate for compromise.",
+     "desc": "The Barracuda ESG had a remote command-injection (CVE-2023-2868) "
+             "exploited for months by a state actor; the vendor advised full "
+             "appliance replacement, not just patching."},
 ]
 
 
