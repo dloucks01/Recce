@@ -1402,6 +1402,32 @@ class ProgressAndAuthTest(unittest.TestCase):
 
 
 class StoreFixesTest(unittest.TestCase):
+    def test_corrupt_db_raises_storeerror(self):
+        from recce.store import Store, StoreError
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "results.sqlite")
+            with open(p, "w") as fh:
+                fh.write("not a sqlite database, just garbage")
+            with self.assertRaises(StoreError):
+                Store(p)
+
+    def test_corrupt_db_gives_clean_message_not_traceback(self):
+        # A carried-over corrupt DB on `report`/`status` must exit 1 with a clean
+        # message, never a raw traceback (the "first command after transfer" case).
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "raw"), exist_ok=True)
+            with open(os.path.join(d, "results.sqlite"), "w") as fh:
+                fh.write("garbage, not a database")
+            for command in ("report", "status"):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main([command, "-o", d])
+                self.assertEqual(rc, 1, command)
+                out = buf.getvalue()
+                self.assertIn("corrupt or unreadable", out)
+                self.assertNotIn("Traceback", out)
+
     def test_distance_preserved_through_merge(self):
         from recce.store import Store
         with tempfile.TemporaryDirectory() as d:

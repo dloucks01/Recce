@@ -85,6 +85,17 @@ def _ports_for_host(xml_path: str, ip: str) -> list[int]:
     return []
 
 
+def _open_store(db_path: str):
+    """Open the datastore, turning a corrupt/unreadable DB (StoreError) into a
+    clean actionable message + None instead of a traceback. Used by the commands
+    that open an existing engagement directly (report/status/writeups/...)."""
+    try:
+        return Store(db_path)
+    except StoreError as e:
+        print(f"[x] {e}")
+        return None
+
+
 def _open_paths(out_dir: str) -> dict[str, str]:
     raw = os.path.join(out_dir, "raw")
     os.makedirs(raw, exist_ok=True)
@@ -1001,7 +1012,9 @@ def cmd_writeups(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns` first.")
         return 1
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)   # honour any Excel edits first
     hosts = _selected_hosts(store.all_hosts(), args)
     out_dir = os.path.join(args.output_dir, "writeups")
@@ -1267,7 +1280,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     source = os.path.basename(args.loot)
     new_rows = ingest.to_local_findings(parsed, source)
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)
     host, existed = _resolve_ingest_host(store, parsed, args)
     # Merge, de-duplicating against anything already ingested for this host AND
@@ -1311,7 +1326,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}")
         return 1
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)  # honor Excel edits before regenerating
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
@@ -1324,7 +1341,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}")
         return 1
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)  # pick up latest Excel edits
     tracking = store.get_tracking()
     hosts = store.all_hosts()
@@ -1443,7 +1462,9 @@ def cmd_review(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}")
         return 1
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)  # capture pending Excel edits first
     reviewed = not args.undo
     keys: list[str] = []
@@ -1479,7 +1500,9 @@ def cmd_demo(args: argparse.Namespace) -> int:
         print("[x] Sample XML missing.")
         return 1
     paths = _open_paths(args.output_dir)
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     store.set_meta("engagement", "DEMO engagement")
     store.set_scope("10.0.10.0/24", 254)   # demo scope: three /24s
     store.set_scope("10.0.20.0/24", 254)
