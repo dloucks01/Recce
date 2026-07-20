@@ -348,7 +348,8 @@ def _merge_vuln_results(host: Host, parsed_list) -> None:
                 op.version = op.version or np_.version
 
 
-def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss) -> Host:
+def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
+                 use_probes=True) -> Host:
     ip = host.ip
     if portids:
         vx = os.path.join(paths["raw"], f"{ip}_vuln.xml")
@@ -366,6 +367,9 @@ def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss) -> Ho
     ad.parse_signing_and_ntlm(host)
     from . import vulndb
     vulndb.assess_host_inplace(host)   # offline version->CVE findings
+    if use_probes:
+        from . import probes
+        probes.probe_host(host)        # stdlib HTTP-header + TLS analysis
     if use_ss:
         exploits.enrich_hosts([host])
     return host
@@ -401,6 +405,7 @@ def _phase_vulns(store, paths, args, profile) -> None:
     creds = _creds_of(args)
     aggressive = getattr(args, "aggressive", False)
     use_ss = not getattr(args, "no_searchsploit", False) and exploits.available()
+    use_probes = not getattr(args, "no_probes", False)
     if not getattr(args, "no_searchsploit", False) and not exploits.available():
         print("[!] searchsploit not found; skipping exploit mapping "
               "(apt install exploitdb).")
@@ -409,7 +414,8 @@ def _phase_vulns(store, paths, args, profile) -> None:
     mode = "AGGRESSIVE (intrusive vuln category)" if aggressive else \
         "safe (vuln+safe detection only)"
     print(f"[*] Vuln-scan mode: {mode}"
-          f"{' + searchsploit' if use_ss else ''}.")
+          f"{' + searchsploit' if use_ss else ''}"
+          f"{' + http/tls probes' if use_probes else ''}.")
 
     targets = _vuln_targets(store.all_hosts(), args)
     if not targets:
@@ -423,7 +429,8 @@ def _phase_vulns(store, paths, args, profile) -> None:
     refresher = _Refresher(args)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_vuln_worker, h, ports, profile, paths, creds,
-                             aggressive, use_ss): h.ip for h, ports in targets}
+                             aggressive, use_ss, use_probes): h.ip
+                   for h, ports in targets}
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
@@ -1054,6 +1061,8 @@ def _add_vuln_opts(pp) -> None:
                     help="airgapped: disable internet-dependent NSE (vulners)")
     pp.add_argument("--no-searchsploit", action="store_true",
                     help="skip offline exploit mapping via searchsploit")
+    pp.add_argument("--no-probes", action="store_true",
+                    help="skip the stdlib HTTP-header / TLS enrichment probes")
     pp.add_argument("--udp-top", type=int, help="also scan top-N UDP ports")
 
 

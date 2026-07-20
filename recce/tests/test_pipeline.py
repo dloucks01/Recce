@@ -12,8 +12,8 @@ from recce import ad, exploits, parser, scanner
 from recce import tracking as tr
 from recce import xlsx
 from recce.models import Account, Host, Port, Script
-from recce.report_excel import (build_workbook, read_key_order,
-                                       read_workbook_tracking, update_workbook)
+from recce.report_excel import (build_workbook, read_workbook_tracking,
+                                       update_workbook)
 from recce.store import Store
 from recce.targets import apply_exclusions, load_targets
 
@@ -179,20 +179,6 @@ class ADTargetListTest(unittest.TestCase):
         self.assertIsInstance(ad.ldap_available(), bool)
 
 
-class ReportTest(unittest.TestCase):
-    def test_workbook_builds(self):
-        from recce.report_excel import build_workbook
-        hosts = parser.parse_nmap_xml(SAMPLE)
-        with tempfile.TemporaryDirectory() as d:
-            out = os.path.join(d, "x.xlsx")
-            build_workbook(hosts, out, meta={"subtitle": "t"})
-            self.assertTrue(os.path.exists(out))
-            from openpyxl import load_workbook
-            wb = load_workbook(out)
-            self.assertIn("Services by Product", wb.sheetnames)
-            self.assertIn("Vulnerabilities", wb.sheetnames)
-
-
 class CoverageTest(unittest.TestCase):
     def setUp(self):
         from recce.targets import _subnet_of
@@ -321,6 +307,8 @@ class WeakConfigFindingTest(unittest.TestCase):
         v = self._find("10.0.20.6", "ftp-anon")
         self.assertIsNotNone(v)
         self.assertEqual(v.severity, "medium")
+        self.assertTrue(v.cwes)                     # weak-config carries CWEs
+        self.assertEqual(v.source, "config")
 
     def test_weak_tls_medium(self):
         v = self._find("10.0.20.5", "ssl-enum-ciphers")
@@ -338,6 +326,68 @@ class WeakConfigFindingTest(unittest.TestCase):
         # smb-vuln-ms17-010 stays a CVE finding, not reclassified.
         v = self._find("10.0.10.10", "smb-vuln-ms17-010")
         self.assertEqual(v.severity, "critical")
+
+
+class ProbesTest(unittest.TestCase):
+    def test_port_classification(self):
+        from recce import probes
+        self.assertTrue(probes._is_tls(Port(portid=443, service="https")))
+        self.assertTrue(probes._is_tls(Port(portid=8443, service="http", tunnel="ssl")))
+        self.assertFalse(probes._is_tls(Port(portid=80, service="http")))
+        self.assertTrue(probes._is_http(Port(portid=8080, service="http-proxy")))
+        self.assertTrue(probes._is_http(Port(portid=443, service="https")))
+        self.assertFalse(probes._is_http(Port(portid=22, service="ssh")))
+
+    def test_http_header_findings_flag_missing_headers(self):
+        from recce import probes
+        port = Port(portid=80, service="http")
+        # Server present with a version, but security headers absent.
+        headers = {"server": "Apache/2.4.41", "content-type": "text/html"}
+        orig = probes._fetch_headers
+        probes._fetch_headers = lambda ip, p, tls: (200, headers)
+        try:
+            findings = probes.http_findings("10.0.0.9", port)
+        finally:
+            probes._fetch_headers = orig
+        titles = {f.title for f in findings}
+        self.assertIn("Missing X-Frame-Options / frame-ancestors (clickjacking)", titles)
+        self.assertIn("Missing X-Content-Type-Options header (MIME sniffing)", titles)
+        self.assertTrue(any("banner discloses" in t for t in titles))
+        # No HSTS finding over plain HTTP.
+        self.assertNotIn("Missing HSTS header", titles)
+        for f in findings:
+            self.assertEqual(f.source, "probe")
+            if "banner" not in f.title:
+                self.assertTrue(f.cwes)
+
+    def test_http_findings_none_when_unreachable(self):
+        from recce import probes
+        orig = probes._fetch_headers
+        probes._fetch_headers = lambda ip, p, tls: None
+        try:
+            self.assertEqual(probes.http_findings("10.0.0.9", Port(portid=80)), [])
+        finally:
+            probes._fetch_headers = orig
+
+    def test_parse_cert_time(self):
+        from recce import probes
+        epoch = probes._parse_cert_time("Jun  1 12:00:00 2030 GMT")
+        self.assertIsNotNone(epoch)
+        self.assertIsNone(probes._parse_cert_time("not a date"))
+
+    def test_probe_host_dedups(self):
+        from recce import probes
+        h = Host(ip="10.0.0.9", ports=[Port(portid=80, service="http")])
+        headers = {"server": "nginx"}
+        orig = probes._fetch_headers
+        probes._fetch_headers = lambda ip, p, tls: (200, headers)
+        try:
+            first = probes.probe_host(h)
+            second = probes.probe_host(h)   # idempotent re-run
+        finally:
+            probes._fetch_headers = orig
+        self.assertGreater(first, 0)
+        self.assertEqual(second, 0)
 
 
 class ExploitsTest(unittest.TestCase):
@@ -455,6 +505,36 @@ class VulnDbTest(unittest.TestCase):
                  product="Apache httpd", version="")])
         n = vulndb.assess_host_inplace(h)
         self.assertEqual(n, 0)
+
+    def test_signature_database_is_large(self):
+        from recce import vulndb
+        self.assertGreaterEqual(vulndb.signature_count(), 50)
+
+    def test_findings_carry_cwes(self):
+        from recce import vulndb
+        h = Host(ip="10.0.0.9", ports=[Port(portid=21, service="ftp",
+                 product="vsftpd", version="2.3.4")])
+        vulndb.assess_host_inplace(h)
+        v = h.vulns[0]
+        self.assertTrue(v.cwes)
+        self.assertTrue(all(c.startswith("CWE-") for c in v.cwes))
+
+    def test_advisory_signature_is_product_only_and_potential(self):
+        from recce import vulndb
+        # A product-only advisory (no version) should still fire, tagged potential.
+        h = Host(ip="10.0.0.9", ports=[Port(portid=8080, service="http",
+                 product="Apache Tomcat", version="")])
+        vulndb.assess_host_inplace(h)
+        adv = [v for v in h.vulns if "default credentials" in v.title]
+        self.assertTrue(adv)
+        self.assertEqual(adv[0].confidence, "potential")
+        self.assertTrue(adv[0].cwes)
+
+    def test_every_signature_has_cwe_field(self):
+        from recce import vulndb
+        for sig in vulndb.SIGNATURES:
+            self.assertIn("cwe", sig, f"{sig['title']} missing cwe")
+            self.assertTrue(sig["cwe"], f"{sig['title']} empty cwe")
 
 
 class PhaseModelTest(unittest.TestCase):

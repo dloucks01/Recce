@@ -62,8 +62,9 @@ class Vuln:
     title: str = ""
     output: str = ""
     severity: str = "info"   # critical/high/medium/low/info (best-effort)
-    ids: list[str] = field(default_factory=list)  # CVE / BID references
-    source: str = "nse"      # nse | version-db | config
+    ids: list[str] = field(default_factory=list)   # CVE / BID references
+    cwes: list[str] = field(default_factory=list)  # CWE weakness references
+    source: str = "nse"      # nse | version-db | probe | config
     remediation: str = ""    # how to fix (offline knowledge base)
     confidence: str = ""     # confirmed | likely | potential
 
