@@ -359,7 +359,9 @@ def _enum_ldap3(
     try:
         from ldap3 import ALL, Connection, NTLM, SUBTREE, Server
     except ImportError as e:  # pragma: no cover
-        raise RuntimeError("ldap3 is required for --ldap-enum (pip install ldap3)") from e
+        raise RuntimeError(
+            "credentialed LDAP needs the ldapsearch binary (apt install ldap-utils) "
+            "for airgapped use, or the ldap3 Python module") from e
 
     port = 636 if use_ssl else 389
     server = Server(dc_ip, port=port, use_ssl=use_ssl, get_info=ALL)

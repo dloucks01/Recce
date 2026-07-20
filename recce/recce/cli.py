@@ -1008,8 +1008,8 @@ def _self_scan() -> bool:
 
 def _run_ldap_enum(store: Store, args: argparse.Namespace) -> None:
     if not ad.ldap_available():
-        print("[!] --ldap-enum requested but ldap3 is not installed "
-              "(pip install ldap3); skipping.")
+        print("[!] --ldap-enum requested but no LDAP client found; skipping. "
+              "Install ldap-utils (ldapsearch) for airgapped use, or ldap3.")
         return
     all_hosts = store.all_hosts()
     dc_ips = [args.dc_ip] if args.dc_ip else [h.ip for h in ad.domain_controllers(all_hosts)]
@@ -1286,7 +1286,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
 def _add_common(pp) -> None:
     pp.add_argument("-o", "--output-dir", default="engagement",
                     help="output directory (default: ./engagement)")
-    pp.add_argument("--title", default="Pentest Enumeration",
+    pp.add_argument("--title", default="Recce Engagement",
                     help="engagement title shown in reports")
     pp.add_argument("--profile", choices=list(scanner.PROFILES), default="standard")
     pp.add_argument("--workers", type=int, default=6,
@@ -1431,7 +1431,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wu.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
     wu.add_argument("-o", "--output-dir", default="engagement")
-    wu.add_argument("--title", default="Pentest Enumeration",
+    wu.add_argument("--title", default="Recce Engagement",
                     help="engagement title shown on the combined report")
     wu.add_argument("--min-severity", default="info",
                     choices=["critical", "high", "medium", "low", "info"],
@@ -1454,7 +1454,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
-    r.add_argument("--title", default="Pentest Enumeration")
+    r.add_argument("--title", default="Recce Engagement")
     r.set_defaults(func=cmd_report)
 
     st = sub.add_parser("status", help="print live review coverage")
@@ -1463,7 +1463,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     rv = sub.add_parser("review", help="mark items reviewed / not reviewed")
     rv.add_argument("-o", "--output-dir", default="engagement")
-    rv.add_argument("--title", default="Pentest Enumeration")
+    rv.add_argument("--title", default="Recce Engagement")
     rv.add_argument("--host", nargs="*", help="host IP(s) to mark")
     rv.add_argument("--service", nargs="*", metavar="IP:PORT", help="service(s) to mark")
     rv.add_argument("--key", nargs="*", help="raw tracking key(s) to mark")
