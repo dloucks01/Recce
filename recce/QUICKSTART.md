@@ -72,17 +72,21 @@ you can sort and report by weakness class.
 ## Using the workbook
 
 - **Start Here** tab explains every tab.
-- **Checklist** tab = one row per IP, **grouped by subnet**. The step boxes
-  (Enumerated / Vuln-scan / Web / SMB/AD / DB / Priv-esc) **turn green
-  automatically** when the tool finishes that step. You can tick/untick any box
-  yourself — untick to flag "redo." Tick **Reviewed** when you're personally done
-  with a host.
-- **Boxes only show where the step applies.** A step that's irrelevant to a host
-  shows **`—`** instead of a checkbox — no Web box without a web server, no
-  SMB/AD box on a plain Linux host, no DB box without a database, no Priv-esc box
-  until you've run `privesc` there. So a checked box always means real work.
-  (**SMB/AD** is a manual sign-off — it starts unchecked; tick it once you've
-  reviewed users/shares/roasting on that host.)
+- **Checklist** tab = one row per IP, **grouped by subnet**, with two kinds of
+  step box:
+  - **Auto** (Enumerated / Vuln-scan / Web / DB) **turn green automatically** when
+    the tool finishes that step.
+  - **Manual sign-offs** (AD / Access / Priv-esc / Creds / Lateral) start
+    unchecked — you tick them as you work. AD = you reviewed the DC's users/
+    shares/roasting; then the kill-chain: **Access** gained → **Priv-esc** →
+    **Creds** harvested → **Lateral** movement tried.
+  Tick **Reviewed** when you're personally done with a host.
+- **Boxes only show where the step applies.** A step that's irrelevant shows
+  **`—`** — no Web box without a web server, no AD box off a non-DC, no DB box
+  without a database. So a checked box always means real work.
+- **SMB, remote access (SSH/RDP/WinRM), mail, SNMP, …** aren't checklist columns —
+  each such port is tracked with its own Status on the **Services** tab (below),
+  which keeps the checklist readable while still covering every service.
 - **Services** tab = one row per **open port**, grouped by IP, each with its own
   **Status** dropdown — **☐ Not started / ◐ In progress / ☑ Done** — plus a Notes
   cell. Done rows go green, in-progress amber. This is where you track exactly

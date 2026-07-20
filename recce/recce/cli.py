@@ -890,18 +890,21 @@ def cmd_status(args: argparse.Namespace) -> int:
         c = cov[cat]
         print(f"  {labels[cat]:<13}[{bar(c['pct'])}] {c['pct']:3d}%  {c['done']}/{c['total']}")
 
-    # Tool progress (auto): per-step completion, counting only hosts the step
-    # applies to (a Linux box isn't counted against DB/SMB-AD coverage).
+    # Per-step completion, counting only hosts the step applies to.
     def phase_count(step):
         applic = [h for h in hosts if tr.step_applies(h, step)]
         return sum(1 for h in applic if tr.step_auto(h, step)), len(applic)
 
+    def manual_count(step):
+        applic = [h for h in hosts if tr.step_applies(h, step)]
+        done = sum(1 for h in applic
+                   if tracking.get(tr.step_key(step, h.ip), (False, ""))[0])
+        return done, len(applic)
+
     en_d, en_t = phase_count("enum")
     vs_d, vs_t = phase_count("vuln")
     web_d, web_t = phase_count("web")
-    ad_d, ad_t = phase_count("smbad")
     db_d, db_t = phase_count("db")
-    pe_done = sum(1 for h in hosts if h.privesc_checked)
     open_ports = [p for h in hosts for p in h.open_ports]
     scanned_ports = sum(1 for p in open_ports if p.vuln_scanned)
     print("\n  Tool progress (auto) - per step, hosts complete / applicable:")
@@ -909,9 +912,20 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"    Vuln-scanned  {vs_d}/{vs_t}"
           + (f"   ({scanned_ports}/{len(open_ports)} open ports)" if open_ports else ""))
     print(f"    Web           {web_d}/{web_t}   (hosts serving HTTP/HTTPS)")
-    print(f"    SMB/AD        {ad_d}/{ad_t}   (Windows / domain-facing hosts)")
     print(f"    DB-scanned    {db_d}/{db_t}   (hosts with DB services)")
+
+    # Manual sign-offs (from your ticks): AD review + the kill-chain.
+    ad_d, ad_t = manual_count("ad")
+    ac_d, ac_t = manual_count("access")
+    cr_d, cr_t = manual_count("creds")
+    lat_d, lat_t = manual_count("lateral")
+    pe_done = sum(1 for h in hosts if h.privesc_checked)
+    print("\n  Manual sign-offs (from your ticks) - hosts done / applicable:")
+    print(f"    AD reviewed   {ad_d}/{ad_t}   (domain controllers / directory hosts)")
+    print(f"    Access gained {ac_d}/{ac_t}")
     print(f"    Priv-esc      {pe_done}/{len(hosts)}   (post-exploitation performed)")
+    print(f"    Creds got     {cr_d}/{cr_t}")
+    print(f"    Lateral       {lat_d}/{lat_t}")
     pending = [h.ip for h in hosts if h.enumerated
                and any(not p.vuln_scanned for p in h.open_ports)]
     if pending:
