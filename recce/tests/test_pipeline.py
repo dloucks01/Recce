@@ -716,6 +716,35 @@ class WriteupTest(unittest.TestCase):
         f = group_findings([h])[0]
         self.assertIn("17491", " ".join(_walkthrough_steps(f)))
 
+    def test_walkthrough_only_cites_proven_exploits(self):
+        from recce.models import Vuln
+        from recce.report_docx import group_findings, _walkthrough_steps
+
+        def steps(title, conf, cves, source="version-db", svc="http", port=80):
+            h = Host(ip="1.1.1.1", ports=[Port(portid=port, service=svc)],
+                     vulns=[Vuln(ip="1.1.1.1", port=port, protocol="tcp",
+                                 script_id=source, title=title, severity="high",
+                                 source=source, confidence=conf, ids=cves)])
+            return " ".join(_walkthrough_steps(group_findings([h])[0]))
+
+        # Proven exploit (curated) on a version-matched finding -> cited concretely.
+        s = steps("Apache path traversal", "likely", ["CVE-2021-41773"])
+        self.assertIn("Metasploit", s)
+        self.assertIn("apache_normalize_path_rce", s)
+        # NSE-confirmed ms17-010 -> proven EternalBlue exploit cited.
+        self.assertIn("eternalblue", steps("smb-vuln-ms17-010", "", [],
+                                            source="nse", svc="microsoft-ds", port=445).lower())
+        # Advisory/potential finding -> NO exploit line, even with a famous CVE.
+        s = steps("Windows DC - verify ZeroLogon", "potential", ["CVE-2020-1472"],
+                  svc="microsoft-ds", port=445)
+        self.assertNotIn("Metasploit", s)
+        self.assertNotIn("exploit", s.lower())
+        # A version match with no proven exploit known -> no speculative "research" line.
+        s = steps("OpenSSH username enumeration", "likely", ["CVE-2018-15473"],
+                  svc="ssh", port=22)
+        self.assertNotIn("Metasploit", s)
+        self.assertNotIn("Research a working exploit", s)
+
     def test_combined_report(self):
         from recce.report_docx import build_combined
         with tempfile.TemporaryDirectory() as d:
