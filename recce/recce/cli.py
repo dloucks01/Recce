@@ -634,6 +634,69 @@ def _phase_privesc(store, paths, args, profile) -> None:
             refresher.tick(store, paths, args.title)
 
 
+# --- phase: credentialed enumeration (netexec / impacket / ssh) ------------------
+
+def _ssh_creds_of(args) -> dict | None:
+    user = getattr(args, "ssh_user", None)
+    if not user:
+        return None
+    return {"username": user, "password": getattr(args, "ssh_pass", None),
+            "key": getattr(args, "ssh_key", None)}
+
+
+def _credenum_worker(host, creds, ssh_creds, aggressive):
+    """Returns (host, issues)."""
+    from . import credenum
+    issues = credenum.enrich_host(host, creds, ssh_creds, aggressive=aggressive)
+    return host, issues
+
+
+def _phase_credenum(store, paths, args) -> None:
+    from . import credenum
+    creds = _creds_of(args)
+    ssh_creds = _ssh_creds_of(args)
+    aggressive = getattr(args, "aggressive", False)
+    if not creds and not ssh_creds:
+        print("[!] credenum needs credentials: --username/--password (+--domain) "
+              "for SMB/AD, and/or --ssh-user for Linux hosts.")
+        return
+    tools = credenum.available_tools()
+    have = [k for k, v in tools.items() if v]
+    print(f"[*] Credentialed enum tools present: {', '.join(have) or 'NONE'}.")
+    if not have:
+        print("[!] No credentialed-enum tools found (netexec/impacket/ssh). "
+              "Install netexec + impacket, or ensure ssh is on PATH.")
+        return
+    targets = _selected_hosts(store.all_hosts(), args)
+    if not targets:
+        print("[!] No hosts in scope.")
+        return
+    mode = " + secretsdump (aggressive)" if aggressive else ""
+    print(f"[*] Credentialed enum on {len(targets)} host(s){mode} ...")
+    refresher = _Refresher(args)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+        futures = {ex.submit(_credenum_worker, h, creds, ssh_creds, aggressive): h.ip
+                   for h in targets}
+        for fut in as_completed(futures):
+            ip = futures[fut]
+            try:
+                host, issues = fut.result()
+            except Exception as e:  # noqa: BLE001
+                _record_issues(store, paths, ip,
+                               [{"phase": "credenum", "level": "error",
+                                 "message": f"credenum crashed: {e}"}])
+                continue
+            _record_issues(store, paths, ip, issues)
+            store.upsert_host(host)
+            completed += 1
+            n_acct = sum(1 for a in host.accounts
+                         if a.source in ("netexec", "impacket", "secretsdump"))
+            print(f"    [{completed}/{len(targets)}] {ip}: cred-enum done"
+                  + (f" ({n_acct} account/loot rows)" if n_acct else ""))
+            refresher.tick(store, paths, args.title)
+
+
 def _setup_scan(args, need_targets=True):
     """Shared setup: profile, env check, store. Returns (profile, paths, store)."""
     profile = scanner.PROFILES[args.profile]
@@ -777,6 +840,29 @@ def cmd_privesc(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_credenum(args: argparse.Namespace) -> int:
+    _confirm_authorized(args.yes)
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum` first.")
+        return 1
+    _, paths, store = _setup_scan(args, need_targets=False)
+    if store is None:
+        return 1
+    title = store.get_meta("engagement") or args.title
+    try:
+        _phase_credenum(store, paths, args)
+        # Note: the manual 'Creds' checklist box is the operator's own sign-off,
+        # so credenum records findings but never ticks it automatically.
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted - saving results collected so far ...")
+    finally:
+        _final_report(store, paths, title)
+        store.close()
+    print("\n[+] Credentialed enum complete - see Users & Accounts / Vulnerabilities.")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check that this box can run the tool, and optionally prove it with a
     real localhost self-scan. Run this on any system before an engagement."""
@@ -800,14 +886,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("masscan", False, "--fast network-wide sweep"),
         ("searchsploit", False, "offline exploit mapping (Exploits sheet)"),
         ("ldapsearch", False, "credentialed AD LDAP enumeration"),
+        ("netexec", False, "credentialed SMB/AD enum (credenum phase)"),
+        ("ssh", False, "credentialed Linux local checks (credenum phase)"),
     ]
     nmap_ok = False
     for name, required, desc in tools:
         present = shutil.which(name) is not None
+        if name == "netexec":
+            from . import credenum
+            present = credenum.smb_tool() is not None   # nxc / crackmapexec too
         if name == "nmap":
             nmap_ok = present
         mark = "OK  " if present else ("MISSING (required)" if required else "-   (optional)")
         print(f"  {name:<15} {mark:<20} {desc}")
+    from . import credenum as _ce
+    if _ce.impacket_tool("GetUserSPNs"):
+        print(f"  {'impacket':<15} {'OK  ':<20} Kerberoast / AS-REP / secretsdump")
     import importlib.util
     if importlib.util.find_spec("openpyxl") is not None:
         print("  openpyxl        OK   (not required; stdlib xlsx is built in)")
@@ -1155,9 +1249,9 @@ def _add_common(pp) -> None:
 
 
 def _add_creds(pp) -> None:
-    pp.add_argument("--username", help="credential for authenticated SMB/LDAP")
-    pp.add_argument("--password", help="credential for authenticated SMB/LDAP")
-    pp.add_argument("--domain", help="AD domain (e.g. corp.local) for authentication")
+    pp.add_argument("-u", "--username", help="credential for authenticated SMB/LDAP")
+    pp.add_argument("-p", "--password", help="credential for authenticated SMB/LDAP")
+    pp.add_argument("-d", "--domain", help="AD domain (e.g. corp.local) for authentication")
     pp.add_argument("--ldap-enum", action="store_true",
                     help="credentialed LDAP enumeration of discovered DCs")
     pp.add_argument("--ldap-anon", action="store_true", help="attempt anonymous LDAP bind")
@@ -1264,6 +1358,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="include intrusive privesc NSE (may crash services)")
     _add_creds(pep)
     pep.set_defaults(func=cmd_privesc)
+
+    # Phase 3 (credentialed): authenticated enum via netexec / impacket / ssh.
+    cep = sub.add_parser("credenum",
+                         help="credentialed enum (netexec/impacket/ssh) - needs creds")
+    cep.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    _add_common(cep)
+    _add_creds(cep)
+    cep.add_argument("--ssh-user", help="username for SSH local checks on Linux hosts")
+    cep.add_argument("--ssh-pass", help="SSH password (needs sshpass on PATH)")
+    cep.add_argument("--ssh-key", help="SSH private-key path for local checks")
+    cep.add_argument("--aggressive", action="store_true",
+                     help="also dump hashes with secretsdump (needs admin/DA)")
+    cep.set_defaults(func=cmd_credenum)
 
     # Convenience: enum + vulns in one shot.
     s = sub.add_parser("scan", help="run enum then vulns in one shot")

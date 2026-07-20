@@ -111,6 +111,7 @@ class Store:
         merged.enumerated = old.enumerated or new.enumerated
         merged.db_scanned = old.db_scanned or new.db_scanned
         merged.privesc_checked = old.privesc_checked or new.privesc_checked
+        merged.cred_enumerated = old.cred_enumerated or new.cred_enumerated
         merged.last_scanned = new.last_scanned or old.last_scanned
         merged.subnet = new.subnet or old.subnet
 
