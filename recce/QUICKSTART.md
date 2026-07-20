@@ -13,7 +13,8 @@ and your ticks are saved (re-scanning never wipes them).
 
 Nothing to install — it uses only Python 3.9+ and the tools already on Kali
 (`nmap` required; `masscan`, `searchsploit`, `ldapsearch`, `netexec`, `impacket`,
-`chromium` optional). It runs entirely inside your **Kali VM**.
+and a headless browser — `firefox` or `chromium` — optional). It runs entirely
+inside your **Kali VM**.
 
 **Getting it into the Kali VM** (Windows 11 host → Kali guest):
 - Best: `git clone` the repo *inside Kali* — that preserves LF line endings and
@@ -29,8 +30,10 @@ cd recce
 
 > `./bin/recce` is just a shortcut for `python3 -m recce` — use whichever works.
 > Run scans with `sudo` so nmap can do SYN/OS detection.
-> Auto web-screenshots need `chromium` (Kali defaults to Firefox); without it you
-> just paste screenshots into the Word write-ups yourself, which is the normal flow.
+> Auto web-screenshots use a headless browser — **`firefox`** (the Kali default)
+> or `chromium`, whichever is present. Point `RECCE_BROWSER` at a specific binary
+> to override. Without any browser you just paste screenshots into the Word
+> write-ups yourself, which is the normal flow.
 
 ## The 5-step engagement
 
