@@ -495,6 +495,37 @@ class WorkbookStructureTest(unittest.TestCase):
         for loc in targets:
             self.assertTrue(loc.split("!")[0] in present, f"dangling link: {loc}")
 
+    def test_overview_host_index_deep_links_hit_correct_checklist_rows(self):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        from recce.report_excel import read_key_order
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+
+            def _check(path):
+                wb = load_workbook(path)
+                ck = wb["Checklist"]
+                ipc = [c.value for c in ck[1]].index("IP") + 1
+                ip_row = {ck.cell(row=r, column=ipc).value: r
+                          for r in range(2, ck.max_row + 1)}
+                ov = wb["Overview"]
+                deep = {c.value: c.hyperlink.location
+                        for row in ov.iter_rows() for c in row
+                        if c.hyperlink and c.hyperlink.location.startswith(
+                            "'Checklist'!A") and c.value in ip_row}
+                # Every host is indexed, and each link targets its real row.
+                self.assertEqual(set(deep), set(ip_row))
+                for ip, loc in deep.items():
+                    self.assertEqual(loc, f"'Checklist'!A{ip_row[ip]}")
+
+            _check(out)
+            # Regenerate preserving row order -> links must still be correct.
+            build_workbook(sample_hosts(), out, order_map=read_key_order(out))
+            _check(out)
+
     def test_grouped_sheet_has_collapsible_host_bands(self):
         try:
             from openpyxl import load_workbook

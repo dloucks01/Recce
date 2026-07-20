@@ -388,6 +388,24 @@ def _spec_accounts(hosts: list[Host]) -> SheetSpec:
 
 # --- writing a tracked sheet (with stable ordering) ------------------------------
 
+def _ordered_keys(spec_rows: list[dict], order: list[str] | None) -> list[str]:
+    """Row keys in final order: existing rows keep their saved position, new
+    items append at the bottom. Shared by the sheet writer and the Overview's
+    Checklist-row deep-link computation so the two always agree."""
+    rows_by_key = {r["key"]: r for r in spec_rows}
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for k in (order or []):
+        if k in rows_by_key and k not in seen:
+            ordered.append(k)
+            seen.add(k)
+    for k in rows_by_key:
+        if k not in seen:
+            ordered.append(k)
+            seen.add(k)
+    return ordered
+
+
 def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
                 order: list[str] | None = None,
                 statuses: dict | None = None) -> None:
@@ -395,16 +413,7 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
     sheet.write([(h, "header") for h, _, _ in spec.cols])
 
     rows_by_key = {r["key"]: r for r in spec.rows}
-    ordered_keys: list[str] = []
-    seen: set[str] = set()
-    for k in (order or []):        # existing rows keep their position
-        if k in rows_by_key and k not in seen:
-            ordered_keys.append(k)
-            seen.add(k)
-    for k in rows_by_key:          # new items appended at the bottom
-        if k not in seen:
-            ordered_keys.append(k)
-            seen.add(k)
+    ordered_keys = _ordered_keys(spec.rows, order)
 
     # Optional collapsible grouping: reorder keys into per-host bands (stable by
     # first appearance), so each host's rows sit under a header the tester can
@@ -607,7 +616,8 @@ def _bar(pct: int) -> str:
 
 def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
                     tracking: Tracking, scope: dict, issues: list | None = None,
-                    nav: list[str] | None = None) -> None:
+                    nav: list[str] | None = None,
+                    host_rows: dict | None = None) -> None:
     """One summary tab: engagement totals, review progress, and (prominently)
     live-hosts-per-subnet coverage. Doubles as a navigation hub - the jump bar
     and several totals are clickable links to the matching sheet."""
@@ -732,6 +742,26 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
                   phase(hs, "db"), sum(len(h.vulns) for h in hs)])
     for col, w in {1: 26, 2: 10, 3: 11, 4: 12, 5: 13, 6: 8, 7: 8, 8: 8}.items():
         sh.set_col(col, w)
+    sh.write([""])
+
+    # --- Host index: click an IP to jump straight to its Checklist row ---
+    host_rows = host_rows or {}
+    if host_rows:
+        sh.write([("Host index - click an IP to jump to its Checklist row",
+                   "header"), ("", "header"), ("", "header"), ("", "header"),
+                  ("", "header")])
+        sh.write([("IP", "bold"), ("Hostname", "bold"), ("OS", "bold"),
+                  ("Open ports", "bold"), ("# Vulns", "bold")])
+        by_ip = {h.ip: h for h in hosts}
+        # List in Checklist row order (host_rows maps ip -> that sheet's row).
+        for ip, crow in sorted(host_rows.items(), key=lambda kv: kv[1]):
+            h = by_ip.get(ip)
+            if h is None:
+                continue
+            r = sh.nrows + 1
+            sh.write([(ip, "link"), h.hostname, h.os_guess,
+                      len(h.open_ports), len(h.vulns)])
+            sh.link_to(r, 1, CHECKLIST_TITLE, cell=f"A{crow}")
 
 
 def _build_active_directory(wb, hosts: list[Host], domains: list[Domain]) -> None:
@@ -821,8 +851,19 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         nav.append("Active Directory")
     nav += [s.title for s in post if not (s.skip_if_empty and not s.rows)]
 
+    # Pre-compute each host's Checklist row (header is row 1, data from row 2) so
+    # the Overview can deep-link an IP straight to it. Uses the SAME ordering the
+    # Checklist writer will use, so the links land on the right rows.
+    checklist_spec = next((s for s in pre if s.title == CHECKLIST_TITLE), None)
+    host_rows: dict[str, int] = {}
+    if checklist_spec:
+        ck_keys = _ordered_keys(checklist_spec.rows, order_map.get(CHECKLIST_TITLE))
+        key_ip = {r["key"]: r["data"]["IP"] for r in checklist_spec.rows}
+        host_rows = {key_ip[k]: 2 + i for i, k in enumerate(ck_keys) if k in key_ip}
+
     _build_guide(wb, meta)
-    _build_overview(wb, hosts, meta, domains, tracking, scope, issues or [], nav)
+    _build_overview(wb, hosts, meta, domains, tracking, scope, issues or [], nav,
+                    host_rows)
     for spec in pre:
         if spec.skip_if_empty and not spec.rows:
             continue
