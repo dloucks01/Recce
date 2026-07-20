@@ -13,7 +13,10 @@ have a distinct fingerprint:
     10.0.20.6   web02            Linux 5.4            22,80,21,3306    ftp-anon
 """
 
+import contextlib
+import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -731,6 +734,102 @@ class EnvironmentAndTargetsTest(unittest.TestCase):
         from recce.targets import load_targets
         with self.assertRaises(FileNotFoundError):
             load_targets(["@/no/such/file.txt"])
+
+
+class TargetingFormE2ETest(unittest.TestCase):
+    """Drive the REAL `vulns` command end-to-end (parser -> selection -> workers ->
+    store) and prove each targeting form selects EXACTLY the right stored hosts.
+
+    This locks in the core promise that every phase works on a single IP, several
+    IPs, a dash range, a whole subnet, an @file, or 'everything' - using the same
+    CLI grammar, with no cross-host bleed. The scanner is mocked so no nmap runs;
+    the selection layer under test is entirely real.
+
+    Seeded scope (from the bundled sample): 10.0.10.10, 10.0.10.25 (10.0.10.0/24)
+    and 10.0.20.5, 10.0.20.6 (10.0.20.0/24).
+    """
+
+    ALL = {"10.0.10.10", "10.0.10.25", "10.0.20.5", "10.0.20.6"}
+
+    def _run_vulns(self, targets):
+        """Run `vulns <targets>` against a freshly seeded store; return the set of
+        IPs that actually got vuln-scanned (i.e. the hosts the phase selected)."""
+        from recce import cli
+        import recce.scanner as s
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        paths = cli._open_paths(d)
+        seed = Store(paths["db"])
+        seed.set_meta("engagement", "e2e")
+        for h in sample_hosts():
+            seed.upsert_host(h)
+        seed.close()
+
+        def fake_vuln(ip, portids, out, profile, creds=None, aggressive=False):
+            # Echo the requested ports back as an open-port XML the worker parses.
+            return _fake_scan(out, ip, [{"port": p, "service": "tcp"}
+                                        for p in portids])
+
+        oc, ov, ou = s.check_environment, s.vuln_scan, s.udp_scan
+        s.check_environment = lambda profile: []          # no nmap/root needed
+        s.vuln_scan = fake_vuln
+        s.udp_scan = lambda ip, out, profile: _fake_scan(out, ip, [])
+        argv = ["vulns", *targets, "-o", d, "--yes",
+                "--no-searchsploit", "--no-probes", "--workers", "1"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = cli.main(argv)
+        finally:
+            s.check_environment, s.vuln_scan, s.udp_scan = oc, ov, ou
+        self.assertEqual(rc, 0)
+
+        store = Store(paths["db"])
+        try:
+            scanned = {h.ip for h in store.all_hosts()
+                       if any(p.vuln_scanned for p in h.open_ports)}
+            # Every seeded host must still be present (selection never drops rows).
+            self.assertEqual({h.ip for h in store.all_hosts()}, self.ALL)
+        finally:
+            store.close()
+        return scanned
+
+    def test_single_ip(self):
+        self.assertEqual(self._run_vulns(["10.0.10.10"]), {"10.0.10.10"})
+
+    def test_several_ips(self):
+        self.assertEqual(self._run_vulns(["10.0.10.10", "10.0.20.6"]),
+                         {"10.0.10.10", "10.0.20.6"})
+
+    def test_dash_range(self):
+        # .10-.25 covers both 10.0.10.x hosts and nothing in 10.0.20.x.
+        self.assertEqual(self._run_vulns(["10.0.10.10-25"]),
+                         {"10.0.10.10", "10.0.10.25"})
+
+    def test_range_excludes_outside(self):
+        # A range that stops before .25 must NOT pick it up.
+        self.assertEqual(self._run_vulns(["10.0.10.1-15"]), {"10.0.10.10"})
+
+    def test_whole_subnet(self):
+        self.assertEqual(self._run_vulns(["10.0.20.0/24"]),
+                         {"10.0.20.5", "10.0.20.6"})
+
+    def test_mixed_single_and_subnet(self):
+        self.assertEqual(self._run_vulns(["10.0.10.25", "10.0.20.0/24"]),
+                         {"10.0.10.25", "10.0.20.5", "10.0.20.6"})
+
+    def test_at_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        f = os.path.join(d, "scope.txt")
+        with open(f, "w") as fh:
+            fh.write("10.0.10.10\n"
+                     "10.0.20.0/24   # the linux subnet\n")
+        self.assertEqual(self._run_vulns(["@" + f]),
+                         {"10.0.10.10", "10.0.20.5", "10.0.20.6"})
+
+    def test_empty_targets_selects_everything(self):
+        self.assertEqual(self._run_vulns([]), self.ALL)
 
 
 class EntryPointTest(unittest.TestCase):
