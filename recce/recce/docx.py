@@ -75,14 +75,17 @@ _STYLES = (
     '<w:name w:val="Title"/><w:basedOn w:val="Normal"/>'
     '<w:pPr><w:spacing w:before="120" w:after="120"/></w:pPr>'
     '<w:rPr><w:b/><w:color w:val="1F3864"/><w:sz w:val="36"/></w:rPr></w:style>'
+    # NB: child order in <w:pPr> is schema-enforced (CT_PPrGeneral):
+    # pBdr -> spacing -> outlineLvl.
     '<w:style w:type="paragraph" w:styleId="Heading1">'
     '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>'
-    '<w:pPr><w:outlineLvl w:val="0"/><w:spacing w:before="200" w:after="80"/>'
+    '<w:pPr>'
     '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="1F3864"/></w:pBdr>'
+    '<w:spacing w:before="200" w:after="80"/><w:outlineLvl w:val="0"/>'
     '</w:pPr><w:rPr><w:b/><w:color w:val="1F3864"/><w:sz w:val="26"/></w:rPr></w:style>'
     '<w:style w:type="paragraph" w:styleId="Heading2">'
     '<w:name w:val="heading 2"/><w:basedOn w:val="Normal"/>'
-    '<w:pPr><w:outlineLvl w:val="1"/><w:spacing w:before="120" w:after="40"/></w:pPr>'
+    '<w:pPr><w:spacing w:before="120" w:after="40"/><w:outlineLvl w:val="1"/></w:pPr>'
     '<w:rPr><w:b/><w:color w:val="2E4A7A"/><w:sz w:val="24"/></w:rPr></w:style>'
     '</w:styles>'
 )
