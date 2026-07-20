@@ -43,6 +43,9 @@ sudo ./bin/recce db -o eng                 # databases
 # ...and once you have creds (needs netexec/impacket/ssh on Kali):
 ./bin/recce      credenum -u alice -p 'Pw!' -d corp.local -o eng  # authed SMB/AD/SSH
 
+# 4b) Generate a Word (.docx) write-up per finding, then finish each in Word
+./bin/recce      writeups -o eng           # auto-fills fields + web screenshots
+
 # 5) See what's left (prints progress + the suggested next command)
 ./bin/recce status -o eng
 ```
