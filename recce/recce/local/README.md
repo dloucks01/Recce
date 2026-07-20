@@ -6,19 +6,21 @@ vectors and sensitive exposure — a linPEAS / winPEAS–style deep sweep.
 
 | Script | Target | Run it |
 |---|---|---|
-| `recce-enum.sh` | Linux / Unix | `./recce-enum.sh [-q] [-o report.txt]` |
-| `recce-enum.ps1` | Windows | `powershell -ep bypass -File .\recce-enum.ps1 [-Quiet] [-OutFile report.txt]` |
+| `recce-enum.sh` | Linux / Unix | `./recce-enum.sh [-t] [-q] [-o report.txt]` |
+| `recce-enum.ps1` | Windows | `powershell -ep bypass -File .\recce-enum.ps1 [-SelfTest] [-Quiet] [-OutFile report.txt]` |
 
+- `-t` / `-SelfTest` — pre-flight only (see below).
 - `-q` / `-Quiet` — print findings only (skip the raw dumps).
 - `-o` / `-OutFile` — also write everything to a file.
 
 Lines marked **`[!]`** are worth a closer look.
 
-**First run on Windows — pre-flight it:** `./recce-enum.ps1 -SelfTest` parses the
-script with the PowerShell parser, reports the host's PowerShell version /
-execution policy / elevation, and lists which section families will produce data
-there — **without running any enumeration**. If the parse is `[ OK ]`, a real run
-is safe.
+**Pre-flight it on the first run** — `-t` (Linux) / `-SelfTest` (Windows):
+parse-checks the script with the native parser (`bash -n` / the PowerShell
+parser), reports the host (shell/PowerShell version, elevation, OS), and lists
+which section families will produce data there — flagging any missing commands
+(those checks self-skip) — **without running any enumeration**. If the parse is
+`[ OK ]`, a real run is safe.
 
 ## What they check (deep dive)
 

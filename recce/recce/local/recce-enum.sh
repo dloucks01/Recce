@@ -9,18 +9,21 @@
 # plain read-only script, coordinate an exclusion with the client; do not try to
 # evade it.
 #
-# Usage:  ./recce-enum.sh [-q] [-o report.txt]
+# Usage:  ./recce-enum.sh [-t] [-q] [-o report.txt]
+#           -t  self-test: parse-check the script + report which sections will
+#               run on this host. Runs NO enumeration - safe first step.
 #           -q  quiet: findings only (skip the raw dumps)
 #           -o  also write everything to a file
 #
 # Authorized testing only. Findings marked [!] are worth a closer look.
 
 export LC_ALL=C
-QUIET=0; OUT=""
-while getopts "qo:h" opt; do
+QUIET=0; OUT=""; SELFTEST=0
+while getopts "qo:th" opt; do
   case "$opt" in
     q) QUIET=1 ;;
     o) OUT="$OPTARG" ;;
+    t) SELFTEST=1 ;;
     *) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   esac
 done
@@ -33,6 +36,40 @@ info() { [ "$QUIET" -eq 1 ] || _emit "$*"; }
 find_() { _emit "${C_F}[!] $*${C_R}"; }         # a finding worth attention
 have() { command -v "$1" >/dev/null 2>&1; }
 cat_() { [ "$QUIET" -eq 1 ] && return 0; [ -r "$1" ] && { _emit "--- $1 ---"; sed 's/^/    /' "$1" 2>/dev/null; }; }
+
+# --- self-test (pre-flight): verify the script + host, run NO enumeration ---
+if [ "$SELFTEST" -eq 1 ]; then
+  echo "recce-enum.sh self-test - verifies the script + host; runs NO enumeration"
+  echo
+  # 1) Syntax: parse-check this script.
+  err=$(bash -n "$0" 2>&1)
+  if [ -z "$err" ]; then echo "[ OK ] script parses cleanly (no syntax errors)"
+  else echo "[FAIL] syntax errors:"; printf '%s\n' "$err" | sed 's/^/       /'; fi
+  # 2) Host environment.
+  os=$(. /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-unknown}")
+  echo "[info] shell: ${BASH_VERSION:-sh}  user: $(id -un 2>/dev/null) (uid $(id -u 2>/dev/null))  kernel: $(uname -r 2>/dev/null)"
+  echo "[info] os: $os"
+  if [ "$(id -u 2>/dev/null)" = "0" ]; then echo "[info] running as root - full visibility"
+  else echo "[info] non-root - some checks read less (still works)"; fi
+  # 3) Command availability -> which section families will produce data here.
+  chk_all() { n="$1"; shift; m=""; for c in "$@"; do have "$c" || m="$m $c"; done
+              [ -z "$m" ] && echo "[ OK ] $n" || echo "[skip] $n - missing:$m (those checks self-skip)"; }
+  chk_any() { n="$1"; shift; for c in "$@"; do have "$c" && { echo "[ OK ] $n (using $c)"; return; }; done
+              echo "[skip] $n - none of: $* (those checks self-skip)"; }
+  chk_all "System & kernel"     uname cat
+  chk_all "Sudo"                sudo
+  chk_all "SUID / SGID"         find
+  chk_any "Capabilities"        getcap
+  chk_any "Services (systemd)"  systemctl
+  chk_all "Processes"           ps
+  chk_any "Network sockets"     ss netstat
+  chk_any "Network config"      ip ifconfig
+  chk_any "Software inventory"  dpkg rpm
+  chk_all "Core (always used)"  find grep sed awk
+  echo
+  echo "Self-test complete. If the parse is OK, a real run is safe:  ./recce-enum.sh"
+  exit 0
+fi
 
 [ -n "$OUT" ] && : >"$OUT"
 _emit "${C_H}recce-enum${C_R}  host=$(hostname 2>/dev/null)  user=$(id -un 2>/dev/null)  $(date 2>/dev/null)"
