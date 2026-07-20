@@ -445,7 +445,7 @@ are color-flagged).
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · Dashboard · **Coverage** · **Checklist** (per-IP step completion) · Hosts · Services · **Services by Product/Version** · Vulnerabilities · **Exploits** · **Databases** · **Active Directory** · **AD Quick Wins** · **Priv-Esc** · Users & Accounts · Subnets — all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Databases** · **Active Directory** · **AD Quick Wins** · **Priv-Esc** · Users & Accounts · **Services by Product/Version** — all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `results.sqlite`   | Normalized datastore (resume + re-report) |
