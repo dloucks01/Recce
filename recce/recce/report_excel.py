@@ -448,12 +448,12 @@ def _build_guide(wb, meta: dict) -> None:
                      "port you work (incl. SMB, remote access, mail, SNMP)."),
         ("Vulnerabilities", "Findings by severity: CVE + remediation (offline engine)."),
         ("Exploits", "searchsploit matches (EDB-ID, type, CVEs, local path)."),
+        ("Services by Product", "Who runs the same service+version (mass-patch pivot)."),
         ("Databases", "DB inventory: engine, version, auth, databases, users."),
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
-        ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
-        ("Services by Product", "Who runs the same service+version (mass-patch view)."),
+        ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
     ]:
         sh.write([tab, desc])
     sh.write([""])
@@ -604,15 +604,27 @@ def _build_active_directory(wb, hosts: list[Host], domains: list[Domain]) -> Non
 # --- public entry points --------------------------------------------------------
 
 def _ordered_specs(hosts: list[Host], scope: dict | None = None):
-    """Specs in final left-to-right order. Active Directory (a computed sheet) is
-    inserted between Databases and AD Quick Wins by build_workbook.
+    """Specs in final left-to-right order, following the engagement flow:
+    orient -> track -> find -> exploit -> pivot -> AD -> post-exploitation.
 
-    Services sits right after the Checklist: the two are the primary working
-    pair - Checklist tracks hosts, Services tracks each open port."""
+    Active Directory (a computed sheet) is inserted between Databases and AD
+    Quick Wins by build_workbook, giving the final tab order:
+
+        Start Here, Overview, Checklist, Services, Vulnerabilities, Exploits,
+        Services by Product, Databases, Active Directory, AD Quick Wins,
+        Users & Accounts, Priv-Esc.
+
+    Rationale for the pairings you flip between:
+      * Checklist <-> Services  - host <-> its open ports (the working pair).
+      * Services <-> Vulnerabilities <-> Exploits - port -> finding -> exploit.
+      * Vulnerabilities -> Services by Product - "who else runs this?" pivot.
+      * Active Directory <-> AD Quick Wins <-> Users & Accounts - the AD cluster.
+      * Priv-Esc last - post-exploitation, reached after a foothold.
+    """
     return [_spec_checklist(hosts), _spec_services(hosts), _spec_vulns(hosts),
-            _spec_exploits(hosts), _spec_databases(hosts)], \
-           [_spec_quick_wins(hosts), _spec_privesc(hosts), _spec_accounts(hosts),
-            _spec_services_by_product(hosts)]
+            _spec_exploits(hosts), _spec_services_by_product(hosts),
+            _spec_databases(hosts)], \
+           [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
