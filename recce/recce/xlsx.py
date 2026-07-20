@@ -129,13 +129,23 @@ class Sheet:
         if hidden:
             self.hidden_cols.add(idx)
 
-    def dropdown(self, col_idx: int, first_row: int, last_row: int) -> None:
-        if last_row >= first_row:
+    def dropdown(self, col_idx: int, first_row: int, last_row: int,
+                 sqref: str | None = None) -> None:
+        # `sqref` (a space-separated cell/range list) overrides the contiguous
+        # range - used to skip N/A cells that must not get the ☑/☐ validation.
+        if sqref is not None:
+            if sqref:
+                self._dv_ranges.append(sqref)
+        elif last_row >= first_row:
             letter = col_letter(col_idx)
             self._dv_ranges.append(f"{letter}{first_row}:{letter}{last_row}")
 
-    def green_when_true(self, col_idx: int, first_row: int, last_row: int) -> None:
-        if last_row >= first_row:
+    def green_when_true(self, col_idx: int, first_row: int, last_row: int,
+                        sqref: str | None = None) -> None:
+        if sqref is not None:
+            if sqref:
+                self._cf_ranges.append(sqref)
+        elif last_row >= first_row:
             letter = col_letter(col_idx)
             self._cf_ranges.append(f"{letter}{first_row}:{letter}{last_row}")
 

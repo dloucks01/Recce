@@ -695,9 +695,60 @@ class StepCheckboxTest(unittest.TestCase):
         h.db_scanned = True
         self.assertTrue(tr.step_auto(h, "db"))
 
-    def test_db_auto_na_when_no_db(self):
-        h = Host(ip="10.0.0.6", enumerated=True, ports=[Port(portid=22, service="ssh")])
-        self.assertTrue(tr.step_auto(h, "db"))       # no DB ports -> n/a -> done
+    def test_db_not_applicable_when_no_db(self):
+        # An SSH-only Linux host: DB, Web and SMB/AD steps simply don't apply.
+        h = Host(ip="10.0.0.6", os_family="Linux", enumerated=True,
+                 ports=[Port(portid=22, service="ssh")])
+        self.assertFalse(tr.step_applies(h, "db"))
+        self.assertFalse(tr.step_applies(h, "web"))
+        self.assertFalse(tr.step_applies(h, "smbad"))
+        # Universal steps still apply.
+        self.assertTrue(tr.step_applies(h, "enum"))
+        self.assertTrue(tr.step_applies(h, "vuln"))
+
+    def test_step_applicability_by_surface(self):
+        web = Host(ip="10.0.0.7", os_family="Linux",
+                   ports=[Port(portid=443, service="https")])
+        self.assertTrue(tr.step_applies(web, "web"))
+        self.assertFalse(tr.step_applies(web, "smbad"))   # Linux, no SMB
+        self.assertFalse(tr.step_applies(web, "db"))
+
+        win = Host(ip="10.0.0.8", os_family="Windows",
+                   ports=[Port(portid=445, service="microsoft-ds")])
+        self.assertTrue(tr.step_applies(win, "smbad"))    # Windows + SMB
+        self.assertFalse(tr.step_applies(win, "web"))
+
+        # Priv-esc only applies once the phase has run (a foothold exists).
+        self.assertFalse(tr.step_applies(win, "privesc"))
+        win.privesc_checked = True
+        self.assertTrue(tr.step_applies(win, "privesc"))
+
+    def test_web_step_auto_done_when_web_ports_scanned(self):
+        h = Host(ip="10.0.0.9", enumerated=True,
+                 ports=[Port(portid=80, service="http"), Port(portid=22, service="ssh")])
+        self.assertFalse(tr.step_auto(h, "web"))
+        h.ports[0].vuln_scanned = True    # the web port got probed
+        self.assertTrue(tr.step_auto(h, "web"))
+
+    def test_na_step_renders_dash_and_no_override(self):
+        # A Linux SSH box: the DB/Web/SMB-AD columns show N/A, not a checkbox,
+        # and reading the workbook back records no step override for them.
+        h = Host(ip="10.0.0.6", os_family="Linux", enumerated=True,
+                 ports=[Port(portid=22, service="ssh")])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([h], out)
+            rows = xlsx.read_sheets(out)["Checklist"]
+            header = rows[0]
+            row = rows[1]
+            for col in ("DB", "Web", "SMB/AD"):
+                self.assertEqual(row[header.index(col)], tr.STEP_NA)
+            back = read_workbook_tracking(out)
+            self.assertNotIn(tr.step_key("db", "10.0.0.6"), back)
+            self.assertNotIn(tr.step_key("web", "10.0.0.6"), back)
+            self.assertNotIn(tr.step_key("smbad", "10.0.0.6"), back)
+            # The universal Enumerated step is still tracked.
+            self.assertIn(tr.step_key("enum", "10.0.0.6"), back)
 
     def test_checkbox_reflects_auto_then_override(self):
         h = self._host(enumerated=True)
