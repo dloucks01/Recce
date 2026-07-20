@@ -453,14 +453,24 @@ are color-flagged).
 
 ## Profiles
 
-| Profile | Ports | OS | Notes |
-|---------|-------|----|-------|
-| `quick` | top 200 | no | fast triage |
-| `standard` (default) | full TCP | yes | balanced |
-| `thorough` | full TCP | yes | + top-100 UDP, slower/quieter |
+| Profile | Ports | OS | Service ID | Host timeout | Notes |
+|---------|-------|----|-----------|--------------|-------|
+| `quick` | top 200 | no | intensity 6 | 10 min | fast triage |
+| `standard` (default) | full TCP | yes | intensity 8 | 20 min | balanced |
+| `thorough` | full TCP | yes | `--version-all` | 40 min | + top-100 UDP, slower/quieter |
 
 Override with `--all-ports`, `--top-ports`, `--no-ad`, `--no-os`, `--min-rate`,
-`--udp-top`. (Vuln scanning is its own `vulns` phase, safe-by-default.)
+`--udp-top`, `--version-all`/`--version-intensity N` (service detection), and
+`--host-timeout N` (minutes). (Vuln scanning is its own `vulns` phase, safe-by-default.)
+
+**Reliability.** Every scan has a per-host time ceiling (`--host-timeout`): nmap
+gives up on a stuck host and moves on rather than hanging the run, and a hard
+subprocess timeout backstops a truly wedged nmap. Anything that **errors or
+doesn't finish** is logged to `engagement/recce.log`, listed at the top of the
+**Overview** tab, and summarised by `status` — so a timed-out host or a failed
+scan never disappears silently. Service detection runs at higher intensity in
+the `enum` phase (it feeds the offline vuln DB); the `vulns` phase only does a
+light version probe since enum already has the versions.
 
 ## Layout
 
