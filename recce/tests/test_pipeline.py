@@ -954,6 +954,65 @@ class CredEnumTest(unittest.TestCase):
         # User enumeration still folded shares/users (once, not duplicated).
         self.assertEqual(sum(1 for a in h.accounts if a.kind == "share"), 1)
 
+    def test_missing_tool_is_not_reported_as_auth_fail(self):
+        """A missing netexec (run_nxc_smb -> (None, None)) must NOT record a FAIL
+        cell nor attempt secretsdump - it's a tooling gap, not a bad credential."""
+        from recce import credenum as c
+        dumped = []
+        onx, osd = c.run_nxc_smb, c.run_secretsdump
+        c.run_nxc_smb = lambda ip, creds: (None, None)          # tool absent
+        c.run_secretsdump = lambda ip, creds: (dumped.append(ip) or ([], None))
+        try:
+            h = Host(ip="10.0.0.5", os_family="Windows",
+                     ports=[Port(portid=445, state="open")])
+            issues, auth = c.enrich_host(
+                h, {"username": "u", "password": "p", "domain": "d"}, None,
+                admin_creds={"username": "a", "password": "p", "domain": "d"})
+        finally:
+            c.run_nxc_smb, c.run_secretsdump = onx, osd
+        self.assertEqual(auth, {})           # nothing recorded -> cells show "-"
+        self.assertEqual(dumped, [])         # no doomed secretsdump
+
+    def test_secretsdump_skipped_when_admin_auth_rejected(self):
+        """secretsdump must not run where the admin bind was rejected."""
+        from recce import credenum as c
+        dumped = []
+        onx, osd, odc = c.run_nxc_smb, c.run_secretsdump, c._is_dc
+        # Both accounts authenticate but neither is admin (auth True, admin False).
+        c.run_nxc_smb = lambda ip, creds: (
+            {"auth": True, "admin": False, "host_info": "", "shares": [],
+             "users": [], "loggedon": [], "passpol": {}}, None)
+        c.run_secretsdump = lambda ip, creds: (dumped.append(ip) or ([], None))
+        c._is_dc = lambda h: False
+        try:
+            h = Host(ip="10.0.0.9", os_family="Windows",
+                     ports=[Port(portid=445, state="open")])
+            # Rejected admin: auth False for the admin account.
+            c.run_nxc_smb = lambda ip, creds: (
+                {"auth": creds["username"] == "u", "admin": False, "host_info": "",
+                 "shares": [], "users": [], "loggedon": [], "passpol": {}}, None)
+            issues, auth = c.enrich_host(
+                h, {"username": "u", "password": "p", "domain": "d"}, None,
+                admin_creds={"username": "adm", "password": "bad", "domain": "d"})
+        finally:
+            c.run_nxc_smb, c.run_secretsdump, c._is_dc = onx, osd, odc
+        self.assertFalse(auth["admin"]["auth"])   # admin bind rejected
+        self.assertEqual(dumped, [])              # so no secretsdump
+
+    def test_smb_error_records_err_not_fail(self):
+        """A tool/connection error (None, err) is ERR, distinct from a FAIL."""
+        from recce import credenum as c
+        onx = c.run_nxc_smb
+        c.run_nxc_smb = lambda ip, creds: (None, "connection refused")
+        try:
+            h = Host(ip="10.0.0.7", os_family="Windows",
+                     ports=[Port(portid=445, state="open")])
+            _, auth = c.enrich_host(h, {"username": "u", "password": "p"}, None)
+        finally:
+            c.run_nxc_smb = onx
+        self.assertTrue(auth["user"]["error"])
+        self.assertFalse(auth["user"]["auth"])
+
     def test_ssh_finding_and_facts_recorded(self):
         from recce import credenum as c
         h = Host(ip="10.0.0.5", ports=[Port(portid=22, state="open")])

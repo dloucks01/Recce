@@ -412,7 +412,7 @@ def enum_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
 
 def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
               creds: dict | None = None, aggressive: bool = False,
-              fast: bool = False) -> str:
+              fast: bool = False) -> tuple[str, ScanIssue | None]:
     """Per-open-port vulnerability pass.
 
     Safe by default, but deeper than the raw `vuln and safe` category: many

@@ -1152,8 +1152,3 @@ def read_workbook_edits(path: str) -> tuple[Tracking, dict]:
 def read_workbook_tracking(path: str) -> Tracking:
     """{key: (reviewed_bool, notes)} for every row carrying a Key value."""
     return read_workbook_edits(path)[0]
-
-
-def read_workbook_status(path: str) -> dict:
-    """{key: status_str} for rows whose sheet has a tri-state Status column."""
-    return read_workbook_edits(path)[1]

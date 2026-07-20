@@ -1186,6 +1186,29 @@ class IngestCommandTest(unittest.TestCase):
             self.assertEqual(h.os_family, "Windows")
             self.assertEqual(len(h.local_findings), 2)
 
+    def test_ingest_host_flag_records_hostname(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50"))          # no hostname stored
+            self._ingest(d, _LOOT_LINUX, extra=["--host", "10.0.0.50"])
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.50")
+            # hostname from the loot banner is recorded, so a later no---host
+            # ingest of the same box matches this entry instead of synthesizing.
+            self.assertIn("web01", h.hostnames)
+
+    def test_ingest_dedups_incoming_rows_on_new_host(self):
+        # Two sections that map to the same category with identical finding text
+        # must not create duplicate rows, even on a brand-new (unmerged) host.
+        from recce.store import Store
+        loot = ("recce-enum host=h1\n"
+                "==== SUID / SGID / capabilities ====\n[!] same finding text\n"
+                "==== Capabilities ====\n[!] same finding text\n")
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d)                                 # empty -> synthetic host
+            self._ingest(d, loot, extra=["--host", "10.0.0.1"])
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.1")
+            self.assertEqual(len(h.local_findings), 1)
+
     def test_ingested_findings_appear_on_privesc_sheet(self):
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
@@ -1220,6 +1243,9 @@ class ProgressAndAuthTest(unittest.TestCase):
         self.assertEqual(cli._auth_cell({"tried": True, "auth": True}), "OK")
         self.assertEqual(cli._auth_cell({"tried": True, "auth": True, "admin": True}),
                          "OK (admin)")
+        # A tool/connection error is ERR, not FAIL (not a credential problem).
+        self.assertEqual(cli._auth_cell({"tried": True, "auth": False, "error": True}),
+                         "ERR")
 
     def test_auth_table_prints_rows_and_flags_fail(self):
         from recce import cli
@@ -1241,6 +1267,29 @@ class ProgressAndAuthTest(unittest.TestCase):
         # ...and the authorization --yes flag is gone.
         with self.assertRaises(SystemExit):
             p.parse_args(["enum", "1.2.3.4", "--yes"])
+
+
+class StoreFixesTest(unittest.TestCase):
+    def test_distance_preserved_through_merge(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(os.path.join(d, "r.sqlite"))
+            s.upsert_host(Host(ip="10.0.0.5", distance=3))
+            # A second scan of the same host without distance must not zero it.
+            s.upsert_host(Host(ip="10.0.0.5", os_name="Linux", os_accuracy=95))
+            self.assertEqual(s.get_host("10.0.0.5").distance, 3)
+
+    def test_rerun_does_not_duplicate_issues(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            paths = cli._open_paths(d)
+            s = Store(paths["db"])
+            iss = [{"phase": "vuln-scan", "level": "error", "message": "nmap failed"}]
+            cli._record_issues(s, paths, "10.0.0.5", iss)
+            cli._record_issues(s, paths, "10.0.0.5", iss)   # re-run, same phase
+            self.assertEqual(s.count_issues().get("total"), 1)  # replaced, not doubled
+            s.close()
 
 
 class RunbookSheetTest(unittest.TestCase):

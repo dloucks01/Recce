@@ -108,6 +108,7 @@ class Store:
             merged.os_name, merged.os_accuracy, merged.os_family = (
                 new.os_name, new.os_accuracy, new.os_family)
         merged.state = new.state or old.state
+        merged.distance = new.distance or old.distance
         merged.enumerated = old.enumerated or new.enumerated
         merged.db_scanned = old.db_scanned or new.db_scanned
         merged.privesc_checked = old.privesc_checked or new.privesc_checked
@@ -297,6 +298,13 @@ class Store:
                 "INSERT INTO issues(ts, ip, phase, level, message) VALUES(?,?,?,?,?)",
                 (ts, ip, phase, level, message),
             )
+        self.conn.commit()
+
+    def clear_issues(self, ip: str, phase: str) -> None:
+        """Drop prior issues for one host+phase so re-running a phase replaces its
+        issues instead of appending duplicates (which inflate the Overview count)."""
+        with closing(self.conn.cursor()) as cur:
+            cur.execute("DELETE FROM issues WHERE ip=? AND phase=?", (ip, phase))
         self.conn.commit()
 
     def get_issues(self) -> list[dict]:

@@ -19,7 +19,6 @@ W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 # Colours (hex, no #) - the light adaptation of the HTML previews' palette.
 _PLACEHOLDER = "B00020"   # dark red for [TESTER: ...] prompts
 _MUTED = "666666"
-_ACCENT = "0E6E67"        # deep teal accent (headings, title) - matches the workbook
 _LABEL = "5F6F6E"         # muted slate for field labels
 _EVIDENCE_FILL = "EDF6F4"  # faint teal tint behind monospace evidence
 
@@ -160,11 +159,6 @@ class Document:
         elif placeholder:
             body += _run(f"[TESTER: {placeholder}]", italic=True, color=_PLACEHOLDER)
         self._p(body)
-
-    def bullet(self, text: str, *, italic=False, color: str | None = None) -> None:
-        # Simple bulleted line without a numbering part (keeps the writer tiny).
-        body = _run("•  ") + _run(text, italic=italic, color=color)
-        self._p(f'<w:pPr><w:ind w:left="360" w:hanging="360"/></w:pPr>{body}')
 
     def mono_block(self, text: str) -> None:
         """Fixed-width evidence block; each line becomes its own paragraph."""

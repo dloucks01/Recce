@@ -107,6 +107,10 @@ def _record_issues(store: Store, paths: dict, ip: str, issues: list) -> None:
     plain-text run log, and echo errors to the console so they're seen live."""
     if not issues:
         return
+    # Clear this host's prior issues for each phase we're about to (re)write, so a
+    # re-run replaces its own issues instead of stacking duplicates.
+    for phase in {iss.get("phase", "") for iss in issues if isinstance(iss, dict)}:
+        store.clear_issues(ip, phase)
     for iss in issues:
         phase = iss.get("phase", "") if isinstance(iss, dict) else ""
         level = iss.get("level", "warning") if isinstance(iss, dict) else "warning"
@@ -695,17 +699,21 @@ def _credenum_worker(host, creds, ssh_creds, aggressive, admin_creds=None):
 
 
 def _auth_cell(st: dict | None) -> str:
-    """Format one account's per-host auth outcome for the summary table."""
+    """Format one account's per-host auth outcome for the summary table. A cell
+    is only recorded when the tool actually ran, so an unrecorded/absent cell
+    shows '-' (never FAIL) - a missing tool is not an auth failure."""
     if not st or not st.get("tried"):
         return "-"
+    if st.get("error"):
+        return "ERR"          # tool ran but errored (unreachable/timeout)
     if not st.get("auth"):
-        return "FAIL"
+        return "FAIL"         # credentials rejected
     return "OK (admin)" if st.get("admin") else "OK"
 
 
 def _print_auth_table(auth_rows: list) -> None:
     """Per-host authentication success/fail table. Only shows the columns that
-    were actually attempted; flags failures loudly at the end."""
+    were actually attempted; flags rejected credentials loudly at the end."""
     if not auth_rows:
         return
     cols = [("user", "USER ACCT"), ("admin", "PRIV ACCT"), ("ssh", "SSH")]
@@ -716,18 +724,21 @@ def _print_auth_table(auth_rows: list) -> None:
     header = f"      {'HOST':<16}" + "".join(f"{hd:<13}" for _, hd in used)
     print(header)
     print("      " + "-" * (len(header) - 6))
-    fails = 0
+    fails = errs = 0
     for ip, a in sorted(auth_rows, key=lambda r: _ip_key(r[0])):
         cells = ""
         for k, _ in used:
             val = _auth_cell(a.get(k))
-            if val == "FAIL":
-                fails += 1
+            fails += val == "FAIL"
+            errs += val == "ERR"
             cells += f"{val:<13}"
         print(f"      {ip:<16}{cells}")
     if fails:
-        print(f"[!] {fails} account/host auth attempt(s) FAILED - check "
-              "credentials, domain, and host reachability for those rows.")
+        print(f"[!] {fails} credential(s) were REJECTED (FAIL) - check the "
+              "username/password/domain for those rows.")
+    if errs:
+        print(f"[!] {errs} attempt(s) ERRORED (ERR) - host unreachable, timed "
+              "out, or the tool failed; not necessarily a credential problem.")
 
 
 def _phase_credenum(store, paths, args) -> None:
@@ -1164,6 +1175,7 @@ def _fold_host(ip, parsed_list, subnet_map):
         base.vendor = base.vendor or h.vendor
         if h.os_accuracy >= base.os_accuracy and h.os_name:
             base.os_name, base.os_accuracy, base.os_family = h.os_name, h.os_accuracy, h.os_family
+        base.distance = base.distance or h.distance
         base.last_scanned = h.last_scanned or base.last_scanned
         base.ports.extend(h.ports)
         base.vulns.extend(h.vulns)
@@ -1183,13 +1195,17 @@ def _resolve_ingest_host(store, parsed, args):
     exists, else a synthetic host keyed by the loot's hostname/filename so the
     findings still land somewhere on the Priv-Esc sheet."""
     hosts = {h.ip: h for h in store.all_hosts()}
+    hn = parsed.get("hostname", "")
     if getattr(args, "host", None):
         ip = args.host
         host = hosts.get(ip) or Host(ip=ip)
+        # Record the loot's hostname so a later no --host ingest of the same box
+        # matches this entry instead of synthesizing a second local:<host> one.
+        if hn and hn not in host.hostnames:
+            host.hostnames.append(hn)
         _tag_host_os(host, parsed)
         return host, (ip in hosts)
     # No --host: try the hostname against known hostnames, else synthesize.
-    hn = parsed.get("hostname", "")
     if hn:
         for h in hosts.values():
             if hn.lower() in [x.lower() for x in h.hostnames] or \
@@ -1234,9 +1250,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     store = Store(paths["db"])
     _import_excel_tracking(store, paths)
     host, existed = _resolve_ingest_host(store, parsed, args)
-    # Merge, de-duplicating against anything already ingested for this host.
+    # Merge, de-duplicating against anything already ingested for this host AND
+    # against each other (two sections can map to the same category, so distinct
+    # parsed findings may collapse to the same (category, vector) key).
     have = {(f.get("category"), f.get("vector")) for f in host.local_findings}
-    added = [r for r in new_rows if (r["category"], r["vector"]) not in have]
+    added = []
+    for r in new_rows:
+        key = (r["category"], r["vector"])
+        if key not in have:
+            have.add(key)
+            added.append(r)
     host.local_findings.extend(added)
     host.privesc_checked = True
     store.upsert_host(host)

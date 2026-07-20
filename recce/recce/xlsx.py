@@ -51,7 +51,6 @@ CHECK_OFF = "☐"   # ballot box
 #   band    = very light teal-grey for alternating rows
 #   sev ramp: critical/high solid with WHITE text; medium/low/info soft tints.
 #   rule    = light hairline under every data cell (row separator)
-_MONO = "Consolas"
 STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <fonts count="10">
