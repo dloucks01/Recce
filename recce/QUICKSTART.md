@@ -40,6 +40,8 @@ sudo ./bin/recce vulns -o eng
 # 4) Optional deeper phases (any time, on any subset)
 sudo ./bin/recce db -o eng                 # databases
 ./bin/recce      privesc -o eng            # priv-esc playbook
+# ...and once you have creds (needs netexec/impacket/ssh on Kali):
+./bin/recce      credenum -u alice -p 'Pw!' -d corp.local -o eng  # authed SMB/AD/SSH
 
 # 5) See what's left (prints progress + the suggested next command)
 ./bin/recce status -o eng

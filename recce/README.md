@@ -296,6 +296,37 @@ The playbook is generated offline from what `enum` already found (no scanning);
 `--scan` additionally runs the remote privesc NSE checks (`--aggressive` includes
 intrusive ones like MS08-067 that can crash services).
 
+## Credentialed enumeration (`credenum`)
+
+Once you have valid creds, `credenum` runs the *authenticated* checks nmap can't
+do on its own. Everything is **optional and tool-gated** — recce shells out to
+tools that already ship on Kali and skips (with a logged note) any that are
+absent; no Python packages are needed at runtime:
+
+```bash
+recce credenum -u alice -p 'Passw0rd!' -d corp.local -o eng          # SMB/AD
+recce credenum --ssh-user root --ssh-key id_rsa -o eng               # Linux
+recce credenum -u alice -p 'Passw0rd!' -d corp.local --aggressive    # + secretsdump
+```
+
+- **netexec / nxc** (or crackmapexec) — authenticated **SMB**: shares & access,
+  domain users, sessions, logged-on users, password policy, and crucially
+  **local-admin access** (`Pwn3d!` → a high finding). A missing account-lockout
+  threshold is flagged as spray-friendly.
+- **impacket** — **Kerberoasting** (`GetUserSPNs`) and **AS-REP roasting**
+  (`GetNPUsers`) with the actual `$krb5tgs$`/`$krb5asrep$` hashes; `--aggressive`
+  adds **secretsdump** (SAM/LSA/NTDS NTLM hashes → a critical finding).
+- **ssh** — Linux host-level checks (`id`, `sudo -l`, `uname`, SUID sweep);
+  key auth or, for passwords, `sshpass` if present. Flags NOPASSWD sudo and
+  unusual SUID binaries.
+
+Results fold into the normal model: accounts and shares land on **Users &
+Accounts**, roasted accounts flow into **AD Quick Wins**, and access/loot/weak-
+policy findings become **Vulnerabilities**. It targets each host by surface
+(SMB hosts get netexec, DCs get roasting, SSH hosts get local checks), so one
+`credenum` run covers a mixed environment. `recce doctor` shows which of these
+tools are installed.
+
 ## Coverage tracking
 
 The goal: know **at any moment** which systems/services you've looked at and
@@ -485,6 +516,7 @@ recce/               the package (python -m recce)
   ad.py              AD analysis: roles, signing/relay, LDAP enumeration
   db.py              database detection + engine-specific NSE + inventory
   privesc.py         Windows/Linux priv-esc findings + playbook knowledge base
+  credenum.py        credentialed enum via netexec / impacket / ssh (tool-gated)
   exploits.py        offline exploit mapping via searchsploit (Exploit-DB)
   vulndb.py          offline version->CVE/CWE vulnerability engine (+ remediation)
   probes.py          stdlib HTTP-header + TLS enrichment probes (airgapped)

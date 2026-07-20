@@ -158,6 +158,7 @@ class Host:
     enumerated: bool = False       # tool progress: service enumeration has run
     db_scanned: bool = False       # the `db` phase ran against this host
     privesc_checked: bool = False  # the `privesc` phase ran against this host
+    cred_enumerated: bool = False  # the `credenum` phase ran against this host
     last_scanned: str = ""
     reviewed: bool = False
     notes: str = ""
