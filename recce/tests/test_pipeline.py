@@ -582,7 +582,91 @@ class WriteupTest(unittest.TestCase):
         self.assertIsNone(screenshot._web_url(Port(portid=22, service="ssh")))
         # No browser in the test env -> capture is a no-op, never raises.
         h = Host(ip="1.2.3.4", ports=[Port(portid=80, service="http")])
-        self.assertEqual(screenshot.capture_for_host(h), [])
+        if not screenshot.available():
+            self.assertEqual(screenshot.capture_for_host(h), [])
+
+    def _fake_browser(self, name):
+        """Create a fake executable and point RECCE_BROWSER at it."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        path = os.path.join(d, name)
+        with open(path, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(path, 0o755)
+        return path
+
+    def test_firefox_detection_and_command(self):
+        from recce import screenshot
+        ff = self._fake_browser("firefox")
+        os.environ["RECCE_BROWSER"] = ff
+        self.addCleanup(lambda: os.environ.pop("RECCE_BROWSER", None))
+        try:
+            self.assertEqual(screenshot.browser_tool(), ff)
+            self.assertTrue(screenshot._is_firefox(ff))
+            self.assertTrue(screenshot.available())
+
+            captured = {}
+
+            def fake_run(cmd, **kw):
+                captured["cmd"] = cmd
+                # Emulate Firefox writing the screenshot: -screenshot <out> URL
+                out = cmd[cmd.index("--screenshot") + 1]
+                with open(out, "wb") as fh:
+                    fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+            import subprocess as _sp
+            orig = _sp.run
+            _sp.run = fake_run
+            try:
+                png = screenshot.capture("http://1.2.3.4:80/")
+            finally:
+                _sp.run = orig
+
+            self.assertIsNotNone(png)
+            self.assertTrue(png.startswith(b"\x89PNG"))
+            cmd = captured["cmd"]
+            self.assertEqual(os.path.basename(cmd[0]), "firefox")
+            self.assertIn("--headless", cmd)
+            self.assertIn("-profile", cmd)
+            # Screenshot path is a positional arg (no `=` form), URL is last.
+            self.assertEqual(cmd[-1], "http://1.2.3.4:80/")
+            self.assertNotIn("--ignore-certificate-errors", cmd)
+        finally:
+            os.environ.pop("RECCE_BROWSER", None)
+
+    def test_chrome_detection_and_command(self):
+        from recce import screenshot
+        ch = self._fake_browser("chromium")
+        os.environ["RECCE_BROWSER"] = ch
+        self.addCleanup(lambda: os.environ.pop("RECCE_BROWSER", None))
+        try:
+            self.assertFalse(screenshot._is_firefox(ch))
+            captured = {}
+
+            def fake_run(cmd, **kw):
+                captured["cmd"] = cmd
+                out = cmd[-2].split("=", 1)[1]
+                with open(out, "wb") as fh:
+                    fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+            import subprocess as _sp
+            orig = _sp.run
+            _sp.run = fake_run
+            try:
+                png = screenshot.capture("https://1.2.3.4:443/")
+            finally:
+                _sp.run = orig
+
+            self.assertIsNotNone(png)
+            cmd = captured["cmd"]
+            self.assertIn("--headless", cmd)
+            self.assertIn("--ignore-certificate-errors", cmd)
+            self.assertTrue(cmd[-2].startswith("--screenshot="))
+            self.assertEqual(cmd[-1], "https://1.2.3.4:443/")
+        finally:
+            os.environ.pop("RECCE_BROWSER", None)
 
 
 class CredEnumTest(unittest.TestCase):

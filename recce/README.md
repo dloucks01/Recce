@@ -363,11 +363,14 @@ it always reflects the current data; skip it with `--no-combined`.
 The whole writer is **pure standard-library** (a `.docx` is a zip of XML, like
 the workbook) — no python-docx/Node needed, so it runs on the airgapped box.
 
-**Screenshots (web only).** If a headless browser is present (Chromium ships on
-Kali; or point `RECCE_BROWSER` at one), recce screenshots HTTP/HTTPS targets and
-embeds them under the walkthrough automatically. Non-web findings are evidenced
-by their captured tool output. Disable with `--no-screenshots`; filter with
-`--min-severity high`.
+**Screenshots (web only).** If a headless browser is present — **Firefox** (the
+Kali default) or **Chromium**, whichever is found, or point `RECCE_BROWSER` at a
+specific binary — recce screenshots HTTP/HTTPS targets and embeds them under the
+walkthrough automatically. Chrome is tried first because it can ignore
+self-signed cert warnings; headless Firefox will capture the browser's cert
+warning page for a bad-cert HTTPS target (still useful evidence). Non-web
+findings are evidenced by their captured tool output. Disable with
+`--no-screenshots`; filter with `--min-severity high`.
 
 ## Coverage tracking
 
