@@ -244,8 +244,12 @@ class PortStatusTest(unittest.TestCase):
             self.assertIn("Status", hdr)
             self.assertIn("Notes", hdr)
             si = hdr.index("Status")
-            # Every port row defaults to "Not started".
-            for r in rows[1:]:
+            ki = hdr.index("Key")
+            # Every port DATA row defaults to "Not started" (skip the collapsible
+            # host-header band rows, which carry no Key).
+            data_rows = [r for r in rows[1:] if len(r) > ki and r[ki]]
+            self.assertTrue(data_rows)
+            for r in data_rows:
                 self.assertEqual(r[si], STATUS_TODO)
             # The dropdown offers all three states (find the sheet whose
             # data-validation lists them, not merely any sheet mentioning them).
@@ -447,6 +451,26 @@ class DocxWriterTest(unittest.TestCase):
         self.assertIn("Severity: HIGH", text)
         self.assertIn("[TESTER: do this]", text)
 
+    def test_design_language_styling(self):
+        """Teal accent, coloured/mono field values, teal-tinted evidence block."""
+        import zipfile
+        from recce.docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "s.docx")
+            doc = Document()
+            doc.title("T")
+            doc.field("Severity", "CRITICAL", value_color="C00000")
+            doc.field("CVE / References", "CVE-2021-41773", mono=True)
+            doc.mono_block("raw evidence line")
+            doc.save(out)
+            with zipfile.ZipFile(out) as z:
+                body = z.read("word/document.xml").decode()
+                styles = z.read("word/styles.xml").decode()
+        self.assertIn('w:color w:val="0E6E67"', styles)      # teal accent in headings
+        self.assertIn('w:color w:val="C00000"', body)        # severity value coloured
+        self.assertIn('w:ascii="Consolas"', body)            # mono CVE + evidence
+        self.assertIn('w:fill="EDF6F4"', body)               # teal-tinted evidence
+
     def test_image_embed(self):
         import struct
         import binascii
@@ -545,6 +569,139 @@ class WriteupTest(unittest.TestCase):
         self.assertIn("nmap -sV", joined)         # discovery step
         self.assertIn("ssl-enum-ciphers", joined)  # tailored confirmation step
 
+    def test_narrative_is_multi_paragraph_and_context_aware(self):
+        from recce.models import Vuln
+        from recce.report_docx import group_findings, _narrative
+        # A likely (version-matched) web finding.
+        web = Host(ip="10.0.20.5", hostnames=["web01"],
+                   ports=[Port(portid=80, service="http", product="Apache httpd",
+                               version="2.4.49")],
+                   vulns=[Vuln(ip="10.0.20.5", port=80, protocol="tcp",
+                               script_id="version-db", title="Apache path traversal",
+                               severity="critical", source="version-db",
+                               confidence="likely", cwes=["CWE-22"],
+                               ids=["CVE-2021-41773"])])
+        f = group_findings([web])[0]
+        paras = _narrative(f)
+        self.assertEqual(len(paras), 3)                       # context / finding / impact
+        blob = " ".join(paras).lower()
+        self.assertIn("web service", blob)                    # service context
+        self.assertIn("apache httpd 2.4.49", blob)            # detected product
+        self.assertIn("10.0.20.5", blob)                      # affected host named
+        self.assertIn("cve-2021-41773", blob)                 # CVE woven in
+        self.assertIn("critical-risk", blob)                  # severity framing
+        self.assertIn("read files outside", blob)             # CWE-22 plain impact
+        self.assertIn("range known to be affected", blob)     # likely-confidence note
+
+        # A potential (advisory) finding gets the "confirm by hand" caveat instead.
+        adv = Host(ip="10.0.10.10", hostnames=["dc01"], os_family="Windows",
+                   ports=[Port(portid=445, service="microsoft-ds",
+                               product="Windows Server 2019")],
+                   vulns=[Vuln(ip="10.0.10.10", port=445, protocol="tcp",
+                               script_id="version-db", title="verify ZeroLogon",
+                               severity="critical", source="version-db",
+                               confidence="potential", cwes=["CWE-330"])])
+        pa = " ".join(_narrative(group_findings([adv])[0])).lower()
+        self.assertIn("smb", pa)                              # SMB service context
+        self.assertIn("confirmed through hands-on", pa)       # potential caveat
+
+    def test_every_cwe_is_classified_named_and_has_an_impact(self):
+        """Guarantee: every CWE recce can emit maps to a type + a name, and every
+        type has a plain-language impact - so no finding drops to a blank type."""
+        import glob
+        import re
+        from recce.report_docx import _CWE_TYPE, _CWE_NAME, _TYPE_IMPACT
+        used = set()
+        for fn in glob.glob(os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "recce", "*.py")):
+            if fn.endswith("report_docx.py"):
+                continue
+            with open(fn) as fh:
+                used |= set(re.findall(r"CWE-\d+", fh.read()))
+        self.assertTrue(used)
+        typed = set()
+        for keys, _label, _cia in _CWE_TYPE:
+            typed |= set(keys)
+        self.assertEqual(used - typed, set(), "CWEs with no vulnerability type")
+        self.assertEqual(used - set(_CWE_NAME), set(), "CWEs with no reference name")
+        for _keys, label, _cia in _CWE_TYPE:
+            self.assertIn(label, _TYPE_IMPACT, f"type '{label}' has no impact wording")
+        # CWEs the NSE-script mapper can assign must also be named + typed.
+        from recce.report_docx import _NSE_CWE
+        nse_cwes = {c for cs in _NSE_CWE.values() for c in cs}
+        self.assertEqual(nse_cwes - typed, set(), "NSE-mapped CWEs with no type")
+        self.assertEqual(nse_cwes - set(_CWE_NAME), set(), "NSE-mapped CWEs with no name")
+
+    def test_nse_scripts_auto_map_to_cwe_and_cve(self):
+        from recce.models import Vuln
+        from recce.report_docx import group_findings
+
+        def finding_for(script_id, title=None):
+            h = Host(ip="10.0.0.9", ports=[Port(portid=445, service="microsoft-ds")],
+                     vulns=[Vuln(ip="10.0.0.9", port=445, protocol="tcp",
+                                 script_id=script_id, title=title or script_id,
+                                 severity="high", source="nse")])
+            return group_findings([h])[0]
+
+        # ms17-010 (no CVE in the id) -> mapped CVE + CWE.
+        f = finding_for("smb-vuln-ms17-010")
+        self.assertIn("CVE-2017-0144", f.cves)
+        self.assertIn("CWE-787", f.cwes)
+        # http-vuln-cveYYYY-N -> CVE parsed from the id + CWE mapped.
+        f = finding_for("http-vuln-cve2021-41773")
+        self.assertIn("CVE-2021-41773", f.cves)
+        self.assertIn("CWE-22", f.cwes)
+        # Heartbleed TLS script -> its CVE + CWE.
+        f = finding_for("ssl-heartbleed")
+        self.assertIn("CVE-2014-0160", f.cves)
+        self.assertIn("CWE-125", f.cwes)
+        # A version-db finding that already has CWE/CVE is NOT overridden.
+        h = Host(ip="10.0.0.9", ports=[Port(portid=80, service="http")],
+                 vulns=[Vuln(ip="10.0.0.9", port=80, protocol="tcp",
+                             script_id="version-db", title="Apache thing",
+                             severity="high", source="version-db",
+                             cwes=["CWE-22"], ids=["CVE-2021-41773"])])
+        f = group_findings([h])[0]
+        self.assertEqual(f.cwes, ["CWE-22"])
+
+    def test_marquee_vulns_get_specific_impact(self):
+        from recce.models import Vuln
+        from recce.report_docx import group_findings, _narrative
+        cases = [
+            (["CVE-2020-1472"], "verify zerologon", "ZeroLogon"),
+            (["CVE-2021-34527"], "printnightmare", "Print Spooler"),
+            ([], "smb-vuln-ms17-010", "EternalBlue"),        # NSE hit, no CVE
+            (["CVE-2020-0796"], "smbghost", "SMBv3"),
+        ]
+        for cves, title, needle in cases:
+            h = Host(ip="10.0.0.9", os_family="Windows",
+                     ports=[Port(portid=445, service="microsoft-ds")],
+                     vulns=[Vuln(ip="10.0.0.9", port=445, protocol="tcp",
+                                 script_id=title, title=title, severity="critical",
+                                 source="nse", ids=cves)])
+            blob = " ".join(_narrative(group_findings([h])[0]))
+            self.assertIn(needle, blob, f"{title} missing marquee wording")
+
+    def test_reports_exclude_informational_by_default(self):
+        from recce.models import Vuln
+        from recce.report_docx import build_writeups
+        h = Host(ip="10.0.0.9", ports=[Port(portid=25, service="smtp")],
+                 vulns=[
+                     Vuln(ip="10.0.0.9", port=25, protocol="tcp", script_id="a",
+                          title="SMTP server exposed", severity="info", source="version-db"),
+                     Vuln(ip="10.0.0.9", port=25, protocol="tcp", script_id="b",
+                          title="Weak TLS on SMTP", severity="medium", source="probe"),
+                 ])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "w")
+            summary = build_writeups([h], out)               # default = findings only
+            self.assertEqual(summary["total"], 1)            # the medium, not the info
+            names = os.listdir(out)
+            self.assertFalse(any("_info_" in n for n in names))
+            # Opting in re-includes informational items.
+            summary2 = build_writeups([h], os.path.join(d, "w2"), min_severity="info")
+            self.assertEqual(summary2["total"], 2)
+
     def test_walkthrough_uses_searchsploit_exploit(self):
         from recce.models import Vuln, Exploit
         from recce.report_docx import group_findings, _walkthrough_steps
@@ -558,6 +715,35 @@ class WriteupTest(unittest.TestCase):
                                    title="vsftpd 2.3.4 backdoor")])
         f = group_findings([h])[0]
         self.assertIn("17491", " ".join(_walkthrough_steps(f)))
+
+    def test_walkthrough_only_cites_proven_exploits(self):
+        from recce.models import Vuln
+        from recce.report_docx import group_findings, _walkthrough_steps
+
+        def steps(title, conf, cves, source="version-db", svc="http", port=80):
+            h = Host(ip="1.1.1.1", ports=[Port(portid=port, service=svc)],
+                     vulns=[Vuln(ip="1.1.1.1", port=port, protocol="tcp",
+                                 script_id=source, title=title, severity="high",
+                                 source=source, confidence=conf, ids=cves)])
+            return " ".join(_walkthrough_steps(group_findings([h])[0]))
+
+        # Proven exploit (curated) on a version-matched finding -> cited concretely.
+        s = steps("Apache path traversal", "likely", ["CVE-2021-41773"])
+        self.assertIn("Metasploit", s)
+        self.assertIn("apache_normalize_path_rce", s)
+        # NSE-confirmed ms17-010 -> proven EternalBlue exploit cited.
+        self.assertIn("eternalblue", steps("smb-vuln-ms17-010", "", [],
+                                            source="nse", svc="microsoft-ds", port=445).lower())
+        # Advisory/potential finding -> NO exploit line, even with a famous CVE.
+        s = steps("Windows DC - verify ZeroLogon", "potential", ["CVE-2020-1472"],
+                  svc="microsoft-ds", port=445)
+        self.assertNotIn("Metasploit", s)
+        self.assertNotIn("exploit", s.lower())
+        # A version match with no proven exploit known -> no speculative "research" line.
+        s = steps("OpenSSH username enumeration", "likely", ["CVE-2018-15473"],
+                  svc="ssh", port=22)
+        self.assertNotIn("Metasploit", s)
+        self.assertNotIn("Research a working exploit", s)
 
     def test_combined_report(self):
         from recce.report_docx import build_combined
@@ -582,7 +768,91 @@ class WriteupTest(unittest.TestCase):
         self.assertIsNone(screenshot._web_url(Port(portid=22, service="ssh")))
         # No browser in the test env -> capture is a no-op, never raises.
         h = Host(ip="1.2.3.4", ports=[Port(portid=80, service="http")])
-        self.assertEqual(screenshot.capture_for_host(h), [])
+        if not screenshot.available():
+            self.assertEqual(screenshot.capture_for_host(h), [])
+
+    def _fake_browser(self, name):
+        """Create a fake executable and point RECCE_BROWSER at it."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        path = os.path.join(d, name)
+        with open(path, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(path, 0o755)
+        return path
+
+    def test_firefox_detection_and_command(self):
+        from recce import screenshot
+        ff = self._fake_browser("firefox")
+        os.environ["RECCE_BROWSER"] = ff
+        self.addCleanup(lambda: os.environ.pop("RECCE_BROWSER", None))
+        try:
+            self.assertEqual(screenshot.browser_tool(), ff)
+            self.assertTrue(screenshot._is_firefox(ff))
+            self.assertTrue(screenshot.available())
+
+            captured = {}
+
+            def fake_run(cmd, **kw):
+                captured["cmd"] = cmd
+                # Emulate Firefox writing the screenshot: -screenshot <out> URL
+                out = cmd[cmd.index("--screenshot") + 1]
+                with open(out, "wb") as fh:
+                    fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+            import subprocess as _sp
+            orig = _sp.run
+            _sp.run = fake_run
+            try:
+                png = screenshot.capture("http://1.2.3.4:80/")
+            finally:
+                _sp.run = orig
+
+            self.assertIsNotNone(png)
+            self.assertTrue(png.startswith(b"\x89PNG"))
+            cmd = captured["cmd"]
+            self.assertEqual(os.path.basename(cmd[0]), "firefox")
+            self.assertIn("--headless", cmd)
+            self.assertIn("-profile", cmd)
+            # Screenshot path is a positional arg (no `=` form), URL is last.
+            self.assertEqual(cmd[-1], "http://1.2.3.4:80/")
+            self.assertNotIn("--ignore-certificate-errors", cmd)
+        finally:
+            os.environ.pop("RECCE_BROWSER", None)
+
+    def test_chrome_detection_and_command(self):
+        from recce import screenshot
+        ch = self._fake_browser("chromium")
+        os.environ["RECCE_BROWSER"] = ch
+        self.addCleanup(lambda: os.environ.pop("RECCE_BROWSER", None))
+        try:
+            self.assertFalse(screenshot._is_firefox(ch))
+            captured = {}
+
+            def fake_run(cmd, **kw):
+                captured["cmd"] = cmd
+                out = cmd[-2].split("=", 1)[1]
+                with open(out, "wb") as fh:
+                    fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+            import subprocess as _sp
+            orig = _sp.run
+            _sp.run = fake_run
+            try:
+                png = screenshot.capture("https://1.2.3.4:443/")
+            finally:
+                _sp.run = orig
+
+            self.assertIsNotNone(png)
+            cmd = captured["cmd"]
+            self.assertIn("--headless", cmd)
+            self.assertIn("--ignore-certificate-errors", cmd)
+            self.assertTrue(cmd[-2].startswith("--screenshot="))
+            self.assertEqual(cmd[-1], "https://1.2.3.4:443/")
+        finally:
+            os.environ.pop("RECCE_BROWSER", None)
 
 
 class CredEnumTest(unittest.TestCase):
@@ -648,6 +918,41 @@ class CredEnumTest(unittest.TestCase):
         # Roasted accounts flow into the AD quick-wins.
         self.assertIn("sqlsvc", [a.name for a in ad.kerberoastable([h])])
         self.assertIn("svc-web", [a.name for a in ad.asrep_roastable([h])])
+
+    def test_dual_account_user_enumerates_admin_dumps(self):
+        """Low-priv account enumerates; privileged account does the admin-only
+        power moves (confirm admin reach + secretsdump), labelled per account."""
+        from recce import credenum as c
+        used = []
+
+        def fake_nxc(ip, creds):
+            # Only the privileged account is local admin here.
+            return ({"admin": creds["username"] == "da", "host_info": "corp",
+                     "shares": [{"name": "C$", "perms": "READ"}],
+                     "users": [{"name": "bob", "domain": "corp"}],
+                     "loggedon": [], "passpol": {}}, None)
+
+        def fake_dump(ip, creds):
+            used.append(("secretsdump", creds["username"]))
+            return ([{"name": "krbtgt", "rid": "502", "nt": "abc"}], None)
+
+        onx, osd, odc = c.run_nxc_smb, c.run_secretsdump, c._is_dc
+        c.run_nxc_smb, c.run_secretsdump, c._is_dc = fake_nxc, fake_dump, lambda h: False
+        try:
+            h = Host(ip="10.0.0.5", os_family="Windows",
+                     ports=[Port(portid=445, state="open")])
+            c.enrich_host(h, {"username": "bob", "password": "x", "domain": "corp"},
+                          None, aggressive=False,
+                          admin_creds={"username": "da", "password": "y", "domain": "corp"})
+        finally:
+            c.run_nxc_smb, c.run_secretsdump, c._is_dc = onx, osd, odc
+        # secretsdump ran with the PRIVILEGED account, never the user account.
+        self.assertEqual(used, [("secretsdump", "da")])
+        titles = " ".join(v.title for v in h.vulns)
+        self.assertIn("Local admin confirmed - privileged account", titles)
+        self.assertIn("Credential hashes dumped", titles)
+        # User enumeration still folded shares/users (once, not duplicated).
+        self.assertEqual(sum(1 for a in h.accounts if a.kind == "share"), 1)
 
     def test_ssh_finding_and_facts_recorded(self):
         from recce import credenum as c
@@ -938,13 +1243,16 @@ class VulnDbTest(unittest.TestCase):
 
     def test_windows_advisories_are_os_gated(self):
         from recce import vulndb
+        # A non-DC Windows host gets the Windows SMB advisories, but NOT ZeroLogon
+        # (which attacks a domain controller's Netlogon only).
         win = Host(ip="1.1.1.1", os_family="Windows", os_name="Windows Server 2019",
                    ports=[Port(portid=445, service="microsoft-ds",
                                product="Microsoft Windows Server 2019", state="open")])
         vulndb.assess_host_inplace(win)
         titles = " ".join(v.title for v in win.vulns)
-        for expect in ("SMBGhost", "PrintNightmare", "ZeroLogon"):
+        for expect in ("SMBGhost", "PrintNightmare"):
             self.assertIn(expect, titles)
+        self.assertNotIn("ZeroLogon", titles)          # DC-only -> not on a member
         # A Linux/Samba SMB host must NOT get the Windows-only advisories.
         lin = Host(ip="1.1.1.2", os_family="Linux", os_name="Linux",
                    ports=[Port(portid=445, service="microsoft-ds",
@@ -952,6 +1260,40 @@ class VulnDbTest(unittest.TestCase):
         vulndb.assess_host_inplace(lin)
         self.assertFalse(any(w in " ".join(v.title for v in lin.vulns)
                              for w in ("SMBGhost", "PrintNightmare", "ZeroLogon")))
+
+    def test_iis_mssql_seimpersonate_potato_advisories(self):
+        from recce import vulndb
+        h = Host(ip="10.0.10.50", os_family="Windows", os_name="Windows 11",
+                 ports=[Port(portid=80, service="http",
+                             product="Microsoft IIS httpd", version="10.0"),
+                        Port(portid=1433, service="ms-sql-s",
+                             product="Microsoft SQL Server", version="15.0")])
+        vulndb.assess_host_inplace(h)
+        titles = " ".join(v.title for v in h.vulns)
+        self.assertIn("IIS AppPool - SeImpersonate", titles)
+        self.assertIn("MSSQL service account - SeImpersonate", titles)
+        potato = [v for v in h.vulns if "SeImpersonate" in v.title]
+        for v in potato:
+            self.assertEqual(v.confidence, "potential")       # advisory
+            self.assertIn("CWE-269", v.cwes)
+            self.assertIn("GodPotato", v.output + v.remediation or "")
+
+    def test_zerologon_is_dc_only(self):
+        from recce import vulndb
+        # A real DC (Kerberos 88 + LDAP 389 + SMB 445) DOES get ZeroLogon.
+        dc = Host(ip="10.0.10.10", os_family="Windows", os_name="Windows Server 2019",
+                  ports=[Port(portid=88, service="kerberos-sec", state="open"),
+                         Port(portid=389, service="ldap", state="open"),
+                         Port(portid=445, service="microsoft-ds",
+                              product="Windows Server 2019", state="open")])
+        vulndb.assess_host_inplace(dc)
+        self.assertIn("ZeroLogon", " ".join(v.title for v in dc.vulns))
+        # Role-tagged DC with only SMB visible still matches via the role.
+        dc2 = Host(ip="10.0.10.11", os_family="Windows", roles=["Domain Controller"],
+                   ports=[Port(portid=445, service="microsoft-ds",
+                               product="Windows Server", state="open")])
+        vulndb.assess_host_inplace(dc2)
+        self.assertIn("ZeroLogon", " ".join(v.title for v in dc2.vulns))
 
     def test_jetty_version_gate(self):
         from recce import vulndb
@@ -1124,6 +1466,26 @@ class PrivescModuleTest(unittest.TestCase):
                         severity="critical")]
         findings = [r for r in privesc.plan(h) if r["category"] == "finding"]
         self.assertTrue(any("MS17-010" in r["vector"] for r in findings))
+
+    def test_current_potato_playbook_and_service_hints(self):
+        from recce import privesc
+        h = Host(ip="10.0.10.50", os_family="Windows", os_name="Windows 11",
+                 ports=[Port(portid=80, service="http",
+                             product="Microsoft IIS httpd", version="10.0"),
+                        Port(portid=1433, service="ms-sql-s",
+                             product="Microsoft SQL Server")])
+        rows = privesc.plan(h)
+        blob = " ".join(f"{r['vector']} {r['howto']} {r['note']}" for r in rows)
+        # Current, still-working-on-patched-Win11 Potatoes are named as exploits.
+        for tool in ("GodPotato", "PrintSpoofer", "EfsPotato", "JuicyPotatoNG",
+                     "RoguePotato", "LocalPotato"):
+            self.assertIn(tool, blob)
+        self.assertIn("CVE-2023-21746", blob)                 # LocalPotato CVE
+        self.assertIn("SeImpersonate", blob)                  # precondition named
+        # recce flags the opportunity remotely from the IIS + MSSQL services.
+        findings = [r for r in rows if r["category"] == "finding"]
+        self.assertTrue(any("IIS" in r["vector"] for r in findings))
+        self.assertTrue(any("MSSQL" in r["vector"] for r in findings))
 
 
 class StepCheckboxTest(unittest.TestCase):

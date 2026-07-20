@@ -611,7 +611,7 @@ SIGNATURES: list[dict] = [
      "desc": "Print Spooler remote code execution / LPE - any unpatched Windows host "
              "with the spooler running is exploitable to SYSTEM."},
     {"product": ["microsoft-ds", "netbios-ssn"], "os": "windows", "severity": "critical",
-     "advisory": True,
+     "advisory": True, "dc_only": True,
      "title": "Windows DC - verify ZeroLogon (CVE-2020-1472)",
      "cves": ["CVE-2020-1472"], "cwe": ["CWE-330"],
      "remediation": "Apply Aug-2020+ patches and enforce secure RPC on Netlogon.",
@@ -634,6 +634,25 @@ SIGNATURES: list[dict] = [
      "desc": "Network-exposed SQL Server is a prime lateral-movement/data target. "
              "Pre-2016 builds are EOL (SSRS RCE CVE-2020-0618); check for weak/blank sa "
              "credentials and enabled xp_cmdshell."},
+    {"product": ["microsoft iis", "iis httpd"], "severity": "high", "advisory": True,
+     "title": "IIS AppPool - SeImpersonate -> Potato LPE to SYSTEM",
+     "cves": [], "cwe": ["CWE-269", "CWE-250"],
+     "remediation": "Run AppPools under least-privilege identities; remove "
+                    "SeImpersonatePrivilege where feasible; patch and monitor.",
+     "desc": "IIS worker (AppPool) identities normally hold SeImpersonatePrivilege. "
+             "Any code execution as the AppPool (webshell, upload, deserialization) "
+             "escalates to SYSTEM with a current Potato - GodPotato, PrintSpoofer, "
+             "SharpEfsPotato, JuicyPotatoNG - even on a fully-patched Windows 11 / "
+             "Server 2016-2022. See the Priv-Esc sheet for the tools/commands."},
+    {"product": ["microsoft sql server", "ms-sql"], "severity": "high", "advisory": True,
+     "title": "MSSQL service account - SeImpersonate -> Potato LPE to SYSTEM",
+     "cves": [], "cwe": ["CWE-269", "CWE-250"],
+     "remediation": "Run SQL Server under a least-privilege (g)MSA; remove "
+                    "SeImpersonate; disable xp_cmdshell.",
+     "desc": "The MSSQL service account normally holds SeImpersonatePrivilege, so "
+             "code execution through the database (xp_cmdshell, etc.) escalates to "
+             "SYSTEM with a current Potato (GodPotato, PrintSpoofer, SharpEfsPotato) "
+             "even on a fully-patched host."},
 
     # === Default-credential advisories =========================================
     {"product": ["grafana"], "severity": "medium", "advisory": True,
@@ -744,12 +763,24 @@ def _os_version(host: Host) -> str:
     return m.group(1) if m else ""
 
 
+def _is_dc(host: Host) -> bool:
+    """True if the host looks like a domain controller (role or DC-only ports)."""
+    if any("domain controller" in r.lower() for r in (host.roles or [])):
+        return True
+    open_ids = {p.portid for p in host.open_ports}
+    # Kerberos KDC (88) + LDAP (389 or Global Catalog 3268) is a DC fingerprint.
+    return 88 in open_ids and bool(open_ids & {389, 3268})
+
+
 def _matches(sig: dict, port: Port, host: Host) -> bool:
     blob = f"{port.product} {port.service}".lower()
     if not any(p in blob for p in sig["product"]):
         return False
     # OS gate (e.g. BlueKeep only on old Windows).
     if sig.get("os") and sig["os"] not in (host.os_family or host.os_name).lower():
+        return False
+    # DC-only gate (e.g. ZeroLogon attacks a domain controller's Netlogon).
+    if sig.get("dc_only") and not _is_dc(host):
         return False
     if sig.get("os_lt"):
         osv = _os_version(host)

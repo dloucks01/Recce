@@ -238,6 +238,14 @@ def _creds_of(args) -> dict | None:
             "domain": args.domain} if getattr(args, "username", None) else None
 
 
+def _admin_creds_of(args) -> dict | None:
+    """The optional privileged/superuser account (domain defaults to -d)."""
+    if not getattr(args, "admin_username", None):
+        return None
+    return {"username": args.admin_username, "password": args.admin_password,
+            "domain": getattr(args, "admin_domain", None) or getattr(args, "domain", None)}
+
+
 class _Refresher:
     """Throttled interim report refresh: regenerate after every N hosts OR at
     least every `interval` seconds, whichever comes first. Results are already
@@ -644,19 +652,21 @@ def _ssh_creds_of(args) -> dict | None:
             "key": getattr(args, "ssh_key", None)}
 
 
-def _credenum_worker(host, creds, ssh_creds, aggressive):
+def _credenum_worker(host, creds, ssh_creds, aggressive, admin_creds=None):
     """Returns (host, issues)."""
     from . import credenum
-    issues = credenum.enrich_host(host, creds, ssh_creds, aggressive=aggressive)
+    issues = credenum.enrich_host(host, creds, ssh_creds, aggressive=aggressive,
+                                  admin_creds=admin_creds)
     return host, issues
 
 
 def _phase_credenum(store, paths, args) -> None:
     from . import credenum
     creds = _creds_of(args)
+    admin_creds = _admin_creds_of(args)
     ssh_creds = _ssh_creds_of(args)
     aggressive = getattr(args, "aggressive", False)
-    if not creds and not ssh_creds:
+    if not creds and not ssh_creds and not admin_creds:
         print("[!] credenum needs credentials: --username/--password (+--domain) "
               "for SMB/AD, and/or --ssh-user for Linux hosts.")
         return
@@ -671,12 +681,20 @@ def _phase_credenum(store, paths, args) -> None:
     if not targets:
         print("[!] No hosts in scope.")
         return
-    mode = " + secretsdump (aggressive)" if aggressive else ""
+    accts = []
+    if creds:
+        accts.append(f"user '{creds['username']}'")
+    if admin_creds:
+        accts.append(f"privileged '{admin_creds['username']}' (admin checks + secretsdump)")
+    mode = (" with " + " + ".join(accts)) if accts else ""
+    if aggressive and not admin_creds:
+        mode += " + secretsdump (aggressive)"
     print(f"[*] Credentialed enum on {len(targets)} host(s){mode} ...")
     refresher = _Refresher(args)
     completed = 0
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
-        futures = {ex.submit(_credenum_worker, h, creds, ssh_creds, aggressive): h.ip
+        futures = {ex.submit(_credenum_worker, h, creds, ssh_creds, aggressive,
+                             admin_creds): h.ip
                    for h in targets}
         for fut in as_completed(futures):
             ip = futures[fut]
@@ -878,7 +896,7 @@ def cmd_writeups(args: argparse.Namespace) -> int:
     shots: dict = {}
     if not args.no_screenshots and not screenshot.available():
         print("[!] No headless browser found; skipping auto-screenshots (add them "
-              "by hand in Word). Install chromium to enable web screenshots.")
+              "by hand in Word). Install firefox or chromium to enable them.")
     elif not args.no_screenshots:
         web_hosts = [h for h in hosts
                      if any(screenshot._web_url(p) for p in h.open_ports)]
@@ -936,7 +954,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("ldapsearch", False, "credentialed AD LDAP enumeration"),
         ("netexec", False, "credentialed SMB/AD enum (credenum phase)"),
         ("ssh", False, "credentialed Linux local checks (credenum phase)"),
-        ("chromium", False, "auto web screenshots in finding write-ups"),
+        ("browser", False, "auto web screenshots in write-ups (firefox/chromium)"),
     ]
     nmap_ok = False
     for name, required, desc in tools:
@@ -944,9 +962,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if name == "netexec":
             from . import credenum
             present = credenum.smb_tool() is not None   # nxc / crackmapexec too
-        if name == "chromium":
+        if name == "browser":
             from . import screenshot
-            present = screenshot.available()             # chrome variants too
+            present = screenshot.available()             # firefox / chrome variants
+            found = screenshot.browser_tool()
+            if found:
+                desc = f"auto web screenshots in write-ups (using {found})"
         if name == "nmap":
             nmap_ok = present
         mark = "OK  " if present else ("MISSING (required)" if required else "-   (optional)")
@@ -1301,9 +1322,16 @@ def _add_common(pp) -> None:
 
 
 def _add_creds(pp) -> None:
-    pp.add_argument("-u", "--username", help="credential for authenticated SMB/LDAP")
-    pp.add_argument("-p", "--password", help="credential for authenticated SMB/LDAP")
+    pp.add_argument("-u", "--username", help="low-priv/user account for authenticated SMB/LDAP")
+    pp.add_argument("-p", "--password", help="password for the user account")
     pp.add_argument("-d", "--domain", help="AD domain (e.g. corp.local) for authentication")
+    pp.add_argument("--admin-user", dest="admin_username",
+                    help="privileged/superuser account: runs the admin-only checks "
+                         "(confirm local-admin reach, secretsdump hash dump)")
+    pp.add_argument("--admin-pass", dest="admin_password",
+                    help="password for the privileged account")
+    pp.add_argument("--admin-domain", dest="admin_domain",
+                    help="domain for the privileged account (defaults to -d)")
     pp.add_argument("--ldap-enum", action="store_true",
                     help="credentialed LDAP enumeration of discovered DCs")
     pp.add_argument("--ldap-anon", action="store_true", help="attempt anonymous LDAP bind")
@@ -1334,7 +1362,7 @@ def _add_discovery(pp) -> None:
 def _add_vuln_opts(pp) -> None:
     pp.add_argument("--aggressive", action="store_true",
                     help="run the full intrusive NSE 'vuln' category (can crash "
-                         "fragile services); default is safe detection only")
+                         "fragile services); default is deep safe detection")
     pp.add_argument("--offline", action="store_true",
                     help="airgapped: disable internet-dependent NSE (vulners)")
     pp.add_argument("--no-searchsploit", action="store_true",
@@ -1433,9 +1461,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wu.add_argument("-o", "--output-dir", default="engagement")
     wu.add_argument("--title", default="Recce Engagement",
                     help="engagement title shown on the combined report")
-    wu.add_argument("--min-severity", default="info",
+    wu.add_argument("--min-severity", default="low",
                     choices=["critical", "high", "medium", "low", "info"],
-                    help="only findings at or above this severity")
+                    help="only findings at or above this severity (default: low - "
+                         "excludes informational items; use 'info' to include them)")
     wu.add_argument("--no-screenshots", action="store_true",
                     help="don't auto-capture web screenshots (add them in Word)")
     wu.add_argument("--no-combined", action="store_true",
