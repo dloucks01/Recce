@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 
 from .docx import Document
+from .exploitref import proven_exploit_ref
 from .models import Host, Vuln
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -290,43 +291,10 @@ def _marquee_impact(f: Finding) -> str | None:
     return None
 
 
-# Verifiable, proven public exploits: CVE (and a keyword fallback) -> a concrete,
-# publicly available exploit that is known to work. ONLY these + searchsploit/EDB
-# matches are cited as exploits in a walkthrough - never a speculative "go find
-# one". Kept conservative on purpose.
-_PROVEN_EXPLOIT = {
-    "CVE-2017-0144": "Metasploit exploit/windows/smb/ms17_010_eternalblue (EternalBlue); or the AutoBlue-MS17-010 PoC",
-    "CVE-2017-0143": "Metasploit exploit/windows/smb/ms17_010_eternalblue (EternalBlue)",
-    "CVE-2019-0708": "Metasploit exploit/windows/rdp/cve_2019_0708_bluekeep_rce (BlueKeep - can BSOD; use with care)",
-    "CVE-2021-34527": "Metasploit exploit/windows/dcerpc/cve_2021_1675_printnightmare; or SharpPrintNightmare / Invoke-Nightmare",
-    "CVE-2021-1675": "Metasploit exploit/windows/dcerpc/cve_2021_1675_printnightmare; or SharpPrintNightmare",
-    "CVE-2014-0160": "Metasploit auxiliary/scanner/ssl/openssl_heartbleed (Heartbleed)",
-    "CVE-2011-2523": "Metasploit exploit/unix/ftp/vsftpd_234_backdoor",
-    "CVE-2021-41773": "Metasploit exploit/multi/http/apache_normalize_path_rce; or the public curl path-traversal PoC",
-    "CVE-2021-42013": "Metasploit exploit/multi/http/apache_normalize_path_rce",
-    "CVE-2021-44228": "Metasploit exploit/multi/http/log4shell_header_injection (Log4Shell); or marshalsec LDAP + JNDI payload",
-    "CVE-2017-5638": "Metasploit exploit/multi/http/struts2_content_type_ognl (Struts2)",
-    "CVE-2014-6271": "Metasploit exploit/multi/http/apache_mod_cgi_bash_env_exec (Shellshock)",
-}
-_PROVEN_KW = {
-    "ms17-010": _PROVEN_EXPLOIT["CVE-2017-0144"],
-    "vsftpd 2.3.4": _PROVEN_EXPLOIT["CVE-2011-2523"],
-    "shellshock": _PROVEN_EXPLOIT["CVE-2014-6271"],
-    "heartbleed": _PROVEN_EXPLOIT["CVE-2014-0160"],
-}
-
-
 def _proven_exploit(f: Finding) -> str | None:
-    """A verifiable, proven public exploit for this finding, or None. Never a
-    speculative lead - only entries we can point at concretely."""
-    for cve in f.cves:
-        if cve in _PROVEN_EXPLOIT:
-            return _PROVEN_EXPLOIT[cve]
-    hay = (f.title + " " + " ".join(f.scripts)).lower()
-    for kw, ref in _PROVEN_KW.items():
-        if kw in hay:
-            return ref
-    return None
+    """A verifiable, proven public exploit for this finding, or None (shared with
+    the Vulnerabilities sheet via exploitref)."""
+    return proven_exploit_ref(f.cves, f.title + " " + " ".join(f.scripts))
 _SEV_FRAME = {
     "critical": "This is considered a critical-risk exposure",
     "high": "This is considered a high-risk exposure",

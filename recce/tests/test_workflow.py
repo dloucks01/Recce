@@ -162,6 +162,19 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
                              " ".join(r["Finding"] for r in by_ip.get(ip, [])))
         # ftp-anon is web02 only.
         self.assertIn("FTP", " ".join(r["Finding"] for r in by_ip.get("10.0.20.6", [])))
+
+    def test_proven_exploit_column(self):
+        _hdr, by_ip = rows_by_ip(self.sheets, "Vulnerabilities")
+        self.assertIn("Proven exploit", _hdr)
+        # The DC's ms17-010 finding carries the proven EternalBlue exploit...
+        dc = by_ip["10.0.10.10"]
+        ms17 = next(r for r in dc if "ms17-010" in r["Finding"])
+        self.assertIn("eternalblue", ms17["Proven exploit"].lower())
+        # ...while an advisory/potential finding (SMBGhost etc.) gets no exploit,
+        # and neither does any non-proven finding.
+        for r in dc:
+            if r["Conf."] == "potential":
+                self.assertEqual(r["Proven exploit"], "")
         # ws01 has no findings at all.
         self.assertEqual(by_ip.get("10.0.10.25", []), [])
 
