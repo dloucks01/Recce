@@ -1386,6 +1386,26 @@ class PrivescModuleTest(unittest.TestCase):
         findings = [r for r in privesc.plan(h) if r["category"] == "finding"]
         self.assertTrue(any("MS17-010" in r["vector"] for r in findings))
 
+    def test_current_potato_playbook_and_service_hints(self):
+        from recce import privesc
+        h = Host(ip="10.0.10.50", os_family="Windows", os_name="Windows 11",
+                 ports=[Port(portid=80, service="http",
+                             product="Microsoft IIS httpd", version="10.0"),
+                        Port(portid=1433, service="ms-sql-s",
+                             product="Microsoft SQL Server")])
+        rows = privesc.plan(h)
+        blob = " ".join(f"{r['vector']} {r['howto']} {r['note']}" for r in rows)
+        # Current, still-working-on-patched-Win11 Potatoes are named as exploits.
+        for tool in ("GodPotato", "PrintSpoofer", "EfsPotato", "JuicyPotatoNG",
+                     "RoguePotato", "LocalPotato"):
+            self.assertIn(tool, blob)
+        self.assertIn("CVE-2023-21746", blob)                 # LocalPotato CVE
+        self.assertIn("SeImpersonate", blob)                  # precondition named
+        # recce flags the opportunity remotely from the IIS + MSSQL services.
+        findings = [r for r in rows if r["category"] == "finding"]
+        self.assertTrue(any("IIS" in r["vector"] for r in findings))
+        self.assertTrue(any("MSSQL" in r["vector"] for r in findings))
+
 
 class StepCheckboxTest(unittest.TestCase):
     def _host(self, **kw):

