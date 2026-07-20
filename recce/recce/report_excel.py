@@ -357,7 +357,7 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
 def _build_guide(wb, meta: dict) -> None:
     """A friendly 'Start Here' sheet so the workbook explains itself."""
     sh = wb.add_sheet("Start Here")
-    sh.write([("pentest_enum - engagement tracker", "title")])
+    sh.write([("recce - engagement tracker", "title")])
     sh.write([(meta.get("subtitle", ""), "sub")])
     sh.write([""])
     sh.write([("Scans fill this workbook in; you check things off as you go. "
