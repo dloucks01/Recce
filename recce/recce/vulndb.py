@@ -611,7 +611,7 @@ SIGNATURES: list[dict] = [
      "desc": "Print Spooler remote code execution / LPE - any unpatched Windows host "
              "with the spooler running is exploitable to SYSTEM."},
     {"product": ["microsoft-ds", "netbios-ssn"], "os": "windows", "severity": "critical",
-     "advisory": True,
+     "advisory": True, "dc_only": True,
      "title": "Windows DC - verify ZeroLogon (CVE-2020-1472)",
      "cves": ["CVE-2020-1472"], "cwe": ["CWE-330"],
      "remediation": "Apply Aug-2020+ patches and enforce secure RPC on Netlogon.",
@@ -744,12 +744,24 @@ def _os_version(host: Host) -> str:
     return m.group(1) if m else ""
 
 
+def _is_dc(host: Host) -> bool:
+    """True if the host looks like a domain controller (role or DC-only ports)."""
+    if any("domain controller" in r.lower() for r in (host.roles or [])):
+        return True
+    open_ids = {p.portid for p in host.open_ports}
+    # Kerberos KDC (88) + LDAP (389 or Global Catalog 3268) is a DC fingerprint.
+    return 88 in open_ids and bool(open_ids & {389, 3268})
+
+
 def _matches(sig: dict, port: Port, host: Host) -> bool:
     blob = f"{port.product} {port.service}".lower()
     if not any(p in blob for p in sig["product"]):
         return False
     # OS gate (e.g. BlueKeep only on old Windows).
     if sig.get("os") and sig["os"] not in (host.os_family or host.os_name).lower():
+        return False
+    # DC-only gate (e.g. ZeroLogon attacks a domain controller's Netlogon).
+    if sig.get("dc_only") and not _is_dc(host):
         return False
     if sig.get("os_lt"):
         osv = _os_version(host)
