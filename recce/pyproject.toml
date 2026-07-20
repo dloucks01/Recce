@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recce"
+description = "Multi-subnet enumeration, vulnerability triage & reporting for pentest engagements (stdlib-only, airgapped-friendly)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["pentest", "nmap", "enumeration", "reporting", "security"]
+dynamic = ["version"]
+# Runtime is deliberately stdlib-only (airgapped Kali boxes): no install-time
+# dependencies. The tools it shells out to (nmap, netexec, impacket, ...) are
+# gated at runtime, not Python packages.
+dependencies = []
+
+[project.optional-dependencies]
+# Only the test suite needs a third-party package (to validate the hand-rolled
+# .xlsx against a real reader); the tool itself never imports it.
+test = ["openpyxl"]
+
+[project.scripts]
+recce = "recce.cli:main"
+
+[tool.setuptools]
+packages = ["recce"]
+
+[tool.setuptools.dynamic]
+version = { attr = "recce.__version__" }
+
+[tool.setuptools.package-data]
+# Ship the bundled demo scan and the on-target enum scripts alongside the code.
+recce = ["sample_scan.xml", "local/*"]

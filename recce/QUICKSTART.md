@@ -140,3 +140,24 @@ done, and run **`report -o eng`** any time to rebuild the workbook from saved da
 On a large scope, `vulns --fast` finishes far quicker (top-signal checks only) and
 prints a live **progress % + ETA**; each phase ends with a loud summary of any
 hosts that errored so a failure can't scroll past unseen.
+
+## Troubleshooting (the quick hits)
+
+Run **`recce doctor`** first — it reports what's missing and self-tests the whole
+pipeline on this box. The usual snags:
+
+| Symptom | Fix |
+|---|---|
+| `nmap ... not found` | Install nmap — the only hard requirement. |
+| "Not running as root" / weak scan | Run with `sudo`; use `sudo ./bin/recce ...` so PATH survives sudo. |
+| Discovery finds no hosts | A firewall drops pings — re-run `enum` with `--no-discovery` (`-Pn`). |
+| Too slow | `--fast`, `--workers N`, `vulns --fast`, `--profile quick`, `--host-timeout`. |
+| Crashed / interrupted | Re-run with `--resume`, or `report -o eng`. `RECCE_DEBUG=1` for the traceback. |
+| "No open ports match" on `vulns` | Run `enum` first; `--unscanned` finds nothing once all is scanned. |
+| No findings (but expected some) | Improve service ID (`--version-all`) then `vulns --aggressive`. |
+| credenum: `No ... tools found` | Install netexec + impacket (or ssh). |
+| Auth table shows `FAIL`/`ERR` | `FAIL` = creds rejected (check user/pass/**domain**); `ERR` = unreachable/tool error. |
+| Workbook won't update | Close it in Excel first — an open file is locked. |
+
+**Re-running any phase is safe** — every phase is idempotent (never duplicates
+rows). Full guide: **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.

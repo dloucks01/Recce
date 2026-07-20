@@ -12,3 +12,7 @@ demo_out/
 *.sqlite
 *.xlsx
 raw/
+
+# Build artifacts
+build/
+dist/

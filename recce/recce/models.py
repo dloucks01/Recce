@@ -189,19 +189,6 @@ class Host:
         return f"vuln-scanned {scanned}/{len(op)}"
 
     @property
-    def vuln_step(self) -> str:
-        """Checklist cell for the vuln-scan step: done / N/M / pending / n/a."""
-        op = self.open_ports
-        if not op:
-            return "n/a"
-        scanned = sum(1 for p in op if p.vuln_scanned)
-        if scanned == 0:
-            return "pending"
-        if scanned == len(op):
-            return "done"
-        return f"{scanned}/{len(op)}"
-
-    @property
     def os_guess(self) -> str:
         if self.os_name:
             return f"{self.os_name} ({self.os_accuracy}%)" if self.os_accuracy else self.os_name

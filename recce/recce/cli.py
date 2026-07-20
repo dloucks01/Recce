@@ -25,7 +25,7 @@ from . import tracking as tr
 from .models import Host
 from .report_excel import read_workbook_edits, update_workbook
 from .report_markdown import build_csv, build_markdown
-from .store import Store
+from .store import Store, StoreError
 from .targets import apply_exclusions, ip_matcher, load_targets
 
 BANNER = r"""
@@ -85,6 +85,17 @@ def _ports_for_host(xml_path: str, ip: str) -> list[int]:
     return []
 
 
+def _open_store(db_path: str):
+    """Open the datastore, turning a corrupt/unreadable DB (StoreError) into a
+    clean actionable message + None instead of a traceback. Used by the commands
+    that open an existing engagement directly (report/status/writeups/...)."""
+    try:
+        return Store(db_path)
+    except StoreError as e:
+        print(f"[x] {e}")
+        return None
+
+
 def _open_paths(out_dir: str) -> dict[str, str]:
     raw = os.path.join(out_dir, "raw")
     os.makedirs(raw, exist_ok=True)
@@ -107,6 +118,10 @@ def _record_issues(store: Store, paths: dict, ip: str, issues: list) -> None:
     plain-text run log, and echo errors to the console so they're seen live."""
     if not issues:
         return
+    # Clear this host's prior issues for each phase we're about to (re)write, so a
+    # re-run replaces its own issues instead of stacking duplicates.
+    for phase in {iss.get("phase", "") for iss in issues if isinstance(iss, dict)}:
+        store.clear_issues(ip, phase)
     for iss in issues:
         phase = iss.get("phase", "") if isinstance(iss, dict) else ""
         level = iss.get("level", "warning") if isinstance(iss, dict) else "warning"
@@ -195,7 +210,10 @@ def _safe_refresh(store: Store, paths: dict[str, str], title: str) -> bool:
     try:
         _generate_reports(store, paths, title, quiet=True)
         return True
-    except (PermissionError, OSError):
+    except Exception:  # noqa: BLE001
+        # A locked workbook (OSError) OR any report-builder bug must NOT abort the
+        # scan phase mid-run - the data is safe in the datastore, and the final
+        # report (or a later `report` command) will regenerate it.
         return False
 
 
@@ -297,8 +315,11 @@ def _final_report(store, paths, title) -> None:
     try:
         _import_excel_tracking(store, paths, reconcile_steps=False)
         _generate_reports(store, paths, title)
-    except (PermissionError, OSError):
-        print("[!] Could not write the workbook (open/locked). Your data is saved "
+    except Exception as e:  # noqa: BLE001
+        # Runs in every command's `finally`, so a locked workbook OR any
+        # report-builder bug must not turn completed scan work into a crash.
+        detail = "open/locked" if isinstance(e, OSError) else f"{type(e).__name__}: {e}"
+        print(f"[!] Could not write the workbook ({detail}). Your data is saved "
               "in the datastore - close the file and run `report` to rebuild it.")
 
 
@@ -335,9 +356,17 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map):
 
 
 def _discover(args, profile, store, paths):
-    hosts, subnet_map = load_targets(args.targets)
+    try:
+        hosts, subnet_map = load_targets(args.targets)
+    except (ValueError, OSError) as e:
+        # Bad CIDR/range (ValueError) or a missing/unreadable @file (OSError) - the
+        # literal first thing a tester types. Fail with a clear message, not a crash.
+        print(f"[x] Invalid targets: {e}\n    Fix the IP / range / CIDR / @file "
+              "and re-run.")
+        return None, [], None
     hosts = apply_exclusions(hosts, args.exclude or [])
     if not hosts:
+        print("[x] No targets after expansion/exclusion.")
         return None, [], None
     # Record the full scope so the report accounts for every subnet, even those
     # that turn out to have no live hosts.
@@ -695,17 +724,21 @@ def _credenum_worker(host, creds, ssh_creds, aggressive, admin_creds=None):
 
 
 def _auth_cell(st: dict | None) -> str:
-    """Format one account's per-host auth outcome for the summary table."""
+    """Format one account's per-host auth outcome for the summary table. A cell
+    is only recorded when the tool actually ran, so an unrecorded/absent cell
+    shows '-' (never FAIL) - a missing tool is not an auth failure."""
     if not st or not st.get("tried"):
         return "-"
+    if st.get("error"):
+        return "ERR"          # tool ran but errored (unreachable/timeout)
     if not st.get("auth"):
-        return "FAIL"
+        return "FAIL"         # credentials rejected
     return "OK (admin)" if st.get("admin") else "OK"
 
 
 def _print_auth_table(auth_rows: list) -> None:
     """Per-host authentication success/fail table. Only shows the columns that
-    were actually attempted; flags failures loudly at the end."""
+    were actually attempted; flags rejected credentials loudly at the end."""
     if not auth_rows:
         return
     cols = [("user", "USER ACCT"), ("admin", "PRIV ACCT"), ("ssh", "SSH")]
@@ -716,18 +749,21 @@ def _print_auth_table(auth_rows: list) -> None:
     header = f"      {'HOST':<16}" + "".join(f"{hd:<13}" for _, hd in used)
     print(header)
     print("      " + "-" * (len(header) - 6))
-    fails = 0
+    fails = errs = 0
     for ip, a in sorted(auth_rows, key=lambda r: _ip_key(r[0])):
         cells = ""
         for k, _ in used:
             val = _auth_cell(a.get(k))
-            if val == "FAIL":
-                fails += 1
+            fails += val == "FAIL"
+            errs += val == "ERR"
             cells += f"{val:<13}"
         print(f"      {ip:<16}{cells}")
     if fails:
-        print(f"[!] {fails} account/host auth attempt(s) FAILED - check "
-              "credentials, domain, and host reachability for those rows.")
+        print(f"[!] {fails} credential(s) were REJECTED (FAIL) - check the "
+              "username/password/domain for those rows.")
+    if errs:
+        print(f"[!] {errs} attempt(s) ERRORED (ERR) - host unreachable, timed "
+              "out, or the tool failed; not necessarily a credential problem.")
 
 
 def _phase_credenum(store, paths, args) -> None:
@@ -815,8 +851,16 @@ def _setup_scan(args, need_targets=True):
     except scanner.ScannerError as e:
         print(f"[x] {e}")
         return None, None, None
-    paths = _open_paths(args.output_dir)
-    store = Store(paths["db"])
+    try:
+        paths = _open_paths(args.output_dir)
+    except OSError as e:
+        print(f"[x] Cannot use output dir '{args.output_dir}': {e}")
+        return None, None, None
+    try:
+        store = Store(paths["db"])
+    except StoreError as e:
+        print(f"[x] {e}")
+        return None, None, None
     _import_excel_tracking(store, paths)
     return profile, paths, store
 
@@ -828,8 +872,7 @@ def cmd_enum(args: argparse.Namespace) -> int:
         return 1
     store.set_meta("engagement", args.title)
     subnet_map, live_ips, port_map = _discover(args, profile, store, paths)
-    if subnet_map is None:
-        print("[x] No targets after expansion/exclusion.")
+    if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
     try:
@@ -875,8 +918,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 1
     store.set_meta("engagement", args.title)
     subnet_map, live_ips, port_map = _discover(args, profile, store, paths)
-    if subnet_map is None:
-        print("[x] No targets after expansion/exclusion.")
+    if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
     try:
@@ -970,7 +1012,9 @@ def cmd_writeups(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns` first.")
         return 1
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)   # honour any Excel edits first
     hosts = _selected_hosts(store.all_hosts(), args)
     out_dir = os.path.join(args.output_dir, "writeups")
@@ -1164,6 +1208,7 @@ def _fold_host(ip, parsed_list, subnet_map):
         base.vendor = base.vendor or h.vendor
         if h.os_accuracy >= base.os_accuracy and h.os_name:
             base.os_name, base.os_accuracy, base.os_family = h.os_name, h.os_accuracy, h.os_family
+        base.distance = base.distance or h.distance
         base.last_scanned = h.last_scanned or base.last_scanned
         base.ports.extend(h.ports)
         base.vulns.extend(h.vulns)
@@ -1183,13 +1228,17 @@ def _resolve_ingest_host(store, parsed, args):
     exists, else a synthetic host keyed by the loot's hostname/filename so the
     findings still land somewhere on the Priv-Esc sheet."""
     hosts = {h.ip: h for h in store.all_hosts()}
+    hn = parsed.get("hostname", "")
     if getattr(args, "host", None):
         ip = args.host
         host = hosts.get(ip) or Host(ip=ip)
+        # Record the loot's hostname so a later no --host ingest of the same box
+        # matches this entry instead of synthesizing a second local:<host> one.
+        if hn and hn not in host.hostnames:
+            host.hostnames.append(hn)
         _tag_host_os(host, parsed)
         return host, (ip in hosts)
     # No --host: try the hostname against known hostnames, else synthesize.
-    hn = parsed.get("hostname", "")
     if hn:
         for h in hosts.values():
             if hn.lower() in [x.lower() for x in h.hostnames] or \
@@ -1231,13 +1280,28 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     source = os.path.basename(args.loot)
     new_rows = ingest.to_local_findings(parsed, source)
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)
     host, existed = _resolve_ingest_host(store, parsed, args)
-    # Merge, de-duplicating against anything already ingested for this host.
+    # Merge, de-duplicating against anything already ingested for this host AND
+    # against each other (two sections can map to the same category, so distinct
+    # parsed findings may collapse to the same (category, vector) key).
     have = {(f.get("category"), f.get("vector")) for f in host.local_findings}
-    added = [r for r in new_rows if (r["category"], r["vector"]) not in have]
+    added = []
+    for r in new_rows:
+        key = (r["category"], r["vector"])
+        if key not in have:
+            have.add(key)
+            added.append(r)
     host.local_findings.extend(added)
+    # Promote the high-signal findings to first-class Vulns so they count toward
+    # severity totals and get write-ups (deduped against existing vulns by key).
+    have_v = {v.key for v in host.vulns}
+    promoted = [v for v in ingest.promote_to_vulns(host.ip, host.local_findings)
+                if v.key not in have_v]
+    host.vulns.extend(promoted)
     host.privesc_checked = True
     store.upsert_host(host)
     where = "existing host" if existed else "new host entry"
@@ -1246,6 +1310,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
           f"{host.ip}{hn}"
           + (f"; {len(new_rows) - len(added)} already present" if added != new_rows else "")
           + ".")
+    if promoted:
+        print(f"    Promoted {len(promoted)} high-signal finding(s) to the "
+              "Vulnerabilities sheet.")
     print(f"    OS: {host.os_family or 'unknown'}. See the Priv-Esc tab "
           "(rows tagged 'on-target finding').")
     title = store.get_meta("engagement") or args.title
@@ -1259,7 +1326,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}")
         return 1
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)  # honor Excel edits before regenerating
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
@@ -1272,7 +1341,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}")
         return 1
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)  # pick up latest Excel edits
     tracking = store.get_tracking()
     hosts = store.all_hosts()
@@ -1391,7 +1462,9 @@ def cmd_review(args: argparse.Namespace) -> int:
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}")
         return 1
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     _import_excel_tracking(store, paths)  # capture pending Excel edits first
     reviewed = not args.undo
     keys: list[str] = []
@@ -1427,7 +1500,9 @@ def cmd_demo(args: argparse.Namespace) -> int:
         print("[x] Sample XML missing.")
         return 1
     paths = _open_paths(args.output_dir)
-    store = Store(paths["db"])
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
     store.set_meta("engagement", "DEMO engagement")
     store.set_scope("10.0.10.0/24", 254)   # demo scope: three /24s
     store.set_scope("10.0.20.0/24", 254)
@@ -1690,4 +1765,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        # A scan phase catches this internally to save partial results; this is the
+        # backstop for any command that doesn't, so Ctrl-C is never an ugly crash.
+        print("\n[!] Interrupted. Results collected so far were saved; re-run "
+              "(with --resume on a scan) to continue.")
+        return 130
+    except Exception as e:  # noqa: BLE001 - top-level safety net for field use
+        # Never dump a raw traceback at a tester mid-engagement. Per-host scan work
+        # is already persisted crash-safe, so their data survives; give a clean
+        # message and a way to get the details for a bug report.
+        print(f"\n[x] recce hit an unexpected error: {type(e).__name__}: {e}")
+        if os.environ.get("RECCE_DEBUG"):
+            import traceback
+            traceback.print_exc()
+        else:
+            print("    Any data collected so far is saved. Re-run to continue; "
+                  "set RECCE_DEBUG=1 to see the full traceback for a bug report.")
+        return 1

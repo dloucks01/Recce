@@ -39,6 +39,18 @@ STYLE = {
     "wrap_mono": 24, "wrap_band_mono": 25,
 }
 
+# Characters that are illegal in XML 1.0 even when escaped. nmap NSE / service-
+# banner output routinely contains control bytes (telnet/SNMP/http banners), which
+# would otherwise produce a workbook Excel flags as corrupt AND make the read-back
+# of tracking silently fail. Strip them to the replacement char before escaping.
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_text(value) -> str:
+    """Escape a value for XML, first removing XML-1.0-illegal control chars."""
+    return escape(_XML_ILLEGAL.sub("�", str(value)))
+
+
 # Checkbox glyphs: an empty ballot box (off) and a checked one (on). These read
 # as real checkboxes and are picked from a dropdown, working in Excel + LibreOffice.
 CHECK_ON = "☑"    # ballot box with check
@@ -51,7 +63,6 @@ CHECK_OFF = "☐"   # ballot box
 #   band    = very light teal-grey for alternating rows
 #   sev ramp: critical/high solid with WHITE text; medium/low/info soft tints.
 #   rule    = light hairline under every data cell (row separator)
-_MONO = "Consolas"
 STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <fonts count="10">
@@ -259,7 +270,7 @@ class Sheet:
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     cells.append(f'<c r="{ref}"{s_attr}><v>{value}</v></c>')
                 else:
-                    text = escape(str(value))
+                    text = _xml_text(value)
                     cells.append(f'<c r="{ref}"{s_attr} t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>')
             out.append(row_attr + "".join(cells) + "</row>")
         return "".join(out)

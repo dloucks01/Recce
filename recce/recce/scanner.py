@@ -179,16 +179,26 @@ def check_environment(profile: ScanProfile) -> list[str]:
 
 
 def _run(cmd: list[str], timeout: int | None = None) -> RunOutcome:
-    """Run a command, capturing output. Never raises for timeout/missing tool -
-    returns a RunOutcome the caller inspects, so one bad host can't stall a run."""
+    """Run a command, capturing output. Never raises - returns a RunOutcome the
+    caller inspects, so one bad host can't stall or crash a run. `errors=replace`
+    keeps a non-UTF-8 service banner from raising UnicodeDecodeError mid-scan."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", timeout=timeout)
         return RunOutcome(p.returncode, p.stdout or "", p.stderr or "")
     except subprocess.TimeoutExpired as e:
-        return RunOutcome(returncode=124, stdout=e.stdout or "", stderr=e.stderr or "",
+        so = e.stdout or ""
+        se = e.stderr or ""
+        return RunOutcome(returncode=124,
+                          stdout=so.decode("utf-8", "replace") if isinstance(so, bytes) else so,
+                          stderr=se.decode("utf-8", "replace") if isinstance(se, bytes) else se,
                           timed_out=True)
     except FileNotFoundError:
         return RunOutcome(returncode=127, missing=True)
+    except (OSError, ValueError) as e:
+        # PermissionError, E2BIG (arg list too long), decode error, etc. - treat
+        # as a failed run rather than crashing the whole phase.
+        return RunOutcome(returncode=126, stderr=str(e))
 
 
 def _timeout_args(profile: ScanProfile, minutes: int | None = None):
@@ -243,7 +253,15 @@ def discover_hosts(targets_file: str, out_xml: str) -> tuple[str, ScanIssue | No
         "-PA80,443,3389", "-n", "--max-retries", "1", "--host-timeout", "3m",
         "-iL", targets_file, "-oX", out_xml,
     ]
-    outcome = _run(cmd)
+    # nmap's --host-timeout bounds each host, but add a wall-clock backstop scaled
+    # by scope size so a wedged sweep can't hang the first phase forever.
+    try:
+        with open(targets_file) as fh:
+            ntargets = sum(1 for ln in fh if ln.strip())
+    except OSError:
+        ntargets = 256
+    kill = int(min(7200, max(600, ntargets * 0.5 + 300)))
+    outcome = _run(cmd, timeout=kill)
     if outcome.missing:
         return out_xml, ScanIssue("error", "discovery: nmap not found on PATH")
     if outcome.returncode not in (0, None) and not os.path.exists(out_xml):
@@ -308,8 +326,13 @@ def masscan_sweep(ips: list[str], out_xml: str, profile: ScanProfile) -> dict[st
     port_range = "0-65535" if profile.all_ports else f"0-{profile.top_ports}"
     # masscan rate is packets/sec across the whole sweep; scale up from min_rate.
     rate = max(profile.min_rate * 10, 5000)
+    # Hard backstop so a wedged masscan (bad rate, no raw-socket perms, odd iface)
+    # can't hang the whole run: estimate the work and give it 2x + slack, capped 1h.
+    nports = 65536 if profile.all_ports else (profile.top_ports + 1)
+    est = nports * max(1, len(ips)) / max(rate, 1)
+    kill = int(min(3600, max(600, est * 2 + 120)))
     _run(["masscan", "-iL", list_file, "-p", port_range,
-          "--rate", str(rate), "-oX", out_xml])
+          "--rate", str(rate), "-oX", out_xml], timeout=kill)
     try:
         os.unlink(list_file)
     except OSError:
@@ -412,7 +435,7 @@ def enum_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
 
 def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
               creds: dict | None = None, aggressive: bool = False,
-              fast: bool = False) -> str:
+              fast: bool = False) -> tuple[str, ScanIssue | None]:
     """Per-open-port vulnerability pass.
 
     Safe by default, but deeper than the raw `vuln and safe` category: many

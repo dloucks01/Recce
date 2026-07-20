@@ -1069,6 +1069,90 @@ class TargetingFormE2ETest(unittest.TestCase):
         self.assertEqual(self._run_vulns([]), self.ALL)
 
 
+class PhaseIdempotencyTest(unittest.TestCase):
+    """Re-running a phase must NOT duplicate rows. Guards the core store-merge
+    contract: hosts/vulns/accounts/exploits/issues dedupe on re-scan."""
+
+    def _counts(self, db):
+        s = Store(db)
+        try:
+            hosts = s.all_hosts()
+            return {
+                "hosts": len(hosts),
+                "vulns": sum(len(h.vulns) for h in hosts),
+                "accounts": sum(len(h.accounts) for h in hosts),
+                "exploits": sum(len(h.exploits) for h in hosts),
+                "issues": s.count_issues().get("total", 0),
+            }
+        finally:
+            s.close()
+
+    def test_rerunning_vulns_does_not_duplicate(self):
+        from recce import cli
+        import recce.scanner as s
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        paths = cli._open_paths(d)
+        seed = Store(paths["db"])
+        seed.set_meta("engagement", "idem")
+        for h in sample_hosts():
+            seed.upsert_host(h)
+        seed.close()
+
+        def fake_vuln(ip, portids, out, profile, creds=None, aggressive=False,
+                      fast=False):
+            # Emit a real NSE finding + an issue every run, so a broken dedup WOULD
+            # grow the counts.
+            return _fake_scan(out, ip, [{"port": 80, "service": "http", "scripts": [
+                ("http-vuln-x", "VULNERABLE: demo State: VULNERABLE")]}])
+
+        oc, ov, ou = s.check_environment, s.vuln_scan, s.udp_scan
+        s.check_environment = lambda profile: []
+        s.vuln_scan = fake_vuln
+        s.udp_scan = lambda ip, out, profile: _fake_scan(out, ip, [])
+        argv = ["vulns", "-o", d, "--no-searchsploit", "--no-probes", "--workers", "1"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(argv), 0)
+            first = self._counts(paths["db"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(argv), 0)          # SAME phase again
+            second = self._counts(paths["db"])
+        finally:
+            s.check_environment, s.vuln_scan, s.udp_scan = oc, ov, ou
+        self.assertEqual(first, second, f"re-run changed counts: {first} -> {second}")
+        self.assertGreater(first["vulns"], 0)                # actually produced findings
+
+    def test_store_merge_is_idempotent_for_all_collections(self):
+        # Upserting the identical rich host twice must not grow any collection.
+        from recce.models import Account, Exploit, Script
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        s = Store(os.path.join(d, "r.sqlite"))
+        h = Host(
+            ip="10.0.0.5", os_family="Linux",
+            ports=[Port(portid=445, state="open", service="smb",
+                        scripts=[Script(id="smb-os", output="o")])],
+            vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="v",
+                        title="t", severity="high")],
+            accounts=[Account(ip="10.0.0.5", source="nxc", kind="user", name="a",
+                              domain="C", rid="500")],
+            exploits=[Exploit(ip="10.0.0.5", port=445, edb_id="1", title="e")],
+            host_scripts=[Script(id="hs", output="o")],
+            local_findings=[{"category": "sudo", "vector": "NOPASSWD"}])
+        s.upsert_host(h)
+        s.upsert_host(Host.from_json(h.to_json()))          # identical, again
+        got = s.get_host("10.0.0.5")
+        s.close()
+        self.assertEqual(len(got.vulns), 1)
+        self.assertEqual(len(got.accounts), 1)
+        self.assertEqual(len(got.exploits), 1)
+        self.assertEqual(len(got.host_scripts), 1)
+        self.assertEqual(len(got.local_findings), 1)
+        self.assertEqual(len(got.ports), 1)
+
+
 _LOOT_LINUX = """\
 recce-enum  host=web01  user=www-data  Mon Jul 20 12:00:00 UTC 2026
 
@@ -1135,6 +1219,29 @@ class IngestParserTest(unittest.TestCase):
         dupe = ("recce-enum host=h\n==== Sudo ====\n[!] same\n[!] same\n")
         self.assertEqual(len(ingest.parse_loot(dupe)["findings"]), 1)
 
+    def test_empty_and_garbage_input_no_crash(self):
+        from recce import ingest
+        for blob in ("", "\n\n\n", "not recce output at all\nrandom text\n",
+                     "\x00\x01\x02 binary-ish \xff\xfe", "=" * 5000,
+                     "[!] finding with no banner and no section\n"):
+            p = ingest.parse_loot(blob)          # must not raise
+            self.assertIn("findings", p)
+            self.assertIsInstance(p["findings"], list)
+
+    def test_findings_without_banner_still_parse(self):
+        from recce import ingest
+        p = ingest.parse_loot("==== Sudo ====\n[!] NOPASSWD present\n")
+        self.assertFalse(p["is_recce"])          # no banner
+        self.assertEqual(len(p["findings"]), 1)  # but [!] lines still harvested
+
+    def test_malformed_section_headers_tolerated(self):
+        from recce import ingest
+        # Ragged '=' fences and stray '=' in finding text must not break parsing.
+        blob = ("recce-enum host=h\n=== Weird ==\n[!] a = b = c finding\n"
+                "======\n[!] another\n")
+        p = ingest.parse_loot(blob)
+        self.assertEqual(len(p["findings"]), 2)
+
 
 class IngestCommandTest(unittest.TestCase):
     def _eng(self, d, host=None):
@@ -1186,6 +1293,54 @@ class IngestCommandTest(unittest.TestCase):
             self.assertEqual(h.os_family, "Windows")
             self.assertEqual(len(h.local_findings), 2)
 
+    def test_ingest_host_flag_records_hostname(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50"))          # no hostname stored
+            self._ingest(d, _LOOT_LINUX, extra=["--host", "10.0.0.50"])
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.50")
+            # hostname from the loot banner is recorded, so a later no---host
+            # ingest of the same box matches this entry instead of synthesizing.
+            self.assertIn("web01", h.hostnames)
+
+    def test_ingest_dedups_incoming_rows_on_new_host(self):
+        # Two sections that map to the same category with identical finding text
+        # must not create duplicate rows, even on a brand-new (unmerged) host.
+        from recce.store import Store
+        loot = ("recce-enum host=h1\n"
+                "==== SUID / SGID / capabilities ====\n[!] same finding text\n"
+                "==== Capabilities ====\n[!] same finding text\n")
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d)                                 # empty -> synthetic host
+            self._ingest(d, loot, extra=["--host", "10.0.0.1"])
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.1")
+            self.assertEqual(len(h.local_findings), 1)
+
+    def test_high_signal_findings_promoted_to_vulns(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
+            self._ingest(d, _LOOT_LINUX)
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.50")
+            local_vulns = [v for v in h.vulns if v.source == "local"]
+            titles = " ".join(v.title for v in local_vulns)
+            self.assertTrue(local_vulns)                    # some got promoted
+            self.assertIn("Sudo misconfiguration", titles)  # NOPASSWD / ALL
+            self.assertIn("Readable /etc/shadow", titles)
+            # Promoted vulns are confirmed local observations with a CWE.
+            self.assertTrue(all(v.confidence == "confirmed" and v.cwes
+                                for v in local_vulns))
+
+    def test_promotion_is_idempotent(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
+            self._ingest(d, _LOOT_LINUX)
+            self._ingest(d, _LOOT_LINUX)          # re-ingest
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.50")
+            local = [v for v in h.vulns if v.source == "local"]
+            self.assertEqual(len(local), len({v.title for v in local}))  # no dupes
+
     def test_ingested_findings_appear_on_privesc_sheet(self):
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
@@ -1220,6 +1375,9 @@ class ProgressAndAuthTest(unittest.TestCase):
         self.assertEqual(cli._auth_cell({"tried": True, "auth": True}), "OK")
         self.assertEqual(cli._auth_cell({"tried": True, "auth": True, "admin": True}),
                          "OK (admin)")
+        # A tool/connection error is ERR, not FAIL (not a credential problem).
+        self.assertEqual(cli._auth_cell({"tried": True, "auth": False, "error": True}),
+                         "ERR")
 
     def test_auth_table_prints_rows_and_flags_fail(self):
         from recce import cli
@@ -1241,6 +1399,55 @@ class ProgressAndAuthTest(unittest.TestCase):
         # ...and the authorization --yes flag is gone.
         with self.assertRaises(SystemExit):
             p.parse_args(["enum", "1.2.3.4", "--yes"])
+
+
+class StoreFixesTest(unittest.TestCase):
+    def test_corrupt_db_raises_storeerror(self):
+        from recce.store import Store, StoreError
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "results.sqlite")
+            with open(p, "w") as fh:
+                fh.write("not a sqlite database, just garbage")
+            with self.assertRaises(StoreError):
+                Store(p)
+
+    def test_corrupt_db_gives_clean_message_not_traceback(self):
+        # A carried-over corrupt DB on `report`/`status` must exit 1 with a clean
+        # message, never a raw traceback (the "first command after transfer" case).
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "raw"), exist_ok=True)
+            with open(os.path.join(d, "results.sqlite"), "w") as fh:
+                fh.write("garbage, not a database")
+            for command in ("report", "status"):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main([command, "-o", d])
+                self.assertEqual(rc, 1, command)
+                out = buf.getvalue()
+                self.assertIn("corrupt or unreadable", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_distance_preserved_through_merge(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(os.path.join(d, "r.sqlite"))
+            s.upsert_host(Host(ip="10.0.0.5", distance=3))
+            # A second scan of the same host without distance must not zero it.
+            s.upsert_host(Host(ip="10.0.0.5", os_name="Linux", os_accuracy=95))
+            self.assertEqual(s.get_host("10.0.0.5").distance, 3)
+
+    def test_rerun_does_not_duplicate_issues(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            paths = cli._open_paths(d)
+            s = Store(paths["db"])
+            iss = [{"phase": "vuln-scan", "level": "error", "message": "nmap failed"}]
+            cli._record_issues(s, paths, "10.0.0.5", iss)
+            cli._record_issues(s, paths, "10.0.0.5", iss)   # re-run, same phase
+            self.assertEqual(s.count_issues().get("total"), 1)  # replaced, not doubled
+            s.close()
 
 
 class RunbookSheetTest(unittest.TestCase):

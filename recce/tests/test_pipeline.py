@@ -1,5 +1,7 @@
 """Offline tests for the enumeration pipeline (no network / nmap needed)."""
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -954,6 +956,65 @@ class CredEnumTest(unittest.TestCase):
         # User enumeration still folded shares/users (once, not duplicated).
         self.assertEqual(sum(1 for a in h.accounts if a.kind == "share"), 1)
 
+    def test_missing_tool_is_not_reported_as_auth_fail(self):
+        """A missing netexec (run_nxc_smb -> (None, None)) must NOT record a FAIL
+        cell nor attempt secretsdump - it's a tooling gap, not a bad credential."""
+        from recce import credenum as c
+        dumped = []
+        onx, osd = c.run_nxc_smb, c.run_secretsdump
+        c.run_nxc_smb = lambda ip, creds: (None, None)          # tool absent
+        c.run_secretsdump = lambda ip, creds: (dumped.append(ip) or ([], None))
+        try:
+            h = Host(ip="10.0.0.5", os_family="Windows",
+                     ports=[Port(portid=445, state="open")])
+            issues, auth = c.enrich_host(
+                h, {"username": "u", "password": "p", "domain": "d"}, None,
+                admin_creds={"username": "a", "password": "p", "domain": "d"})
+        finally:
+            c.run_nxc_smb, c.run_secretsdump = onx, osd
+        self.assertEqual(auth, {})           # nothing recorded -> cells show "-"
+        self.assertEqual(dumped, [])         # no doomed secretsdump
+
+    def test_secretsdump_skipped_when_admin_auth_rejected(self):
+        """secretsdump must not run where the admin bind was rejected."""
+        from recce import credenum as c
+        dumped = []
+        onx, osd, odc = c.run_nxc_smb, c.run_secretsdump, c._is_dc
+        # Both accounts authenticate but neither is admin (auth True, admin False).
+        c.run_nxc_smb = lambda ip, creds: (
+            {"auth": True, "admin": False, "host_info": "", "shares": [],
+             "users": [], "loggedon": [], "passpol": {}}, None)
+        c.run_secretsdump = lambda ip, creds: (dumped.append(ip) or ([], None))
+        c._is_dc = lambda h: False
+        try:
+            h = Host(ip="10.0.0.9", os_family="Windows",
+                     ports=[Port(portid=445, state="open")])
+            # Rejected admin: auth False for the admin account.
+            c.run_nxc_smb = lambda ip, creds: (
+                {"auth": creds["username"] == "u", "admin": False, "host_info": "",
+                 "shares": [], "users": [], "loggedon": [], "passpol": {}}, None)
+            issues, auth = c.enrich_host(
+                h, {"username": "u", "password": "p", "domain": "d"}, None,
+                admin_creds={"username": "adm", "password": "bad", "domain": "d"})
+        finally:
+            c.run_nxc_smb, c.run_secretsdump, c._is_dc = onx, osd, odc
+        self.assertFalse(auth["admin"]["auth"])   # admin bind rejected
+        self.assertEqual(dumped, [])              # so no secretsdump
+
+    def test_smb_error_records_err_not_fail(self):
+        """A tool/connection error (None, err) is ERR, distinct from a FAIL."""
+        from recce import credenum as c
+        onx = c.run_nxc_smb
+        c.run_nxc_smb = lambda ip, creds: (None, "connection refused")
+        try:
+            h = Host(ip="10.0.0.7", os_family="Windows",
+                     ports=[Port(portid=445, state="open")])
+            _, auth = c.enrich_host(h, {"username": "u", "password": "p"}, None)
+        finally:
+            c.run_nxc_smb = onx
+        self.assertTrue(auth["user"]["error"])
+        self.assertFalse(auth["user"]["auth"])
+
     def test_ssh_finding_and_facts_recorded(self):
         from recce import credenum as c
         h = Host(ip="10.0.0.5", ports=[Port(portid=22, state="open")])
@@ -973,6 +1034,134 @@ class CredEnumTest(unittest.TestCase):
         self.assertTrue(h.cred_enumerated)
         self.assertIsInstance(issues, list)
         self.assertIsInstance(auth, dict)
+
+
+class RobustnessTest(unittest.TestCase):
+    """Field-crash guards: bad tool output / unexpected errors must not crash."""
+
+    def test_run_survives_non_utf8_tool_output(self):
+        # A service banner with raw non-UTF-8 bytes must not raise
+        # UnicodeDecodeError mid-scan (errors='replace' on the runner).
+        outcome = scanner._run(
+            ["python3", "-c",
+             "import sys; sys.stdout.buffer.write(b'open \\xff\\xfe port\\n')"])
+        self.assertEqual(outcome.returncode, 0)
+        self.assertIn("open", outcome.stdout)          # decoded, not crashed
+        self.assertFalse(outcome.missing)
+
+    def test_run_missing_tool_is_marked_not_raised(self):
+        outcome = scanner._run(["definitely-not-a-real-binary-xyz", "--x"])
+        self.assertTrue(outcome.missing)
+        self.assertEqual(outcome.returncode, 127)
+
+    def test_credenum_run_survives_non_utf8(self):
+        from recce import credenum
+        out, err = credenum._run(
+            ["python3", "-c",
+             "import sys; sys.stdout.buffer.write(b'\\xff\\xfe done')"])
+        self.assertIsNone(err)
+        self.assertIn("done", out)
+
+    def test_parse_nmap_xml_never_raises_on_bad_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing = os.path.join(d, "nope.xml")
+            self.assertEqual(parser.parse_nmap_xml(missing), [])   # absent file
+            for name, content in [
+                ("empty.xml", ""),
+                ("garbage.xml", "\x00\x01 not xml at all \xff"),
+                ("trunc.xml", '<?xml version="1.0"?><nmaprun start="1"><host>'),
+                ("partial.xml",
+                 '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                 '<address addr="10.0.0.1" addrtype="ipv4"/></host>'),  # no close
+            ]:
+                p = os.path.join(d, name)
+                with open(p, "w") as fh:
+                    fh.write(content)
+                out = parser.parse_nmap_xml(p)      # must not raise
+                self.assertIsInstance(out, list)
+
+    def test_xlsx_survives_control_chars_in_cells(self):
+        # NSE/banner output with XML-illegal control bytes must not corrupt the
+        # workbook - it must strip them and still read back.
+        wb = xlsx.Workbook()
+        sh = wb.add_sheet("S")
+        sh.write([("banner \x00\x01\x08 with \x1f control bytes", "default")])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "w.xlsx")
+            wb.save(out)
+            sheets = xlsx.read_sheets(out)          # must NOT raise ParseError
+            flat = " ".join(str(c) for row in sheets["S"] for c in row)
+            self.assertIn("banner", flat)
+            self.assertNotIn("\x00", flat)          # control bytes stripped
+
+    def test_docx_survives_control_chars(self):
+        import xml.etree.ElementTree as ET
+        import zipfile
+        from recce.docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.docx")
+            doc = Document()
+            doc.title("title \x00\x08")
+            doc.mono_block("evidence \x00\x01\x1f bytes")
+            doc.save(p)
+            self.assertIsNone(zipfile.ZipFile(p).testzip())
+            with zipfile.ZipFile(p) as z:            # Word-openable = well-formed XML
+                ET.fromstring(z.read("word/document.xml"))
+
+    def test_store_raises_clean_error_on_corrupt_db(self):
+        from recce.store import Store, StoreError
+        with tempfile.TemporaryDirectory() as d:
+            bad = os.path.join(d, "results.sqlite")
+            with open(bad, "wb") as fh:
+                fh.write(b"this is not a sqlite database at all\x00\x01")
+            with self.assertRaises(StoreError):
+                Store(bad)
+
+    def test_invalid_targets_exit_clean(self):
+        # A bad CIDR/range must yield a clean "Invalid targets" message + a None
+        # result (caller exits 1), not a traceback. Exercised via _discover so the
+        # test doesn't depend on nmap being installed.
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            paths = cli._open_paths(d)
+            store = Store(paths["db"])
+            args = SimpleNamespace(targets=["10.0.0.0/99"], exclude=[], fast=False)
+            profile = scanner.PROFILES["standard"]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                result = cli._discover(args, profile, store, paths)
+            store.close()
+            self.assertEqual(result, (None, [], None))
+            self.assertIn("Invalid targets", buf.getvalue())
+
+    def test_main_top_level_guard_returns_clean_on_crash(self):
+        # An unexpected error inside a command must become a clean exit 1, not a
+        # traceback dumped at the tester.
+        import argparse
+        from recce import cli
+
+        def boom(args):
+            raise RuntimeError("simulated deep crash")
+
+        class _P:
+            def parse_args(self, _a):
+                ns = argparse.Namespace()
+                ns.func = boom
+                return ns
+
+        orig = cli.build_arg_parser
+        cli.build_arg_parser = lambda: _P()
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.main([])
+        finally:
+            cli.build_arg_parser = orig
+        self.assertEqual(rc, 1)
+        out = buf.getvalue()
+        self.assertIn("unexpected error", out)
+        self.assertNotIn("Traceback", out)             # no raw traceback by default
 
 
 class ScanHardeningTest(unittest.TestCase):
@@ -1734,6 +1923,45 @@ class StoreTrackingTest(unittest.TestCase):
             store.set_reviewed("host:1.2.3.4", False)
             self.assertEqual(store.get_tracking()["host:1.2.3.4"], (False, "checked"))
             store.close()
+
+
+class ExploitRefTest(unittest.TestCase):
+    def test_cve_exact_match(self):
+        from recce.exploitref import proven_exploit_ref
+        ref = proven_exploit_ref(["CVE-2017-0144"])
+        self.assertIsNotNone(ref)
+        self.assertIn("eternalblue", ref.lower())
+
+    def test_no_match_returns_none(self):
+        from recce.exploitref import proven_exploit_ref
+        self.assertIsNone(proven_exploit_ref(["CVE-1999-0001"]))
+        self.assertIsNone(proven_exploit_ref(None))
+        self.assertIsNone(proven_exploit_ref([], ""))
+
+    def test_cve_embedded_in_nse_id_text(self):
+        # A raw NSE finding carrying the CVE only in its id must resolve the same.
+        from recce.exploitref import proven_exploit_ref
+        ref = proven_exploit_ref([], "http-vuln-cve2021-41773")
+        self.assertIsNotNone(ref)
+        self.assertIn("apache", ref.lower())
+
+    def test_keyword_fallback_when_no_cve(self):
+        from recce.exploitref import proven_exploit_ref
+        self.assertIn("ms17_010",
+                      (proven_exploit_ref([], "SMB ms17-010 vulnerable") or "").lower())
+        self.assertIn("vsftpd",
+                      (proven_exploit_ref([], "vsftpd 2.3.4 backdoor") or "").lower())
+
+    def test_explicit_cve_beats_text(self):
+        from recce.exploitref import proven_exploit_ref
+        # A known CVE in the list wins even if the text mentions nothing.
+        self.assertEqual(proven_exploit_ref(["CVE-2014-0160"]),
+                         proven_exploit_ref([], "heartbleed"))
+
+    def test_keyword_table_values_are_real_exploit_entries(self):
+        # Integrity: every keyword ref must be one of the concrete CVE entries.
+        from recce.exploitref import PROVEN_EXPLOIT, PROVEN_KW
+        self.assertTrue(set(PROVEN_KW.values()) <= set(PROVEN_EXPLOIT.values()))
 
 
 if __name__ == "__main__":

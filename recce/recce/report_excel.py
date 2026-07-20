@@ -125,8 +125,8 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     step_cols = [(h, "check", _STEP_WIDTHS.get(h, 9)) for h in tr.STEP_COLUMNS]
     cols = [
         ("Reviewed", "checkbox", 9), ("Subnet", "data", 16), ("IP", "data", 15),
-        ("Hostname", "data", 22), ("OS", "data", 20), ("Roles", "data", 22),
-        ("Open ports", "data", 30), ("# Vulns", "data", 8),
+        ("Hostname", "data", 22), ("OS", "data", 20), ("Hops", "data", 6),
+        ("Roles", "data", 22), ("Open ports", "data", 30), ("# Vulns", "data", 8),
         *step_cols,
         ("Notes", "notes", 28), ("Key", "key", 4),
     ]
@@ -138,6 +138,7 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
         open_ports = ", ".join(str(p.portid) for p in sorted(h.open_ports, key=lambda p: p.portid))
         rows.append({"key": tr.host_key(h.ip), "checks": checks, "data": {
             "Subnet": h.subnet, "IP": h.ip, "Hostname": h.hostname, "OS": h.os_guess,
+            "Hops": (str(h.distance) if h.distance else ""),
             "Roles": ", ".join(h.roles), "Open ports": open_ports,
             "# Vulns": len(h.vulns)}})
     return SheetSpec(CHECKLIST_TITLE, cols, rows, _styler_checklist)
@@ -600,7 +601,8 @@ def _build_guide(wb, meta: dict) -> None:
     sh.write([("Tab", "header"), ("What it shows", "header")])
     for tab, desc in [
         ("Runbook", "Step-by-step: exactly what to type for each phase + the options "
-                    "that matter. Start here if you just want the commands."),
+                    "that matter, plus a troubleshooting table. Start here if you "
+                    "just want the commands."),
         ("Overview", "Totals, review progress, and live-hosts-per-subnet coverage."),
         ("Checklist", "THE working tab: one row per IP (grouped by subnet) with a "
                       "checkbox for each phase + host detail + Reviewed + Notes."),
@@ -737,6 +739,51 @@ def _build_runbook(wb, meta: dict) -> None:
         "Windows: self-test only (no enumeration).")
     cmd("powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt",
         "Windows: full read-only sweep, saved to loot.txt.")
+
+    # --- troubleshooting ---------------------------------------------------------
+    sh.write([""])
+    sh.write([("If something goes wrong", "title")])
+    sh.write([("Run `doctor` first - it reports what's missing and self-tests the "
+               "pipeline. Re-running any phase is safe (idempotent - never "
+               "duplicates rows).", "sub")])
+    sh.write([("Symptom", "header"), ("Fix", "header")])
+
+    def fix(symptom, action):
+        sh.write([(symptom, "wrap"), (action, "wrap")])
+
+    fix("nmap not found", "Install nmap - the only hard requirement. Everything "
+                          "else is optional and degrades cleanly.")
+    fix("'Not running as root' / weak scan",
+        "Run with sudo. Under sudo use `sudo ./bin/recce ...` so PATH/PYTHONPATH "
+        "survive (SYN scan, OS detection and UDP need root).")
+    fix("Discovery finds no hosts",
+        "A firewall is dropping pings. Re-run `enum` with --no-discovery (-Pn: "
+        "treat every target as up).")
+    fix("Scans too slow",
+        "--fast (masscan), --workers N, `vulns --fast` (top-signal + progress/ETA), "
+        "--profile quick, --top-ports N, --host-timeout MIN.")
+    fix("Crashed or interrupted",
+        "Nothing is lost. Re-run with --resume, or `report -o eng` to rebuild from "
+        "saved data. Set RECCE_DEBUG=1 for the full traceback.")
+    fix("'No open ports match' on vulns",
+        "Run `enum` first; --unscanned finds nothing once everything is scanned; "
+        "widen or drop --only.")
+    fix("No findings (but you expected some)",
+        "Improve service ID on enum (--version-all / --version-intensity 9), then "
+        "try `vulns --aggressive` for the full intrusive NSE category.")
+    fix("credenum: no tools / auth table",
+        "Install netexec + impacket (or ssh). In the table: FAIL = credential "
+        "rejected (check user/pass/DOMAIN); ERR = unreachable/tool error; '-' = "
+        "not attempted (a missing tool is never shown as FAIL).")
+    fix("Workbook won't update / locked",
+        "Close it in Excel/LibreOffice before a scan or `report` - an open file is "
+        "locked. Your ticks and notes are read back on the next run.")
+    fix("Web screenshots missing in write-ups",
+        "Install firefox/chromium, or point RECCE_BROWSER at a browser; or use "
+        "`writeups --no-screenshots` and add them in Word.")
+    fix("Full guide",
+        "See TROUBLESHOOTING.md in the project, or run `recce <command> -h` for "
+        "every option.")
 
     sh.set_col(1, 46)
     sh.set_col(2, 82)
@@ -1152,8 +1199,3 @@ def read_workbook_edits(path: str) -> tuple[Tracking, dict]:
 def read_workbook_tracking(path: str) -> Tracking:
     """{key: (reviewed_bool, notes)} for every row carrying a Key value."""
     return read_workbook_edits(path)[0]
-
-
-def read_workbook_status(path: str) -> dict:
-    """{key: status_str} for rows whose sheet has a tri-state Status column."""
-    return read_workbook_edits(path)[1]

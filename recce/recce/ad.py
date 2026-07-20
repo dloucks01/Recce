@@ -575,8 +575,9 @@ def _run_ldapsearch(dc_ip, base, filt, attrs, scope, username, password, domain,
     cmd.append(filt)
     cmd += attrs
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-    except (subprocess.TimeoutExpired, OSError) as e:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              errors="replace", timeout=180)
+    except (subprocess.TimeoutExpired, OSError, ValueError) as e:
         raise RuntimeError(f"ldapsearch failed: {e}")
     if proc.returncode not in (0, 4):  # 4 = size-limit exceeded (partial results)
         err = (proc.stderr or "").strip().splitlines()
