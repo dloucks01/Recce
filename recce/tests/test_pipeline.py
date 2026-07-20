@@ -1958,10 +1958,35 @@ class ExploitRefTest(unittest.TestCase):
         self.assertEqual(proven_exploit_ref(["CVE-2014-0160"]),
                          proven_exploit_ref([], "heartbleed"))
 
+    def test_windows_references_resolve(self):
+        from recce.exploitref import proven_exploit_ref
+        cases = [
+            (["CVE-2008-4250"], "ms08_067"),      # MS08-067
+            (["CVE-2017-0147"], "eternalblue"),   # EternalBlue variant CVE
+            (["CVE-2020-1472"], "zerologon"),     # ZeroLogon (module + PoC)
+            (["CVE-2020-0796"], "smbghost"),      # SMBGhost
+            (["CVE-2014-6324"], "ms14-068"),      # Kerberos PAC
+        ]
+        for cves, needle in cases:
+            self.assertIn(needle, (proven_exploit_ref(cves) or "").lower(), cves)
+
+    def test_token_privilege_maps_to_potato_tools(self):
+        # A confirmed SeImpersonate finding (no CVE) points at the existing Potato
+        # tools - a reference, not generated code.
+        from recce.exploitref import proven_exploit_ref
+        ref = proven_exploit_ref([], "Token holds SeImpersonate -> Potato -> SYSTEM")
+        self.assertIsNotNone(ref)
+        self.assertIn("godpotato", ref.lower())
+        self.assertIn("printspoofer", ref.lower())
+
     def test_keyword_table_values_are_real_exploit_entries(self):
-        # Integrity: every keyword ref must be one of the concrete CVE entries.
-        from recce.exploitref import PROVEN_EXPLOIT, PROVEN_KW
-        self.assertTrue(set(PROVEN_KW.values()) <= set(PROVEN_EXPLOIT.values()))
+        # Integrity: every keyword ref must be a real curated reference - either a
+        # concrete CVE entry, or the (CVE-less) token-privilege Potato reference.
+        # Catches a typo'd/dangling keyword value.
+        from recce.exploitref import PROVEN_EXPLOIT, PROVEN_KW, _POTATO
+        allowed = set(PROVEN_EXPLOIT.values()) | {_POTATO}
+        self.assertTrue(set(PROVEN_KW.values()) <= allowed)
+        self.assertTrue(all(v.strip() for v in PROVEN_KW.values()))
 
 
 if __name__ == "__main__":
