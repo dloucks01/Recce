@@ -61,6 +61,5 @@ They are **read-only** — they only *read* system state with built-in tools and
 change nothing. There is no exploit code, no download, no obfuscation, and no
 AMSI/Defender tampering. That transparency is precisely why a plain `Get-*` /
 built-in-command script does not match malware signatures. If an EDR still
-false-positives during an **authorized** engagement, coordinate an allow-list /
-exclusion with the client — do not try to evade it. Use only where you have
-written authorization to test.
+false-positives, coordinate an allow-list / exclusion rather than trying to
+evade it — evasion would defeat the point of a clean, auditable read-only tool.

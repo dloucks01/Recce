@@ -172,8 +172,17 @@ def _os_kind(host: Host) -> str:
 
 
 def plan(host: Host) -> list[dict]:
-    """Per-host privesc rows: remote findings first, then the OS playbook."""
+    """Per-host privesc rows: on-target findings + remote findings, then the
+    OS playbook."""
     rows: list[dict] = []
+    # On-target enum findings (ingested from recce-enum.sh/.ps1) come first - they
+    # are confirmed local observations, the strongest signal on the sheet.
+    for f in getattr(host, "local_findings", []) or []:
+        sect = f.get("section", "")
+        rows.append({"category": f.get("category", "local"),
+                     "vector": f.get("vector", ""),
+                     "howto": f"on-target finding ({sect})" if sect else "on-target finding",
+                     "note": f"via {f.get('source', 'recce-enum')}"})
     for f in remote_findings(host):
         rows.append({"category": "finding", "vector": f["signal"],
                      "howto": f["detail"], "note": f["refs"]})

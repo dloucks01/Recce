@@ -152,6 +152,8 @@ class Host:
     accounts: list[Account] = field(default_factory=list)
     exploits: list["Exploit"] = field(default_factory=list)
     host_scripts: list[Script] = field(default_factory=list)  # host-level NSE output
+    # On-target enum findings folded in via `ingest` (recce-enum.sh/.ps1 [!] lines).
+    local_findings: list[dict[str, Any]] = field(default_factory=list)
     roles: list[str] = field(default_factory=list)   # e.g. Domain Controller
     ntlm: dict[str, Any] = field(default_factory=dict)  # domain/fqdn/os from NTLM
     smb_signing: str = ""                            # required / not required / unknown

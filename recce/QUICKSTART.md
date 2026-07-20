@@ -60,7 +60,14 @@ sudo ./bin/recce db -o eng                 # databases
 ./bin/recce      credenum -u alice -p 'Pw!' -d corp.local \
                  --admin-user admin --admin-pass 'AdmPw!' -o eng
 
-# 4b) Generate a Word (.docx) write-up per finding, then finish each in Word
+# 4b) On-target enum: got a shell on a box? Run the bundled read-only sweep
+#     (recce/local/), bring the output back, and fold its [!] findings into the
+#     Priv-Esc tab for that host:
+#       target$  ./recce-enum.sh -o loot.txt          # Linux  (-t self-tests first)
+#       target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
+./bin/recce      ingest loot.txt -o eng    # matches the host by name (or --host IP)
+
+# 4c) Generate a Word (.docx) write-up per finding, then finish each in Word
 ./bin/recce      writeups -o eng           # auto-fills fields + web screenshots
 
 # 5) See what's left (prints progress + the suggested next command)
@@ -85,7 +92,9 @@ e.g. `sudo ./bin/recce vulns 10.0.20.0/24 -o eng`.
 
 Handy filters on `vulns`: `--only http smb` (just those services),
 `--unscanned` (only ports not yet done), `--aggressive` (intrusive checks),
-`--no-probes` (skip the HTTP-header/TLS probes), `--no-searchsploit`.
+`--fast` (top-signal detection scripts only — much quicker on a big /24, and
+shows a live per-host **progress % + ETA**), `--no-probes` (skip the
+HTTP-header/TLS probes), `--no-searchsploit`.
 
 Every finding on the **Vulnerabilities** tab carries a severity, source
 (nse / version-db / probe / config), confidence, CVE refs and **CWE** refs, so
@@ -93,7 +102,9 @@ you can sort and report by weakness class.
 
 ## Using the workbook
 
-- **Start Here** tab explains every tab.
+- **Start Here** tab explains every tab; the **Runbook** tab is a step-by-step
+  "what to type" for each phase and its options — start there if you just want
+  the commands.
 - **Checklist** tab = one row per IP, **grouped by subnet**, with two kinds of
   step box:
   - **Auto** (Enumerated / Vuln-scan / Web / DB) **turn green automatically** when
@@ -126,3 +137,6 @@ you can sort and report by weakness class.
 Nothing is lost — every host is saved the moment it finishes. Press **Ctrl-C** to
 stop cleanly (it still writes the sheet), use **`--resume`** to skip hosts already
 done, and run **`report -o eng`** any time to rebuild the workbook from saved data.
+On a large scope, `vulns --fast` finishes far quicker (top-signal checks only) and
+prints a live **progress % + ETA**; each phase ends with a loud summary of any
+hosts that errored so a failure can't scroll past unseen.
