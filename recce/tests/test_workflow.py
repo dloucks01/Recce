@@ -515,5 +515,232 @@ class MarkdownCsvFidelityTest(unittest.TestCase):
             self.assertIn(int(r[portc]), FACTS[r[ipc]]["ports"])
 
 
+def _nmap_xml(ip, ports):
+    """Build a minimal, parseable nmap XML for a host with the given ports.
+
+    ports: list of dicts {port, service, product?, version?, scripts?:[(id,out)]}.
+    """
+    body = [f'<host><status state="up"/>'
+            f'<address addr="{ip}" addrtype="ipv4"/><ports>']
+    for p in ports:
+        body.append(f'<port protocol="tcp" portid="{p["port"]}">'
+                    f'<state state="open"/>')
+        svc = f'<service name="{p.get("service", "")}"'
+        if p.get("product"):
+            svc += f' product="{p["product"]}"'
+        if p.get("version"):
+            svc += f' version="{p["version"]}"'
+        body.append(svc + '/>')
+        for sid, out in p.get("scripts", []):
+            body.append(f'<script id="{sid}" output="{out}"/>')
+        body.append('</port>')
+    body.append('</ports></host>')
+    return '<?xml version="1.0"?><nmaprun start="1">' + "".join(body) + '</nmaprun>'
+
+
+def _fake_scan(out, ip, ports):
+    """Write a canned nmap XML and return the (path, issue) tuple a scan fn does."""
+    with open(out, "w") as fh:
+        fh.write(_nmap_xml(ip, ports))
+    return out, None
+
+
+class ModelSerializationTest(unittest.TestCase):
+    """Host/Domain survive the exact JSON round-trip the store uses (no field loss)."""
+
+    def _rich_host(self):
+        from recce.models import Account, Exploit, Script
+        return Host(
+            ip="10.0.0.5", subnet="10.0.0.0/24", hostnames=["h1", "h1.corp"],
+            os_name="Linux 5.4", os_family="Linux", os_accuracy=95,
+            roles=["Domain Controller"], ntlm={"domain": "CORP"},
+            smb_signing="not required", enumerated=True, db_scanned=True,
+            privesc_checked=True, cred_enumerated=True, notes="a note",
+            ports=[Port(portid=445, service="microsoft-ds", product="Samba",
+                        version="4.13", vuln_scanned=True,
+                        scripts=[Script(id="smb-os", output="x", elements={"k": "v"})])],
+            vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="v",
+                        title="t", severity="high", ids=["CVE-2020-1"],
+                        cwes=["CWE-78"], source="version-db", confidence="likely")],
+            accounts=[Account(ip="10.0.0.5", source="smb", kind="user", name="a",
+                              domain="CORP", rid="500", attrs={"spn": "x"})],
+            exploits=[Exploit(ip="10.0.0.5", port=445, edb_id="123",
+                              title="e", cves=["CVE-2020-1"])],
+            host_scripts=[Script(id="hs", output="o")])
+
+    def test_host_json_roundtrip_via_store_encoding(self):
+        import json
+        h = self._rich_host()
+        h2 = Host.from_json(json.loads(json.dumps(h.to_json())))
+        # Scalars + all progress flags.
+        for f in ("ip", "subnet", "os_name", "os_family", "smb_signing", "notes",
+                  "enumerated", "db_scanned", "privesc_checked", "cred_enumerated"):
+            self.assertEqual(getattr(h2, f), getattr(h, f), f)
+        self.assertEqual(h2.hostnames, h.hostnames)
+        self.assertEqual(h2.roles, h.roles)
+        self.assertEqual(h2.ntlm, h.ntlm)
+        # Nested structures.
+        self.assertEqual(h2.ports[0].scripts[0].elements, {"k": "v"})
+        self.assertTrue(h2.ports[0].vuln_scanned)
+        self.assertEqual(h2.vulns[0].cwes, ["CWE-78"])       # newest field survives
+        self.assertEqual(h2.vulns[0].ids, ["CVE-2020-1"])
+        self.assertEqual(h2.accounts[0].attrs, {"spn": "x"})
+        self.assertEqual(h2.exploits[0].edb_id, "123")
+        self.assertEqual(h2.host_scripts[0].id, "hs")
+
+    def test_domain_json_roundtrip(self):
+        from recce.models import Domain
+        import json
+        d = Domain(name="corp.local", netbios="CORP", dc_ips=["10.0.10.10"],
+                   anonymous_bind=True, password_policy={"min": 7},
+                   trusts=[{"name": "x"}], sources=["nse"])
+        d2 = Domain.from_json(json.loads(json.dumps(d.to_json())))
+        self.assertEqual(d2.name, "corp.local")
+        self.assertEqual(d2.dc_ips, ["10.0.10.10"])
+        self.assertTrue(d2.anonymous_bind)
+        self.assertEqual(d2.password_policy, {"min": 7})
+
+
+class PhaseWorkerTest(unittest.TestCase):
+    """The real enum/vuln/db/privesc workers, with scanner mocked (no nmap)."""
+
+    def _paths(self, d):
+        from recce import cli
+        return cli._open_paths(d)
+
+    def test_enum_worker_folds_ports_flags_and_runs_vulndb(self):
+        from recce import cli
+        import recce.scanner as s
+        orig = s.enum_scan
+        s.enum_scan = lambda ip, ports, out, profile, creds=None: _fake_scan(
+            out, ip, [{"port": 21, "service": "ftp", "product": "vsftpd",
+                       "version": "2.3.4"}])
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                paths = self._paths(d)
+                host, issues = cli._enum_worker(
+                    "10.0.0.5", s.PROFILES["standard"], paths, None,
+                    {"10.0.0.5": [21]}, {"10.0.0.5": "10.0.0.0/24"})
+        finally:
+            s.enum_scan = orig
+        self.assertTrue(host.enumerated)
+        self.assertEqual([p.portid for p in host.open_ports], [21])
+        self.assertEqual(host.subnet, "10.0.0.0/24")
+        # vulndb ran inside the worker and flagged the vsftpd backdoor.
+        self.assertTrue(any("vsftpd 2.3.4 backdoor" in v.title for v in host.vulns))
+        self.assertEqual(issues, [])
+
+    def test_vuln_worker_merges_findings_and_marks_ports(self):
+        from recce import cli
+        import recce.scanner as s
+        orig = s.vuln_scan
+        s.vuln_scan = lambda ip, ports, out, profile, creds=None, aggressive=False: \
+            _fake_scan(out, ip, [{"port": 80, "service": "http", "scripts": [
+                ("http-vuln-x", "VULNERABLE: demo issue State: VULNERABLE")]}])
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                paths = self._paths(d)
+                host = Host(ip="10.0.0.5", ports=[Port(portid=80, service="http",
+                            state="open")])
+                host, issues = cli._vuln_worker(
+                    host, [80], s.PROFILES["standard"], paths, None,
+                    aggressive=False, use_ss=False, use_probes=False)
+        finally:
+            s.vuln_scan = orig
+        self.assertTrue(host.ports[0].vuln_scanned)          # port marked done
+        self.assertTrue(any("http-vuln-x" in (v.script_id or "") for v in host.vulns))
+        self.assertEqual(issues, [])
+
+    def test_db_worker_sets_db_scanned(self):
+        from recce import cli
+        import recce.scanner as s
+        orig = s.nse_scan
+        s.nse_scan = lambda ip, ports, out, profile, scripts, creds=None: _fake_scan(
+            out, ip, [{"port": 3306, "service": "mysql"}])
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                paths = self._paths(d)
+                host = Host(ip="10.0.0.5", ports=[Port(portid=3306, service="mysql",
+                            state="open")])
+                host, issues = cli._db_worker(host, [3306], s.PROFILES["standard"],
+                                              paths, None, aggressive=False,
+                                              use_ss=False)
+        finally:
+            s.nse_scan = orig
+        self.assertTrue(host.db_scanned)
+        self.assertTrue(host.ports[0].vuln_scanned)
+        self.assertEqual(issues, [])
+
+    def test_privesc_worker_returns_host_and_issues(self):
+        from recce import cli
+        import recce.scanner as s
+        orig = s.nse_scan
+        s.nse_scan = lambda ip, ports, out, profile, scripts, creds=None: _fake_scan(
+            out, ip, [{"port": 445, "service": "microsoft-ds"}])
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                paths = self._paths(d)
+                host = Host(ip="10.0.0.9", os_family="Windows",
+                            ports=[Port(portid=445, service="microsoft-ds",
+                                        state="open")])
+                host, issues = cli._privesc_worker(host, s.PROFILES["standard"],
+                                                   paths, None, aggressive=False)
+        finally:
+            s.nse_scan = orig
+        self.assertEqual(host.ip, "10.0.0.9")
+        self.assertIsInstance(issues, list)
+
+
+class EnvironmentAndTargetsTest(unittest.TestCase):
+    def test_check_environment_requires_nmap_and_warns(self):
+        import recce.scanner as s
+        from recce.scanner import ScanProfile, ScannerError
+        oh, orr = s._have, s._is_root
+        try:
+            s._have = lambda t: False        # nothing installed
+            s._is_root = lambda: False
+            with self.assertRaises(ScannerError):
+                s.check_environment(ScanProfile())      # nmap missing -> raise
+            s._have = lambda t: t == "nmap"             # only nmap present
+            warns = s.check_environment(ScanProfile())
+            self.assertTrue(any("root" in w.lower() for w in warns))
+            # masscan requested but absent -> warn + fall back to nmap.
+            prof = ScanProfile(scanner="masscan")
+            warns = s.check_environment(prof)
+            self.assertEqual(prof.scanner, "nmap")
+            self.assertTrue(any("masscan" in w.lower() for w in warns))
+        finally:
+            s._have, s._is_root = oh, orr
+
+    def test_load_targets_from_file_with_comments_and_cidr(self):
+        from recce.targets import load_targets
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "scope.txt")
+            with open(f, "w") as fh:
+                fh.write("10.0.0.1\n# a comment\n10.0.0.2   # trailing\n"
+                         "10.0.1.0/30\n\n")
+            hosts, sm = load_targets(["@" + f])
+        self.assertIn("10.0.0.1", hosts)
+        self.assertIn("10.0.0.2", hosts)
+        self.assertIn("10.0.1.1", hosts)                 # expanded from the CIDR
+        self.assertEqual(sm["10.0.1.1"], "10.0.1.0/30")  # CIDR line -> subnet label
+
+    def test_missing_target_file_raises(self):
+        from recce.targets import load_targets
+        with self.assertRaises(FileNotFoundError):
+            load_targets(["@/no/such/file.txt"])
+
+
+class EntryPointTest(unittest.TestCase):
+    def test_module_entrypoint_runs(self):
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = dict(os.environ, PYTHONPATH=root)
+        r = subprocess.run([sys.executable, "-m", "recce", "--version"],
+                           capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("recce", (r.stdout + r.stderr).lower())
+
+
 if __name__ == "__main__":
     unittest.main()
