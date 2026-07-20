@@ -890,6 +890,41 @@ class CredEnumTest(unittest.TestCase):
         self.assertIn("sqlsvc", [a.name for a in ad.kerberoastable([h])])
         self.assertIn("svc-web", [a.name for a in ad.asrep_roastable([h])])
 
+    def test_dual_account_user_enumerates_admin_dumps(self):
+        """Low-priv account enumerates; privileged account does the admin-only
+        power moves (confirm admin reach + secretsdump), labelled per account."""
+        from recce import credenum as c
+        used = []
+
+        def fake_nxc(ip, creds):
+            # Only the privileged account is local admin here.
+            return ({"admin": creds["username"] == "da", "host_info": "corp",
+                     "shares": [{"name": "C$", "perms": "READ"}],
+                     "users": [{"name": "bob", "domain": "corp"}],
+                     "loggedon": [], "passpol": {}}, None)
+
+        def fake_dump(ip, creds):
+            used.append(("secretsdump", creds["username"]))
+            return ([{"name": "krbtgt", "rid": "502", "nt": "abc"}], None)
+
+        onx, osd, odc = c.run_nxc_smb, c.run_secretsdump, c._is_dc
+        c.run_nxc_smb, c.run_secretsdump, c._is_dc = fake_nxc, fake_dump, lambda h: False
+        try:
+            h = Host(ip="10.0.0.5", os_family="Windows",
+                     ports=[Port(portid=445, state="open")])
+            c.enrich_host(h, {"username": "bob", "password": "x", "domain": "corp"},
+                          None, aggressive=False,
+                          admin_creds={"username": "da", "password": "y", "domain": "corp"})
+        finally:
+            c.run_nxc_smb, c.run_secretsdump, c._is_dc = onx, osd, odc
+        # secretsdump ran with the PRIVILEGED account, never the user account.
+        self.assertEqual(used, [("secretsdump", "da")])
+        titles = " ".join(v.title for v in h.vulns)
+        self.assertIn("Local admin confirmed - privileged account", titles)
+        self.assertIn("Credential hashes dumped", titles)
+        # User enumeration still folded shares/users (once, not duplicated).
+        self.assertEqual(sum(1 for a in h.accounts if a.kind == "share"), 1)
+
     def test_ssh_finding_and_facts_recorded(self):
         from recce import credenum as c
         h = Host(ip="10.0.0.5", ports=[Port(portid=22, state="open")])
@@ -1196,6 +1231,23 @@ class VulnDbTest(unittest.TestCase):
         vulndb.assess_host_inplace(lin)
         self.assertFalse(any(w in " ".join(v.title for v in lin.vulns)
                              for w in ("SMBGhost", "PrintNightmare", "ZeroLogon")))
+
+    def test_iis_mssql_seimpersonate_potato_advisories(self):
+        from recce import vulndb
+        h = Host(ip="10.0.10.50", os_family="Windows", os_name="Windows 11",
+                 ports=[Port(portid=80, service="http",
+                             product="Microsoft IIS httpd", version="10.0"),
+                        Port(portid=1433, service="ms-sql-s",
+                             product="Microsoft SQL Server", version="15.0")])
+        vulndb.assess_host_inplace(h)
+        titles = " ".join(v.title for v in h.vulns)
+        self.assertIn("IIS AppPool - SeImpersonate", titles)
+        self.assertIn("MSSQL service account - SeImpersonate", titles)
+        potato = [v for v in h.vulns if "SeImpersonate" in v.title]
+        for v in potato:
+            self.assertEqual(v.confidence, "potential")       # advisory
+            self.assertIn("CWE-269", v.cwes)
+            self.assertIn("GodPotato", v.output + v.remediation or "")
 
     def test_zerologon_is_dc_only(self):
         from recce import vulndb

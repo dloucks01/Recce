@@ -54,6 +54,11 @@ sudo ./bin/recce db -o eng                 # databases
 ./bin/recce      privesc -o eng            # priv-esc playbook
 # ...and once you have creds (needs netexec/impacket/ssh on Kali):
 ./bin/recce      credenum -u alice -p 'Pw!' -d corp.local -o eng  # authed SMB/AD/SSH
+#   Have a user AND a privileged account? Pass both - the user account does the
+#   enumeration, the privileged one runs the admin-only checks (confirm local
+#   admin, secretsdump), and the report labels what each account reached:
+./bin/recce      credenum -u alice -p 'Pw!' -d corp.local \
+                 --admin-user admin --admin-pass 'AdmPw!' -o eng
 
 # 4b) Generate a Word (.docx) write-up per finding, then finish each in Word
 ./bin/recce      writeups -o eng           # auto-fills fields + web screenshots
