@@ -53,6 +53,23 @@ class SheetSpec:
     rows: list[dict]                   # {"key": str, "data": {header: value}}
     styler: Callable | None = None     # data_dict -> {header: style_name}
     skip_if_empty: bool = False
+    group_by: str | None = None        # header to group rows under collapsible host bands
+
+
+# Tab colours group the sheets into visual bands in Excel's tab bar, by role:
+#   guide/summary (grey-blue) · working (blue) · findings (red) · inventory
+#   (green) · raw evidence (grey). Titles not listed get no colour.
+_TAB_GUIDE, _TAB_WORK = "FF8497B0", "FF2E75B6"
+_TAB_FIND, _TAB_INV, _TAB_RAW = "FFC00000", "FF548235", "FF7F7F7F"
+TAB_COLORS = {
+    "Start Here": _TAB_GUIDE, "Overview": _TAB_GUIDE,
+    "Checklist": _TAB_WORK, "Services": _TAB_WORK,
+    "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND,
+    "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
+    "Services by Product": _TAB_INV, "Databases": _TAB_INV,
+    "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
+    "Raw NSE": _TAB_RAW,
+}
 
 
 def _ip_sort_key(ip: str):
@@ -164,12 +181,13 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
     rows = []
     for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
         for p in sorted(h.open_ports, key=lambda p: p.portid):
-            rows.append({"key": tr.svc_key(h.ip, p.protocol, p.portid), "data": {
+            rows.append({"key": tr.svc_key(h.ip, p.protocol, p.portid),
+                         "group": h.ip, "data": {
                 "IP": h.ip, "Hostname": h.hostname, "Port": p.portid,
                 "Proto": p.protocol, "Service": p.service,
                 "Product": p.product, "Version": p.version, "Extra info": p.extrainfo,
                 "CPE": ", ".join(p.cpe)}})
-    return SheetSpec("Services", cols, rows)
+    return SheetSpec("Services", cols, rows, group_by="IP")
 
 
 def _spec_services_by_product(hosts: list[Host]) -> SheetSpec:
@@ -248,50 +266,36 @@ def _styler_raw(d: dict) -> dict:
     return {"Output": "wrap"}
 
 
-def _spec_host_scripts(hosts: list[Host]) -> SheetSpec:
-    """Host-level NSE script output, verbatim (one row per host script run).
-
-    These are the scripts nmap runs against the host as a whole rather than a
-    single port - smb-os-discovery, smb2-time, ldap-rootdse, nbstat, and the
-    like. Kept separate from the per-port Scan Output so host-wide facts read on
-    their own."""
+def _spec_raw_nse(hosts: list[Host]) -> SheetSpec:
+    """All raw NSE script output, verbatim, in one place. The Scope column says
+    whether a script ran against the whole host ("host": smb-os-discovery,
+    smb2-time, nbstat, ldap-rootdse...) or a single open port (the port number:
+    ftp-anon on 21, ssl-cert on 443...). This is the unparsed evidence behind the
+    parsed sheets - filter Scope to `host` for host-wide facts, or to a port to
+    read that service's output. Grouped by host and collapsible."""
     cols = [
         ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 22),
-        ("Script", "data", 26), ("Output", "data", 96),
+        ("Scope", "data", 8), ("Script", "data", 28), ("Output", "data", 94),
         ("Notes", "notes", 26), ("Key", "key", 4),
     ]
     rows = []
     for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
-        for s in h.host_scripts:
+        for s in h.host_scripts:                     # host-wide scripts first
             if not (s.output or "").strip():
                 continue
-            rows.append({"key": f"raw:{h.ip}:host:{s.id}", "data": {
-                "IP": h.ip, "Hostname": h.hostname,
+            rows.append({"key": f"raw:{h.ip}:host:{s.id}", "group": h.ip, "data": {
+                "IP": h.ip, "Hostname": h.hostname, "Scope": "host",
                 "Script": s.id, "Output": _clip(s.output)}})
-    return SheetSpec("Host Scripts", cols, rows, _styler_raw, skip_if_empty=True)
-
-
-def _spec_scan_output(hosts: list[Host]) -> SheetSpec:
-    """Port-level NSE script output, verbatim - one row per port script run. The
-    unparsed evidence behind the parsed sheets: whatever nmap's per-port scripts
-    printed, kept as-is so a tester can read the source, cite it in a write-up,
-    or catch something the parsers didn't surface. (Host-wide scripts live on the
-    separate Host Scripts sheet.)"""
-    cols = [
-        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 20),
-        ("Port", "data", 7), ("Script", "data", 26), ("Output", "data", 90),
-        ("Notes", "notes", 26), ("Key", "key", 4),
-    ]
-    rows = []
-    for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
         for p in sorted(h.open_ports, key=lambda p: p.portid):
-            for s in p.scripts:
+            for s in p.scripts:                      # then per-port scripts
                 if not (s.output or "").strip():
                     continue
-                rows.append({"key": f"raw:{h.ip}:{p.portid}:{s.id}", "data": {
-                    "IP": h.ip, "Hostname": h.hostname, "Port": p.portid,
+                rows.append({"key": f"raw:{h.ip}:{p.portid}:{s.id}", "group": h.ip,
+                             "data": {
+                    "IP": h.ip, "Hostname": h.hostname, "Scope": str(p.portid),
                     "Script": s.id, "Output": _clip(s.output)}})
-    return SheetSpec("Scan Output", cols, rows, _styler_raw, skip_if_empty=True)
+    return SheetSpec("Raw NSE", cols, rows, _styler_raw, skip_if_empty=True,
+                     group_by="IP")
 
 
 def _styler_databases(d: dict) -> dict:
@@ -299,10 +303,12 @@ def _styler_databases(d: dict) -> dict:
 
 
 def _spec_databases(hosts: list[Host]) -> SheetSpec:
+    # Convention: state box, then IP + Hostname lead every host-centric sheet
+    # (Vuln-scan status moved next to Engine/Version rather than before the IP).
     cols = [
-        ("Checked", "checkbox", 9), ("Vuln-scan", "data", 11), ("IP", "data", 16),
-        ("Hostname", "data", 22), ("Port", "data", 6), ("Engine", "data", 12),
-        ("Version", "data", 22), ("Auth", "data", 16), ("Databases", "data", 34),
+        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 22),
+        ("Port", "data", 6), ("Engine", "data", 12), ("Version", "data", 22),
+        ("Vuln-scan", "data", 11), ("Auth", "data", 16), ("Databases", "data", 34),
         ("Users", "data", 30), ("Findings", "data", 40), ("Notes", "notes", 26),
         ("Key", "key", 4),
     ]
@@ -400,12 +406,43 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             ordered_keys.append(k)
             seen.add(k)
 
+    # Optional collapsible grouping: reorder keys into per-host bands (stable by
+    # first appearance), so each host's rows sit under a header the tester can
+    # collapse. `items` is a flat sequence of ("hdr", groupval) / ("row", key).
+    grouped = bool(spec.group_by)
+    ip_col = next((i for i, (h, _, _) in enumerate(spec.cols, 1) if h == "IP"), 1)
+    noun = {"Services": "ports", "Raw NSE": "scripts"}.get(spec.title, "rows")
+    if grouped:
+        buckets: dict[str, list[str]] = {}
+        for k in ordered_keys:
+            buckets.setdefault(rows_by_key[k].get("group", ""), []).append(k)
+        items: list[tuple[str, str]] = []
+        for gv, keys in buckets.items():
+            items.append(("hdr", gv))
+            items += [("row", k) for k in keys]
+    else:
+        items = [("row", k) for k in ordered_keys]
+
     # Excel row numbers (1-based, header is row 1) where a "check" column holds a
     # real checkbox rather than an N/A dash - used to scope validation/formatting.
     active_check_rows: dict[int, list[int]] = {}
+    data_rows: list[int] = []            # detail (non-group-header) row numbers
     excel_row = 1
-    for key in ordered_keys:
+    for kind, key in items:
         excel_row += 1
+        if kind == "hdr":
+            # A collapsible section band: IP + hostname + count in the IP column,
+            # the rest blank but styled, so a whole host folds into one row.
+            grp_rows = buckets[key]
+            hostname = rows_by_key[grp_rows[0]]["data"].get("Hostname", "")
+            label = f"{key}   ·   {hostname}   ·   {len(grp_rows)} {noun}".replace(
+                "·      ·", "·")
+            hdr_cells = []
+            for ci, (_h, _role, _w) in enumerate(spec.cols, start=1):
+                hdr_cells.append((label if ci == ip_col else "", "group"))
+            sheet.write(hdr_cells, outline=0)
+            continue
+        data_rows.append(excel_row)
         row = rows_by_key[key]
         data = row["data"]
         checks = row.get("checks", {})   # {header: (stepkey, auto_default, applies)}
@@ -441,18 +478,28 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
                 if st == "wrap" and band:
                     st = "wrap_band"          # keep wrapping but band the row
                 cells.append((val, st) if st else (val, data_style))
-        sheet.write(cells)
+        sheet.write(cells, outline=(1 if grouped else 0))
 
     ncols = len(spec.cols)
     sheet.freeze_header = True
     sheet.hide_gridlines = True          # our hairline rules read cleaner than gridlines
     sheet.header_height = 22
+    sheet.tab_color = TAB_COLORS.get(spec.title)
     # Freeze the identity columns so the IP stays visible when scrolling right.
     sheet.freeze_cols = _FREEZE_COLS.get(spec.title, 0)
     sheet.autofilter_cols = ncols
     for i, (_h, role, w) in enumerate(spec.cols, start=1):
         sheet.set_col(i, w, hidden=(role == "key"))
     last = sheet.nrows
+
+    def _rowset_sqref(col: int) -> str | None:
+        # On grouped sheets, scope validation/formatting to the DATA rows only, so
+        # the collapsible group-header rows never sprout a stray dropdown arrow.
+        if not grouped:
+            return None
+        letter = xlsx.col_letter(col)
+        return " ".join(f"{letter}{r}" for r in data_rows) or None
+
     # Checkbox / check columns get the ☑/☐ dropdown + green-when-checked. For
     # per-step "check" columns, restrict it to the cells that actually hold a box
     # so N/A dashes don't trip Excel's list-validation error.
@@ -466,12 +513,14 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             sheet.dropdown(i, 2, last, sqref=sqref)
             sheet.green_when_true(i, 2, last, sqref=sqref)
         elif role == "status":
-            sheet.dropdown(i, 2, last, values=STATUS_VALUES)
-            sheet.highlight_when_equal(i, 2, last, STATUS_DONE, dxf_id=0)  # green
-            sheet.highlight_when_equal(i, 2, last, STATUS_WIP, dxf_id=1)   # amber
+            sq = _rowset_sqref(i)
+            sheet.dropdown(i, 2, last, sqref=sq, values=STATUS_VALUES)
+            sheet.highlight_when_equal(i, 2, last, STATUS_DONE, dxf_id=0, sqref=sq)
+            sheet.highlight_when_equal(i, 2, last, STATUS_WIP, dxf_id=1, sqref=sq)
         elif h in CHECKBOX_HEADERS:
-            sheet.dropdown(i, 2, last)
-            sheet.green_when_true(i, 2, last)
+            sq = _rowset_sqref(i)
+            sheet.dropdown(i, 2, last, sqref=sq)
+            sheet.green_when_true(i, 2, last, sqref=sq)
 
 
 # --- computed (non-tracked) sheets ----------------------------------------------
@@ -523,10 +572,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
         ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
-        ("Host Scripts", "Raw host-level NSE output (smb-os-discovery, ldap-rootdse, "
-                         "nbstat...) - host-wide evidence, verbatim."),
-        ("Scan Output", "Raw per-port NSE output, verbatim - the evidence behind "
-                        "the parsed sheets (cite it in write-ups)."),
+        ("Raw NSE", "All raw NSE script output, verbatim (Scope = host or port) - "
+                    "the evidence behind the parsed sheets; grouped by host."),
     ]:
         sh.write([tab, desc])
     sh.write([""])
@@ -559,10 +606,13 @@ def _bar(pct: int) -> str:
 
 
 def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
-                    tracking: Tracking, scope: dict, issues: list | None = None) -> None:
+                    tracking: Tracking, scope: dict, issues: list | None = None,
+                    nav: list[str] | None = None) -> None:
     """One summary tab: engagement totals, review progress, and (prominently)
-    live-hosts-per-subnet coverage. Replaces the old Dashboard/Coverage/Subnets."""
+    live-hosts-per-subnet coverage. Doubles as a navigation hub - the jump bar
+    and several totals are clickable links to the matching sheet."""
     sh = wb.add_sheet("Overview")
+    nav = nav or []
     open_ports = [p for h in hosts for p in h.open_ports]
     win = sum(1 for h in hosts if "windows" in (h.os_family or h.os_name).lower())
     lin = sum(1 for h in hosts if "linux" in (h.os_family or h.os_name).lower())
@@ -571,6 +621,15 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     sh.write([("Engagement Overview", "title")])
     sh.write([(meta.get("subtitle", ""), "sub")])
     sh.write([""])
+
+    # --- Navigation hub: a clickable jump bar to every populated sheet ---
+    if nav:
+        sh.write([("Jump to", "header")])
+        link_row = sh.nrows + 1
+        sh.write([(t, "link") for t in nav])
+        for ci, title in enumerate(nav, start=1):
+            sh.link_to(link_row, ci, title)
+        sh.write([""])
 
     # --- Scan issues (front and centre so nothing failed silently) ---
     issues = issues or []
@@ -593,8 +652,16 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         sh.set_col(5, 70)
         sh.write([""])
 
-    # --- Totals ---
+    # --- Totals (several labels link straight to the relevant sheet) ---
     sh.write([("Totals", "header"), ("", "header")])
+    nav_set = set(nav)
+    _links = {
+        "Live hosts": "Checklist", "Open service ports": "Services",
+        "Vuln findings": "Vulnerabilities", "High / Critical findings": "Vulnerabilities",
+        "Candidate exploits": "Exploits", "Domains / DCs": "Active Directory",
+        "NTLM relay targets": "AD Quick Wins",
+        "Kerberoastable / AS-REP": "AD Quick Wins",
+    }
     for label, val in [
         ("Live hosts", len(hosts)),
         ("Windows / Linux", f"{win} / {lin}"),
@@ -608,7 +675,13 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         ("Kerberoastable / AS-REP", f"{len(ad.kerberoastable(hosts))} / "
                                     f"{len(ad.asrep_roastable(hosts))}"),
     ]:
-        sh.write([(label, "bold"), val])
+        target = _links.get(label)
+        if target in nav_set:
+            r = sh.nrows + 1
+            sh.write([(label, "link"), val])
+            sh.link_to(r, 1, target)
+        else:
+            sh.write([(label, "bold"), val])
     sh.write([""])
 
     # --- Review progress ---
@@ -710,7 +783,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
 
         Start Here, Overview, Checklist, Services, Vulnerabilities, Exploits,
         Services by Product, Databases, Active Directory, AD Quick Wins,
-        Users & Accounts, Priv-Esc, Host Scripts, Scan Output.
+        Users & Accounts, Priv-Esc, Raw NSE.
 
     Rationale for the pairings you flip between:
       * Checklist <-> Services  - host <-> its open ports (the working pair).
@@ -723,7 +796,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
             _spec_exploits(hosts), _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
            [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts),
-            _spec_host_scripts(hosts), _spec_scan_output(hosts)]
+            _spec_raw_nse(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
@@ -739,9 +812,17 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     order_map = order_map or {}
     statuses = statuses or {}
     wb = xlsx.Workbook()
-    _build_guide(wb, meta)
-    _build_overview(wb, hosts, meta, domains, tracking, scope, issues or [])
     pre, post = _ordered_specs(hosts, scope)
+    # Which sheets will actually exist (skip_if_empty ones may not), in tab order,
+    # so the Overview's jump bar only links to sheets that are really there.
+    ad_present = bool(domains or ad.domain_controllers(hosts))
+    nav = [s.title for s in pre if not (s.skip_if_empty and not s.rows)]
+    if ad_present:
+        nav.append("Active Directory")
+    nav += [s.title for s in post if not (s.skip_if_empty and not s.rows)]
+
+    _build_guide(wb, meta)
+    _build_overview(wb, hosts, meta, domains, tracking, scope, issues or [], nav)
     for spec in pre:
         if spec.skip_if_empty and not spec.rows:
             continue
@@ -753,6 +834,11 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
             continue
         _write_spec(wb.add_sheet(spec.title), spec, tracking,
                     order_map.get(spec.title), statuses)
+    # Colour the computed (non-spec) sheets' tabs too, so the whole tab bar is
+    # grouped into role bands.
+    for sh in wb.sheets:
+        if sh.tab_color is None:
+            sh.tab_color = TAB_COLORS.get(sh.title)
     wb.save(out_path)
     return out_path
 
