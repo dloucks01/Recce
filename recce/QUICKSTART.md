@@ -73,13 +73,19 @@ you can sort and report by weakness class.
 
 - **Start Here** tab explains every tab.
 - **Checklist** tab = one row per IP, **grouped by subnet**. The step boxes
-  (Enumerated / Vuln-scan / DB / Priv-esc) **turn green automatically** when the
-  tool finishes that step. You can tick/untick any box yourself — untick to flag
-  "redo." Tick **Reviewed** when you're personally done with a host.
-- **Subnets** tab = every subnet in scope (even ones with no live hosts), showing
-  addresses in range, live hosts found, and how many are done per phase — so no
-  subnet gets missed.
-- **Filter a step column to `FALSE`** (or filter by Subnet) to see what's left.
+  (Enumerated / Vuln-scan / Web / SMB/AD / DB / Priv-esc) **turn green
+  automatically** when the tool finishes that step. You can tick/untick any box
+  yourself — untick to flag "redo." Tick **Reviewed** when you're personally done
+  with a host.
+- **Boxes only show where the step applies.** A step that's irrelevant to a host
+  shows **`—`** instead of a checkbox — no Web box without a web server, no
+  SMB/AD box on a plain Linux host, no DB box without a database, no Priv-esc box
+  until you've run `privesc` there. So a checked box always means real work.
+- **Overview** tab = every subnet in scope (even ones with no live hosts), showing
+  addresses in range, live hosts found, and per-surface completion — so no subnet
+  (or surface) gets missed.
+- **Filter a step column to `☐`** (or filter by Subnet) to see what's left; `—`
+  cells are ignored, so you never chase a phase that doesn't apply.
 - After editing in Excel, **save**, then run `./bin/recce report -o eng` (or
   any scan) to fold your edits back in. Close the file before a scan rewrites it.
 

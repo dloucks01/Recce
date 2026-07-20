@@ -68,21 +68,25 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     """One row per IP, grouped by subnet, with a checkbox for each workflow step.
 
     Rows are sorted by subnet then IP, so every subnet's hosts sit together (and
-    you can filter to one subnet). Each step checkbox (Enumerated / Vuln-scan / DB
-    / Priv-esc) auto-checks (green) when the tool completes that step; you can also
-    tick/untick it by hand and your choice persists until you re-run that phase.
-    The Reviewed checkbox is your per-host sign-off.
+    you can filter to one subnet). Each step checkbox auto-checks (green) when the
+    tool completes that step; you can also tick/untick it by hand and your choice
+    persists until you re-run that phase. Steps that don't apply to a host show
+    "—" instead of a box (no Web box without a web server, no SMB/AD box on a
+    plain Linux host, no DB box without a database), so a checked box always means
+    real work was done. The Reviewed checkbox is your per-host sign-off.
     """
     cols = [
         ("Reviewed", "checkbox", 9), ("Subnet", "data", 16), ("IP", "data", 15),
         ("Hostname", "data", 22), ("OS", "data", 20), ("Roles", "data", 22),
         ("Open ports", "data", 30), ("# Vulns", "data", 8),
-        ("Enumerated", "check", 11), ("Vuln-scan", "check", 11), ("DB", "check", 6),
-        ("Priv-esc", "check", 10), ("Notes", "notes", 28), ("Key", "key", 4),
+        ("Enumerated", "check", 11), ("Vuln-scan", "check", 11), ("Web", "check", 7),
+        ("SMB/AD", "check", 8), ("DB", "check", 6), ("Priv-esc", "check", 10),
+        ("Notes", "notes", 28), ("Key", "key", 4),
     ]
     rows = []
     for h in sorted(hosts, key=lambda x: (_subnet_sort_key(x.subnet), _ip_sort_key(x.ip))):
-        checks = {header: (tr.step_key(step, h.ip), tr.step_auto(h, step))
+        checks = {header: (tr.step_key(step, h.ip), tr.step_auto(h, step),
+                           tr.step_applies(h, step))
                   for header, step in tr.STEP_COLUMNS.items()}
         open_ports = ", ".join(str(p.portid) for p in sorted(h.open_ports, key=lambda p: p.portid))
         rows.append({"key": tr.host_key(h.ip), "checks": checks, "data": {
@@ -316,20 +320,29 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             ordered_keys.append(k)
             seen.add(k)
 
+    # Excel row numbers (1-based, header is row 1) where a "check" column holds a
+    # real checkbox rather than an N/A dash - used to scope validation/formatting.
+    active_check_rows: dict[int, list[int]] = {}
+    excel_row = 1
     for key in ordered_keys:
+        excel_row += 1
         row = rows_by_key[key]
         data = row["data"]
-        checks = row.get("checks", {})   # {header: (stepkey, auto_default)}
+        checks = row.get("checks", {})   # {header: (stepkey, auto_default, applies)}
         rev, note = tracking.get(key, (False, ""))
         styles = spec.styler(data) if spec.styler else {}
         cells = []
-        for header, role, _w in spec.cols:
+        for ci, (header, role, _w) in enumerate(spec.cols, start=1):
             if role == "checkbox":
                 cells.append(xlsx.CHECK_ON if rev else xlsx.CHECK_OFF)
             elif role == "check":
-                stepkey, auto = checks.get(header, ("", False))
+                stepkey, auto, applies = checks.get(header, ("", False, True))
+                if not applies:
+                    cells.append(tr.STEP_NA)     # not relevant to this host
+                    continue
                 shown = tracking[stepkey][0] if stepkey in tracking else auto
                 cells.append(xlsx.CHECK_ON if shown else xlsx.CHECK_OFF)
+                active_check_rows.setdefault(ci, []).append(excel_row)
             elif role == "notes":
                 cells.append(note)
             elif role == "key":
@@ -346,9 +359,19 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
     for i, (_h, role, w) in enumerate(spec.cols, start=1):
         sheet.set_col(i, w, hidden=(role == "key"))
     last = sheet.nrows
-    # Any checkbox / check column gets the TRUE/FALSE dropdown + green-when-true.
+    # Checkbox / check columns get the ☑/☐ dropdown + green-when-checked. For
+    # per-step "check" columns, restrict it to the cells that actually hold a box
+    # so N/A dashes don't trip Excel's list-validation error.
     for i, (h, role, _w) in enumerate(spec.cols, 1):
-        if role == "check" or h in CHECKBOX_HEADERS:
+        if role == "check":
+            active = active_check_rows.get(i, [])
+            if not active:
+                continue
+            letter = xlsx.col_letter(i)
+            sqref = " ".join(f"{letter}{r}" for r in active)
+            sheet.dropdown(i, 2, last, sqref=sqref)
+            sheet.green_when_true(i, 2, last, sqref=sqref)
+        elif h in CHECKBOX_HEADERS:
             sheet.dropdown(i, 2, last)
             sheet.green_when_true(i, 2, last)
 
@@ -425,7 +448,6 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
                     tracking: Tracking, scope: dict) -> None:
     """One summary tab: engagement totals, review progress, and (prominently)
     live-hosts-per-subnet coverage. Replaces the old Dashboard/Coverage/Subnets."""
-    from . import db as dbmod
     sh = wb.add_sheet("Overview")
     open_ports = [p for h in hosts for p in h.open_ports]
     win = sum(1 for h in hosts if "windows" in (h.os_family or h.os_name).lower())
@@ -473,28 +495,33 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     # --- Coverage by subnet (live hosts + phase completion) ---
     sh.write([("Coverage by subnet - live hosts and phase completion", "header"),
               ("", "header"), ("", "header"), ("", "header"), ("", "header"),
-              ("", "header"), ("", "header"), ("", "header")])
+              ("", "header"), ("", "header"), ("", "header"), ("", "header")])
     sh.write([("Subnet", "bold"), ("In range", "bold"), ("Live hosts", "bold"),
-              ("Enumerated", "bold"), ("Vuln-scanned", "bold"), ("DB", "bold"),
-              ("Priv-esc", "bold"), ("# Vulns", "bold")])
+              ("Enumerated", "bold"), ("Vuln-scanned", "bold"), ("Web", "bold"),
+              ("SMB/AD", "bold"), ("DB", "bold"), ("# Vulns", "bold")])
     agg: dict[str, list] = defaultdict(list)
     for h in hosts:
         agg[h.subnet or "unknown"].append(h)
+
+    def cell(done, total):
+        # Denominator counts only hosts the step applies to, so "x/y" reflects
+        # real coverage of that surface (blank when the surface is absent).
+        if not total:
+            return ""
+        return (f"{done}/{total}", "done") if done == total else \
+               (f"{done}/{total}", "sev_medium") if done else f"{done}/{total}"
+
+    def phase(hs, step):
+        applic = [h for h in hs if tr.step_applies(h, step)]
+        return cell(sum(1 for h in applic if tr.step_auto(h, step)), len(applic))
+
     for sn in sorted(set(agg) | set(scope or {}), key=_subnet_sort_key):
         hs = agg.get(sn, [])
-        live = len(hs)
-        db_hosts = [h for h in hs if dbmod.db_ports(h)]
-
-        def cell(done, total):
-            return (f"{done}/{total}", "done") if total and done == total else \
-                   (f"{done}/{total}", "sev_medium") if done else f"{done}/{total}"
-        sh.write([sn, (scope or {}).get(sn, ""), live,
-                  cell(sum(1 for h in hs if h.enumerated), live),
-                  cell(sum(1 for h in hs if h.vuln_step in ("done", "n/a")), live),
-                  cell(sum(1 for h in db_hosts if h.db_scanned), len(db_hosts)),
-                  cell(sum(1 for h in hs if h.privesc_checked), live),
+        sh.write([sn, (scope or {}).get(sn, ""), len(hs),
+                  phase(hs, "enum"), phase(hs, "vuln"), phase(hs, "web"),
+                  phase(hs, "smbad"), phase(hs, "db"),
                   sum(len(h.vulns) for h in hs)])
-    for col, w in {1: 26, 2: 10, 3: 11, 4: 12, 5: 13, 6: 8, 7: 10, 8: 8}.items():
+    for col, w in {1: 26, 2: 10, 3: 11, 4: 12, 5: 13, 6: 8, 7: 9, 8: 8, 9: 8}.items():
         sh.set_col(col, w)
 
 
@@ -631,8 +658,12 @@ def read_workbook_tracking(path: str) -> Tracking:
                     continue
                 ip = str(r[ipc])
                 for ci, step in step_cols:
-                    if ci < len(r):
-                        result[tr.step_key(step, ip)] = (as_bool(r[ci]), "")
+                    if ci >= len(r):
+                        continue
+                    cell = str(r[ci]).strip()
+                    if not cell or cell == tr.STEP_NA:
+                        continue   # N/A step - not a real checkbox, never an override
+                    result[tr.step_key(step, ip)] = (as_bool(r[ci]), "")
 
         if "Key" not in header:
             continue
