@@ -1,4 +1,4 @@
-"""Command-line entrypoint for pentest_enum.
+"""Command-line entrypoint for recce.
 
 Subcommands:
   scan     run enumeration across targets, store results, generate reports
@@ -31,12 +31,12 @@ from .store import Store
 from .targets import apply_exclusions, ip_matcher, load_targets
 
 BANNER = r"""
-  ____             _            _     _____
- |  _ \ ___ _ __ | |_ ___  ___| |_  | ____|_ __  _   _ _ __ ___
- | |_) / _ \ '_ \| __/ _ \/ __| __| |  _| | '_ \| | | | '_ ` _ \
- |  __/  __/ | | | ||  __/\__ \ |_  | |___| | | | |_| | | | | | |
- |_|   \___|_| |_|\__\___||___/\__| |_____|_| |_|\__,_|_| |_| |_|
-        multi-subnet enumeration & reporting for pentests
+  ____  _____ ____ ____ _____
+ |  _ \| ____/ ___/ ___| ____|
+ | |_) |  _|| |  | |   |  _|
+ |  _ <| |__| |__| |___| |___
+ |_| \_\_____\____\____|_____|
+   recon & coverage tracker for airgapped pentests
 """
 
 AUTH_NOTICE = (
@@ -910,13 +910,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Suggested next step, so you always know what to run.
     o = args.output_dir
     if not hosts:
-        nxt = f"pentest_enum enum <targets> -o {o}   # nothing scanned yet"
+        nxt = f"recce enum <targets> -o {o}   # nothing scanned yet"
     elif enumerated < len(hosts) or vuln_done < len(hosts):
-        nxt = f"pentest_enum vulns --unscanned -o {o}   # vuln-scan the rest"
+        nxt = f"recce vulns --unscanned -o {o}   # vuln-scan the rest"
     elif db_hosts and db_done < len(db_hosts):
-        nxt = f"pentest_enum db -o {o}   # enumerate the databases"
+        nxt = f"recce db -o {o}   # enumerate the databases"
     elif pe_done < len(hosts):
-        nxt = f"pentest_enum privesc -o {o}   # build the priv-esc playbook"
+        nxt = f"recce privesc -o {o}   # build the priv-esc playbook"
     else:
         nxt = "all phases complete - review the workbook and tick Reviewed."
     print(f"\n  Next: {nxt}")
@@ -1060,24 +1060,24 @@ def _add_vuln_opts(pp) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     from . import __version__
     p = argparse.ArgumentParser(
-        prog="pentest_enum",
+        prog="recce",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Phased enumeration & reporting for pentest engagements. "
                     "Scans fill an Excel workbook you check off as you go.",
         epilog=(
             "typical engagement:\n"
-            "  1. pentest_enum doctor                     # verify this box\n"
-            "  2. pentest_enum enum 10.0.0.0/24 -o eng    # discover + services\n"
+            "  1. recce doctor                     # verify this box\n"
+            "  2. recce enum 10.0.0.0/24 -o eng    # discover + services\n"
             "  3. open eng/enumeration.xlsx -> Start Here tab\n"
-            "  4. pentest_enum vulns -o eng               # vuln-scan open ports\n"
-            "  5. pentest_enum db -o eng ; pentest_enum privesc -o eng\n"
-            "  6. pentest_enum status -o eng              # what's left\n\n"
+            "  4. recce vulns -o eng               # vuln-scan open ports\n"
+            "  5. recce db -o eng ; recce privesc -o eng\n"
+            "  6. recce status -o eng              # what's left\n\n"
             "targets: single IP, several IPs, range (10.0.0.10-40), CIDR, or @file.\n"
-            "run 'pentest_enum <command> -h' for a command's options."
+            "run 'recce <command> -h' for a command's options."
         ),
     )
     p.add_argument("-V", "--version", action="version",
-                   version=f"pentest_enum {__version__}")
+                   version=f"recce {__version__}")
     sub = p.add_subparsers(dest="command", required=True, metavar="<command>")
 
     # Phase 1: fast enumeration -> sheet.

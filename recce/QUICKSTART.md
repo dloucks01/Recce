@@ -1,4 +1,4 @@
-# pentest_enum — Quick Start
+# recce — Quick Start
 
 A simple, no-nonsense guide. (Full details are in `README.md`.)
 
@@ -16,31 +16,31 @@ Nothing to install — it uses only Python 3.9+ and the tools already on Kali
 folder to your box, then:
 
 ```bash
-cd pentest_enum
-./pentest-enum doctor          # confirms your box can run everything
+cd recce
+./bin/recce doctor          # confirms your box can run everything
 ```
 
-> `./pentest-enum` is a shortcut for `python3 -m pentest_enum`. Use either.
+> `./bin/recce` is a shortcut for `python3 -m recce`. Use either.
 > Run scans with `sudo` so nmap can do SYN/OS detection.
 
 ## The 5-step engagement
 
 ```bash
 # 1) Fast enumeration -> fills the sheet (hosts, ports, services)
-sudo ./pentest-enum enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
+sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
 
 # 2) Open the workbook and start working
 #    eng/enumeration.xlsx  ->  read the "Start Here" tab, then use "Checklist"
 
 # 3) Vuln-scan the open ports it found (safe by default)
-sudo ./pentest-enum vulns -o eng
+sudo ./bin/recce vulns -o eng
 
 # 4) Optional deeper phases (any time, on any subset)
-sudo ./pentest-enum db -o eng                 # databases
-./pentest-enum      privesc -o eng            # priv-esc playbook
+sudo ./bin/recce db -o eng                 # databases
+./bin/recce      privesc -o eng            # priv-esc playbook
 
 # 5) See what's left (prints progress + the suggested next command)
-./pentest-enum status -o eng
+./bin/recce status -o eng
 ```
 
 That's it. Repeat steps 3–5 until `status` says everything's done.
@@ -57,7 +57,7 @@ That's it. Repeat steps 3–5 until `status` says everything's done.
 
 `enum`/`scan` take targets as the scope to scan. `vulns`/`db`/`privesc` take
 targets to work on **just that subset** of what's already been enumerated —
-e.g. `sudo ./pentest-enum vulns 10.0.20.0/24 -o eng`.
+e.g. `sudo ./bin/recce vulns 10.0.20.0/24 -o eng`.
 
 Handy filters on `vulns`: `--only http smb` (just those services),
 `--unscanned` (only ports not yet done), `--aggressive` (intrusive checks).
@@ -73,7 +73,7 @@ Handy filters on `vulns`: `--only http smb` (just those services),
   addresses in range, live hosts found, and how many are done per phase — so no
   subnet gets missed.
 - **Filter a step column to `FALSE`** (or filter by Subnet) to see what's left.
-- After editing in Excel, **save**, then run `./pentest-enum report -o eng` (or
+- After editing in Excel, **save**, then run `./bin/recce report -o eng` (or
   any scan) to fold your edits back in. Close the file before a scan rewrites it.
 
 ## If a scan is slow or crashes
