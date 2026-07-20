@@ -18,31 +18,106 @@ import re
 from dataclasses import dataclass, field
 
 from .docx import Document
+from .exploitref import proven_exploit_ref
 from .models import Host, Vuln
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
-# First matching CWE -> (vulnerability type, CIA aspects) for auto-draft.
+# First matching CWE -> (vulnerability type, CIA aspects) for auto-draft. Ordered
+# most-specific first; every CWE recce can emit is covered (see the coverage test).
+_CIA = "Confidentiality, Integrity, Availability"
 _CWE_TYPE = [
-    (("CWE-78", "CWE-77", "CWE-88", "CWE-94", "CWE-95", "CWE-134"),
-     "Injection / Remote Code Execution", "Confidentiality, Integrity, Availability"),
+    (("CWE-78", "CWE-77", "CWE-88", "CWE-94", "CWE-95", "CWE-134", "CWE-74", "CWE-917"),
+     "Injection / Remote Code Execution", _CIA),
     (("CWE-89",), "SQL Injection", "Confidentiality, Integrity"),
     (("CWE-79",), "Cross-Site Scripting", "Integrity"),
+    (("CWE-352",), "Cross-Site Request Forgery (CSRF)", "Integrity"),
+    (("CWE-502",), "Insecure Deserialization", _CIA),
+    (("CWE-918",), "Server-Side Request Forgery (SSRF)", "Confidentiality, Integrity"),
+    (("CWE-611",), "XML External Entity (XXE) Injection", "Confidentiality, Integrity"),
+    (("CWE-434",), "Unrestricted File Upload", _CIA),
+    (("CWE-444",), "HTTP Request Smuggling / Desync", "Integrity"),
     (("CWE-22", "CWE-98"), "Path Traversal / File Inclusion", "Confidentiality, Integrity"),
-    (("CWE-287", "CWE-306", "CWE-288", "CWE-1188", "CWE-521", "CWE-307", "CWE-798"),
+    (("CWE-119", "CWE-120", "CWE-125", "CWE-787", "CWE-415", "CWE-416", "CWE-190",
+      "CWE-193"), "Memory Corruption / Buffer Error", _CIA),
+    (("CWE-287", "CWE-306", "CWE-288", "CWE-1188", "CWE-521", "CWE-307", "CWE-798",
+      "CWE-290", "CWE-640", "CWE-863"),
      "Authentication / Access Control Weakness", "Confidentiality, Integrity"),
     (("CWE-269", "CWE-250", "CWE-264"), "Privilege Escalation", "Confidentiality, Integrity"),
     (("CWE-319",), "Cleartext Transmission of Sensitive Data", "Confidentiality"),
-    (("CWE-327", "CWE-326", "CWE-295", "CWE-297", "CWE-298"),
+    (("CWE-327", "CWE-326", "CWE-295", "CWE-297", "CWE-298", "CWE-330"),
      "Cryptographic / TLS Weakness", "Confidentiality, Integrity"),
-    (("CWE-522", "CWE-312", "CWE-256", "CWE-200", "CWE-538", "CWE-527", "CWE-532"),
-     "Information / Credential Disclosure", "Confidentiality"),
+    (("CWE-522", "CWE-312", "CWE-256", "CWE-200", "CWE-538", "CWE-527", "CWE-532",
+      "CWE-203"), "Information / Credential Disclosure", "Confidentiality"),
     (("CWE-693", "CWE-1021", "CWE-16", "CWE-650", "CWE-441", "CWE-284"),
      "Security Misconfiguration", "Integrity"),
+    (("CWE-364",), "Race Condition", "Integrity, Availability"),
     (("CWE-406", "CWE-400"), "Resource Exhaustion / Denial of Service", "Availability"),
-    (("CWE-1104", "CWE-1392"), "Unmaintained / Default Components", "Confidentiality, Integrity, Availability"),
-    (("CWE-506",), "Embedded Malicious Code / Backdoor", "Confidentiality, Integrity, Availability"),
+    (("CWE-1104", "CWE-1392"), "Unmaintained / Default Components", _CIA),
+    (("CWE-506",), "Embedded Malicious Code / Backdoor", _CIA),
+    (("CWE-20",), "Improper Input Validation", "Integrity"),  # generic - keep last
 ]
+
+# CWE id -> short official name, so a finding references each CWE by name.
+_CWE_NAME = {
+    "CWE-16": "Configuration", "CWE-20": "Improper Input Validation",
+    "CWE-22": "Path Traversal", "CWE-74": "Injection", "CWE-77": "Command Injection",
+    "CWE-78": "OS Command Injection", "CWE-79": "Cross-site Scripting",
+    "CWE-88": "Argument Injection", "CWE-89": "SQL Injection", "CWE-94": "Code Injection",
+    "CWE-95": "Eval Injection", "CWE-98": "PHP Remote File Inclusion",
+    "CWE-119": "Improper Restriction of Memory Bounds", "CWE-120": "Buffer Overflow",
+    "CWE-125": "Out-of-bounds Read", "CWE-134": "Uncontrolled Format String",
+    "CWE-190": "Integer Overflow", "CWE-193": "Off-by-one Error",
+    "CWE-200": "Exposure of Sensitive Information", "CWE-203": "Observable Discrepancy",
+    "CWE-250": "Execution with Unnecessary Privileges",
+    "CWE-256": "Plaintext Storage of a Password",
+    "CWE-264": "Permissions, Privileges, and Access Controls",
+    "CWE-269": "Improper Privilege Management", "CWE-284": "Improper Access Control",
+    "CWE-287": "Improper Authentication",
+    "CWE-288": "Authentication Bypass Using an Alternate Path",
+    "CWE-290": "Authentication Bypass by Spoofing",
+    "CWE-295": "Improper Certificate Validation",
+    "CWE-297": "Improper Validation of Certificate with Host Mismatch",
+    "CWE-298": "Improper Validation of Certificate Expiration",
+    "CWE-306": "Missing Authentication for Critical Function",
+    "CWE-307": "Improper Restriction of Excessive Authentication Attempts",
+    "CWE-312": "Cleartext Storage of Sensitive Information",
+    "CWE-319": "Cleartext Transmission of Sensitive Information",
+    "CWE-326": "Inadequate Encryption Strength",
+    "CWE-327": "Broken or Risky Cryptographic Algorithm",
+    "CWE-330": "Use of Insufficiently Random Values",
+    "CWE-352": "Cross-Site Request Forgery",
+    "CWE-364": "Signal Handler Race Condition",
+    "CWE-400": "Uncontrolled Resource Consumption",
+    "CWE-406": "Insufficient Control of Network Message Volume",
+    "CWE-415": "Double Free", "CWE-416": "Use After Free",
+    "CWE-434": "Unrestricted Upload of File with Dangerous Type",
+    "CWE-441": "Unintended Proxy or Intermediary (Confused Deputy)",
+    "CWE-444": "Inconsistent Interpretation of HTTP Requests (Request Smuggling)",
+    "CWE-502": "Deserialization of Untrusted Data", "CWE-506": "Embedded Malicious Code",
+    "CWE-521": "Weak Password Requirements",
+    "CWE-522": "Insufficiently Protected Credentials",
+    "CWE-527": "Exposure of Version-Control Repository",
+    "CWE-532": "Insertion of Sensitive Information into Log File",
+    "CWE-538": "Insertion of Sensitive Information into Externally-Accessible File",
+    "CWE-611": "Improper Restriction of XML External Entity Reference",
+    "CWE-640": "Weak Password Recovery Mechanism",
+    "CWE-650": "Trusting HTTP Permission Methods on the Server Side",
+    "CWE-693": "Protection Mechanism Failure", "CWE-787": "Out-of-bounds Write",
+    "CWE-798": "Use of Hard-coded Credentials", "CWE-863": "Incorrect Authorization",
+    "CWE-917": "Expression Language Injection",
+    "CWE-918": "Server-Side Request Forgery (SSRF)",
+    "CWE-1021": "Improper Restriction of Rendered UI Layers (Clickjacking)",
+    "CWE-1104": "Use of Unmaintained Third Party Components",
+    "CWE-1188": "Insecure Default Initialization of Resource",
+    "CWE-1392": "Use of Default Credentials",
+}
+
+
+def cwe_label(cwe: str) -> str:
+    """'CWE-22 (Path Traversal)' - the id plus its short name for reference."""
+    name = _CWE_NAME.get(cwe)
+    return f"{cwe} ({name})" if name else cwe
 
 _SOURCE_TOOL = {
     "nse": "nmap NSE scripts",
@@ -51,6 +126,260 @@ _SOURCE_TOOL = {
     "config": "nmap NSE weak-configuration checks",
     "cred": "netexec / impacket / ssh (credentialed)",
 }
+
+# Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.
+_SEV_COLOR = {"critical": "C00000", "high": "C15A11", "medium": "9C7A00",
+              "low": "2E5AAC", "info": "5F6F6E"}
+
+# --- auto-drafted narrative building blocks (plain, management-level language) ---
+
+# Port -> plain-language description of what the service is/does, for the opening
+# context sentence. Falls back to banner keywords, then a generic phrase.
+_SERVICE_ROLE = {
+    80: "web service", 443: "web service (HTTPS)", 8080: "web service",
+    8443: "web service (HTTPS)", 8000: "web service", 8888: "web service",
+    8081: "web service", 9443: "web service (HTTPS)",
+    21: "file-transfer (FTP) service", 22: "remote-administration (SSH) service",
+    23: "remote-terminal (Telnet) service", 25: "mail (SMTP) service",
+    110: "mail (POP3) service", 143: "mail (IMAP) service", 53: "DNS service",
+    389: "directory (LDAP) service", 636: "directory (LDAPS) service",
+    3268: "Active Directory directory service",
+    88: "Kerberos authentication service",
+    445: "Windows file-sharing (SMB) service",
+    139: "Windows file-sharing (SMB) service",
+    3389: "remote-desktop (RDP) service",
+    5985: "Windows remote-management (WinRM) service",
+    5986: "Windows remote-management (WinRM) service",
+    3306: "database service (MySQL)", 5432: "database service (PostgreSQL)",
+    1433: "database service (Microsoft SQL Server)", 1521: "database service (Oracle)",
+    27017: "database service (MongoDB)", 6379: "in-memory data store (Redis)",
+    161: "network-management (SNMP) service", 2049: "file-sharing (NFS) service",
+}
+
+# Vulnerability type (from _vuln_type) -> plain-language "an attacker could ..."
+_TYPE_IMPACT = {
+    "Injection / Remote Code Execution":
+        "run their own commands on the affected system - in practice this often "
+        "means full control of the host, its data, and any credentials stored on it",
+    "SQL Injection":
+        "read or alter the information held in the application's database, exposing "
+        "sensitive records or corrupting data",
+    "Cross-Site Scripting":
+        "run malicious content in the browser of a legitimate user, which can be "
+        "used to steal their session or trick them into unwanted actions",
+    "Cross-Site Request Forgery (CSRF)":
+        "trick a logged-in user's browser into performing unwanted actions on the "
+        "application without their knowledge or consent",
+    "Path Traversal / File Inclusion":
+        "read files outside the intended area of the application - and in some cases "
+        "run code - exposing configuration, credentials, or source",
+    "Authentication / Access Control Weakness":
+        "bypass or abuse the service's sign-in and access controls to reach data or "
+        "functions that should be restricted",
+    "Privilege Escalation":
+        "raise their level of access on the system, moving from a limited foothold "
+        "toward full administrative control",
+    "Cleartext Transmission of Sensitive Data":
+        "observe sensitive information - including credentials - as it crosses the "
+        "network, because it is not encrypted",
+    "Cryptographic / TLS Weakness":
+        "undermine the encryption protecting the service, potentially exposing or "
+        "tampering with data in transit",
+    "Information / Credential Disclosure":
+        "obtain sensitive information - such as internal details or credentials - "
+        "that makes further attack easier",
+    "Security Misconfiguration":
+        "take advantage of an insecure default or misconfiguration to gain access or "
+        "information they should not have",
+    "Resource Exhaustion / Denial of Service":
+        "disrupt or disable the service, denying it to legitimate users",
+    "Unmaintained / Default Components":
+        "exploit publicly known weaknesses in outdated or default components that no "
+        "longer receive security fixes",
+    "Embedded Malicious Code / Backdoor":
+        "use a built-in backdoor to gain direct, unauthenticated access to the system",
+    "Insecure Deserialization":
+        "abuse unsafe deserialization of untrusted data to run their own code on the "
+        "server, typically taking full control",
+    "Server-Side Request Forgery (SSRF)":
+        "make the server send requests on their behalf to internal systems it can "
+        "reach, exposing internal services or cloud metadata and credentials",
+    "XML External Entity (XXE) Injection":
+        "abuse XML parsing to read local files or reach internal systems, exposing "
+        "sensitive data",
+    "Unrestricted File Upload":
+        "upload an executable file and run it on the server, typically gaining full "
+        "control of the host",
+    "HTTP Request Smuggling / Desync":
+        "desynchronise how front-end and back-end servers interpret requests - "
+        "poisoning other users' traffic or slipping past security controls",
+    "Memory Corruption / Buffer Error":
+        "corrupt the service's memory to crash it or, in the worst case, run their "
+        "own code on the host",
+    "Race Condition":
+        "exploit a timing window to reach an unintended state, potentially "
+        "escalating access or disrupting the service",
+    "Improper Input Validation":
+        "supply crafted input the service fails to validate, leading to unexpected "
+        "and potentially exploitable behaviour",
+}
+_FALLBACK_IMPACT = ("weaken the security of the affected service, potentially "
+                    "exposing data or functionality to unauthorized access")
+
+# Hand-tuned, specific impact wording for marquee named vulnerabilities. Matched
+# by CVE first, then by a name keyword in the title/script (so NSE-only hits like
+# ms17-010, which carry no CVE, are still recognised). Each phrase follows
+# "an attacker could ...".
+_ETERNALBLUE = ("run code remotely and without any credentials over SMBv1 to take "
+                "full control of the host - the EternalBlue flaw behind the WannaCry "
+                "and NotPetya outbreaks")
+_ZEROLOGON = ("reset a domain controller's machine-account password with no "
+              "credentials at all and then seize control of the entire Active "
+              "Directory domain (ZeroLogon)")
+_PRINTNIGHTMARE = ("run code as SYSTEM through the Windows Print Spooler and, on a "
+                   "domain controller, take over the whole domain (PrintNightmare)")
+_SMBGHOST = ("run code remotely and without credentials against the SMBv3 "
+             "compression flaw to take full control of the host (SMBGhost)")
+_BLUEKEEP = ("run code remotely and without a login over Remote Desktop to take "
+             "full control of the host - a wormable flaw (BlueKeep)")
+_LOG4SHELL = ("make the application load and run attacker-supplied code simply by "
+              "getting it to log a crafted string, usually leading to full remote "
+              "control of the host (Log4Shell)")
+_HEARTBLEED = ("read chunks of the server's live memory over TLS, exposing "
+               "credentials, session tokens, and even the server's private key "
+               "(Heartbleed)")
+_SHELLSHOCK = ("run arbitrary commands by smuggling them through a crafted "
+               "environment variable, taking control of the host (Shellshock)")
+_PROXYLOGON = ("authenticate as the Exchange server itself and, chained with "
+               "related flaws, run code as SYSTEM and read every mailbox (ProxyLogon)")
+_PROXYSHELL = ("chain Exchange flaws to run code as SYSTEM and reach all mailboxes "
+               "without authentication (ProxyShell)")
+_SPRING4SHELL = ("achieve remote code execution against the Spring framework and "
+                 "take control of the application server (Spring4Shell)")
+
+_MARQUEE_CVE = {
+    "CVE-2020-1472": _ZEROLOGON,
+    "CVE-2021-34527": _PRINTNIGHTMARE, "CVE-2021-1675": _PRINTNIGHTMARE,
+    "CVE-2017-0143": _ETERNALBLUE, "CVE-2017-0144": _ETERNALBLUE,
+    "CVE-2017-0145": _ETERNALBLUE, "CVE-2017-0146": _ETERNALBLUE,
+    "CVE-2017-0147": _ETERNALBLUE, "CVE-2017-0148": _ETERNALBLUE,
+    "CVE-2020-0796": _SMBGHOST, "CVE-2019-0708": _BLUEKEEP,
+    "CVE-2021-44228": _LOG4SHELL, "CVE-2021-45046": _LOG4SHELL,
+    "CVE-2014-0160": _HEARTBLEED,
+    "CVE-2014-6271": _SHELLSHOCK, "CVE-2014-7169": _SHELLSHOCK,
+    "CVE-2021-26855": _PROXYLOGON, "CVE-2021-34473": _PROXYSHELL,
+    "CVE-2022-22965": _SPRING4SHELL,
+}
+_MARQUEE_KW = {
+    "ms17-010": _ETERNALBLUE, "eternalblue": _ETERNALBLUE, "zerologon": _ZEROLOGON,
+    "printnightmare": _PRINTNIGHTMARE, "smbghost": _SMBGHOST, "bluekeep": _BLUEKEEP,
+    "log4shell": _LOG4SHELL, "log4j": _LOG4SHELL, "heartbleed": _HEARTBLEED,
+    "shellshock": _SHELLSHOCK, "proxylogon": _PROXYLOGON, "proxyshell": _PROXYSHELL,
+    "spring4shell": _SPRING4SHELL,
+}
+
+
+def _marquee_impact(f: Finding) -> str | None:
+    """Specific impact wording for a well-known named vuln, or None."""
+    for cve in f.cves:
+        if cve in _MARQUEE_CVE:
+            return _MARQUEE_CVE[cve]
+    hay = (f.title + " " + " ".join(f.scripts)).lower()
+    for kw, impact in _MARQUEE_KW.items():
+        if kw in hay:
+            return impact
+    return None
+
+
+def _proven_exploit(f: Finding) -> str | None:
+    """A verifiable, proven public exploit for this finding, or None (shared with
+    the Vulnerabilities sheet via exploitref)."""
+    return proven_exploit_ref(f.cves, f.title + " " + " ".join(f.scripts))
+_SEV_FRAME = {
+    "critical": "This is considered a critical-risk exposure",
+    "high": "This is considered a high-risk exposure",
+    "medium": "This is considered a moderate-risk issue",
+    "low": "This is considered a lower-risk issue",
+    "info": "This is an informational observation",
+}
+
+
+def _join(items: list[str]) -> str:
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _service_role(port: int, banner: str) -> str:
+    role = _SERVICE_ROLE.get(port)
+    if role:
+        return role
+    b = (banner or "").lower()
+    if "http" in b:
+        return "web service"
+    if "ssh" in b:
+        return "remote-administration (SSH) service"
+    if "ftp" in b:
+        return "file-transfer (FTP) service"
+    if "smb" in b or "microsoft-ds" in b or "netbios" in b:
+        return "Windows file-sharing (SMB) service"
+    if any(k in b for k in ("sql", "postgres", "mysql", "oracle", "mongo")):
+        return "database service"
+    if "ldap" in b:
+        return "directory (LDAP) service"
+    return "network service"
+
+
+def _narrative(f: Finding) -> list[str]:
+    """Auto-draft a 3-paragraph, management-level narrative: what the service is,
+    what was found (and where / how sure), and the plain-language impact."""
+    if not f.affected:
+        return [f"During testing, {f.title.lower()} was identified. {_SEV_FRAME.get(f.severity.lower(), 'This is an issue')}."]
+    ip0, port0, _hn0 = f.affected[0]
+    banner0 = f.services.get((ip0, port0), "")
+    roles = []
+    for ip, port, _hn in f.affected:
+        r = _service_role(port, f.services.get((ip, port), ""))
+        if r not in roles:
+            roles.append(r)
+
+    # 1) Context - what the affected component is.
+    if len(roles) == 1:
+        ctx = f"This finding concerns a {roles[0]}"
+        if banner0:
+            ctx += f" ({banner0})"
+        ctx += ", exposed on the network to the tested environment."
+    else:
+        ctx = (f"This finding concerns {_join(roles)} exposed on the network to the "
+               "tested environment.")
+
+    # 2) What was found, where, and how confident we are.
+    n = len(f.affected)
+    where = _join([f"{ip}" + (f" ({hn})" if hn else "")
+                   for ip, _p, hn in f.affected[:3]])
+    more = f", and {n - 3} other system(s)" if n > 3 else ""
+    cve = f" (tracked as {', '.join(f.cves[:3])})" if f.cves else ""
+    found = (f"During testing, recce identified {f.title.lower()}{cve}, affecting "
+             f"{n} system(s) - {where}{more}.")
+    if f.confidence == "potential":
+        found += (" This was inferred from the service's version and banner data, so "
+                  "it should be confirmed through hands-on validation before it is "
+                  "relied upon.")
+    elif f.confidence == "likely":
+        found += " The detected version falls within a range known to be affected."
+
+    # 3) Plain-language impact, framed by severity. A marquee named vuln gets its
+    # own hand-tuned wording; otherwise fall back to the vulnerability-type impact.
+    vtype, _cia = _vuln_type(f.cwes)
+    impact = _marquee_impact(f) or _TYPE_IMPACT.get(vtype, _FALLBACK_IMPACT)
+    frame = _SEV_FRAME.get(f.severity.lower(), "This is an issue")
+    consequence = (f"{frame}: if exploited, an attacker could {impact}.")
+    return [ctx, found, consequence]
 
 
 @dataclass
@@ -67,6 +396,76 @@ class Finding:
     evidence: list[tuple] = field(default_factory=list)    # (ip, port, output)
     services: dict = field(default_factory=dict)           # (ip,port) -> "product version"
     exploits: list[tuple] = field(default_factory=list)    # (edb_id, title)
+
+
+# Common nmap NSE vuln/enum scripts -> CWE(s). Matched as a substring of the
+# script id (or title), so variants and the "http-vuln-cveYYYY-N" family resolve.
+# Every CWE here is already named + typed (enforced by the coverage test).
+_NSE_CWE = {
+    # SMB / Windows
+    "ms17-010": ["CWE-787"], "ms08-067": ["CWE-119"], "ms06-025": ["CWE-119"],
+    "ms07-029": ["CWE-119"], "ms10-054": ["CWE-119"], "ms10-061": ["CWE-119"],
+    "cve2009-3103": ["CWE-119"], "cve-2017-7494": ["CWE-94"], "cve2017-7494": ["CWE-94"],
+    "regsvc-dos": ["CWE-400"], "webexec": ["CWE-78"], "double-pulsar": ["CWE-506"],
+    "rdp-vuln-ms12-020": ["CWE-119"],
+    # HTTP (CVE-named + generic)
+    "shellshock": ["CWE-78"], "cve2012-1823": ["CWE-78"], "cve2017-5638": ["CWE-94"],
+    "cve2014-3704": ["CWE-89"], "cve2010-2861": ["CWE-22"], "cve2015-1635": ["CWE-119"],
+    "cve2011-3192": ["CWE-400"], "cve2017-1001000": ["CWE-306"],
+    "cve2021-41773": ["CWE-22"], "cve2021-42013": ["CWE-22"], "misfortune-cookie": ["CWE-119"],
+    "sql-injection": ["CWE-89"], "phpself-xss": ["CWE-79"], "stored-xss": ["CWE-79"],
+    "dombased-xss": ["CWE-79"], "-xss": ["CWE-79"], "csrf": ["CWE-352"],
+    "slowloris": ["CWE-400"], "http-passwd": ["CWE-22"],
+    "fileupload-exploiter": ["CWE-434"], "internal-ip-disclosure": ["CWE-200"],
+    "http-git": ["CWE-527"], "config-backup": ["CWE-538"], "http-webdav-scan": ["CWE-16"],
+    # TLS / crypto
+    "ssl-heartbleed": ["CWE-125"], "ssl-poodle": ["CWE-327"],
+    "ssl-ccs-injection": ["CWE-326"], "ssl-dh-params": ["CWE-326"],
+    "sslv2": ["CWE-327"], "ssl-known-key": ["CWE-798"],
+    # Services
+    "vsftpd-backdoor": ["CWE-506"], "proftpd-backdoor": ["CWE-506"],
+    "distcc-cve2004-2687": ["CWE-78"], "smtp-vuln-cve2010-4344": ["CWE-119"],
+    "smtp-vuln-cve2011-1720": ["CWE-119"], "ms-sql-empty-password": ["CWE-521"],
+    "mysql-empty-password": ["CWE-521"], "rmi-vuln-classloader": ["CWE-502"],
+    "rmi-dumpregistry": ["CWE-502"], "snmp-info": ["CWE-200"],
+}
+
+# Famous scripts whose id carries no CVE token - map to the CVE(s) directly.
+_NSE_CVE = {
+    "ms17-010": ["CVE-2017-0144"], "ms08-067": ["CVE-2008-4250"],
+    "ms12-020": ["CVE-2012-0002"], "vsftpd-backdoor": ["CVE-2011-2523"],
+    "shellshock": ["CVE-2014-6271"], "ssl-heartbleed": ["CVE-2014-0160"],
+    "ssl-poodle": ["CVE-2014-3566"], "ssl-ccs-injection": ["CVE-2014-0224"],
+}
+
+_CVE_IN_ID = re.compile(r"cve[-_]?(\d{4})[-_](\d{3,7})", re.I)
+
+
+def _enrich_from_nse(f: "Finding") -> None:
+    """Fill CVE/CWE for NSE-only findings (which carry neither) by mapping the
+    script id/title: extract any embedded CVE, add well-known script->CVE, and
+    map common script ids to CWEs. Never overrides data the finding already has."""
+    text = " ".join([f.title] + sorted(f.scripts)).lower()
+    if not f.cves:
+        cves: list[str] = []
+        for m in _CVE_IN_ID.finditer(text):
+            cve = f"CVE-{m.group(1)}-{m.group(2)}"
+            if cve not in cves:
+                cves.append(cve)
+        for key, mapped in _NSE_CVE.items():
+            if key in text:
+                for c in mapped:
+                    if c not in cves:
+                        cves.append(c)
+        f.cves = cves
+    if not f.cwes:
+        cwes: list[str] = []
+        for key, mapped in _NSE_CWE.items():
+            if key in text:
+                for c in mapped:
+                    if c not in cwes:
+                        cwes.append(c)
+        f.cwes = cwes
 
 
 def _norm_key(v: Vuln) -> str:
@@ -110,6 +509,8 @@ def group_findings(hosts: list[Host]) -> list[Finding]:
             for e in h.exploits:
                 if e.port == v.port and (e.edb_id, e.title) not in f.exploits:
                     f.exploits.append((e.edb_id, e.title))
+    for f in groups.values():
+        _enrich_from_nse(f)          # NSE-only findings get CVE/CWE from the script id
     ordered = sorted(groups.values(),
                      key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.title.lower()))
     return ordered
@@ -184,16 +585,23 @@ def _walkthrough_steps(f: Finding) -> list[str]:
                      f"netexec smb {ip} -u <user> -p <password> --shares "
                      f"(the tool output above confirms the access).")
 
-    # 3. Candidate public exploit(s), if searchsploit mapped any on this port.
-    if f.exploits:
-        ids = ", ".join(f"EDB-{eid}" for eid, _t in f.exploits[:5] if eid)
-        steps.append(f"Review candidate public exploit(s) indexed for this "
-                     f"service: {ids}. Inspect with `searchsploit -x <id>` and, if "
-                     f"in scope, weaponize with `searchsploit -m <id>`.")
-    elif f.cves:
-        steps.append(f"Research a working exploit for {', '.join(f.cves[:3])} and "
-                     f"validate it in a controlled manner within the rules of "
-                     f"engagement.")
+    # 3. Exploit step - ONLY when there is a verifiable, PROVEN exploit: a
+    # searchsploit / Exploit-DB match on the detected service, or a curated
+    # well-known public exploit. Never for an advisory/potential lead (unconfirmed
+    # version), and never a speculative "go research one" - if nothing proven is
+    # known, the tester's [TESTER: perform the exploitation] placeholder stands.
+    if f.confidence != "potential":
+        if f.exploits:
+            ids = ", ".join(f"EDB-{eid}" for eid, _t in f.exploits[:5] if eid)
+            steps.append(f"Run the indexed public exploit(s) for this service: "
+                         f"{ids}. Inspect with `searchsploit -x <id>`, then, if in "
+                         f"scope, `searchsploit -m <id>` and validate.")
+        else:
+            proven = _proven_exploit(f)
+            if proven:
+                steps.append(f"Proven public exploit available: {proven}. Validate "
+                             f"it in a controlled manner within the rules of "
+                             f"engagement.")
 
     return steps
 
@@ -202,26 +610,27 @@ def _finding_body(doc: Document, f: Finding, fid: str,
                   shots: dict | None = None) -> None:
     """Render one finding's sections into `doc` (shared by per-finding + combined)."""
     vtype, cia = _vuln_type(f.cwes)
+    sev = f.severity.lower()
+
+    # Severity chip under the title, colour-coded like the workbook/preview.
+    doc.para(f"● {f.severity.upper()} SEVERITY   ·   {len(f.affected)} "
+             f"affected system(s)", bold=True, color=_SEV_COLOR.get(sev, "5F6F6E"))
 
     doc.heading("Narrative", 2)
-    doc.guidance("Write this for non-technical management as a concise overview "
-                 "with minimal technical detail. Lead with a brief description of "
-                 "the purpose of the affected service for context. No pronouns or "
-                 "mission impact; maintain verb tense in context of test actions.")
     doc.placeholder("Refine the plain-language summary below for management.")
-    doc.para(f"During testing, {f.title.lower()} was identified on "
-             f"{len(f.affected)} system(s). This condition could allow an "
-             f"attacker to weaken the security of the affected service.")
+    for paragraph in _narrative(f):
+        doc.para(paragraph)
 
     doc.heading("Finding Details", 2)
-    doc.field("Finding ID", fid)
-    doc.field("Severity", f.severity.upper())
+    doc.field("Finding ID", fid, mono=True)
+    doc.field("Severity", f.severity.upper(), value_color=_SEV_COLOR.get(sev))
     doc.field("Affected systems", ", ".join(
         f"{ip}:{port}" + (f" ({hn})" if hn else "")
-        for ip, port, hn in f.affected))
+        for ip, port, hn in f.affected), mono=True)
     doc.field("Vulnerability Type", vtype, placeholder="classify the vulnerability")
-    doc.field("CWE Associated", ", ".join(f.cwes), placeholder="add CWE reference(s)")
-    doc.field("CVE / References", ", ".join(f.cves) or "None mapped")
+    doc.field("CWE Associated", "; ".join(cwe_label(c) for c in f.cwes),
+              placeholder="add CWE reference(s)")
+    doc.field("CVE / References", ", ".join(f.cves) or "None mapped", mono=True)
     doc.field("Security Aspect Compromised", cia,
               placeholder="confirm Confidentiality / Integrity / Availability")
     doc.field("Tools/Techniques Used", _tools_line(f))
@@ -233,21 +642,17 @@ def _finding_body(doc: Document, f: Finding, fid: str,
                     "exploited (engagement/mission specific).")
 
     doc.heading("Recommendations", 2)
-    doc.guidance("Recommended fixes and mitigations. Do not include specific "
-                 "brands or models.")
     if f.remediation:
         doc.para(f.remediation)
     else:
         doc.placeholder("Provide remediation and mitigation guidance.")
 
     doc.heading("Evidence", 2)
-    doc.guidance("Raw tool output captured during testing (proof of the finding).")
     for ip, port, out in f.evidence[:6]:
         doc.para(f"{ip}:{port}", italic=True)
         doc.mono_block(out if len(out) < 1500 else out[:1500] + " ...")
 
     doc.heading("Technical Walkthrough with screenshots", 2)
-    doc.guidance("List every step used to accomplish objectives, with screenshots.")
     # recce drafts the mechanical steps; the tester adds the exploitation result.
     n = 0
     for step in _walkthrough_steps(f):
@@ -271,13 +676,15 @@ def _write_one(f: Finding, fid: str, path: str,
     doc.save(path)
 
 
-def build_writeups(hosts: list[Host], out_dir: str, *, min_severity: str = "info",
+def build_writeups(hosts: list[Host], out_dir: str, *, min_severity: str = "low",
                    screenshots: dict | None = None,
                    overwrite: bool = False) -> dict:
     """Generate one .docx per finding into out_dir. Returns a summary dict.
 
-    Never overwrites an existing write-up unless overwrite=True, so tester edits
-    (narrative, steps, pasted screenshots) survive a regenerate.
+    Reports cover findings only: informational observations (info severity - e.g.
+    a disclosed server banner or TLS-cert detail) are excluded by default. Pass
+    min_severity='info' to include them. Never overwrites an existing write-up
+    unless overwrite=True, so tester edits survive a regenerate.
     """
     os.makedirs(out_dir, exist_ok=True)
     cutoff = _SEV_ORDER.get(min_severity, 4)
@@ -297,10 +704,12 @@ def build_writeups(hosts: list[Host], out_dir: str, *, min_severity: str = "info
 
 
 def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
-                   min_severity: str = "info",
+                   min_severity: str = "low",
                    screenshots: dict | None = None) -> dict:
     """One document: title, severity summary, findings-summary table, then every
-    finding as a section. Regenerated each run (it's a rollup, not hand-edited)."""
+    finding as a section. Regenerated each run (it's a rollup, not hand-edited).
+    Findings only - informational (info) items are excluded unless min_severity
+    is lowered to 'info'."""
     cutoff = _SEV_ORDER.get(min_severity, 4)
     findings = [f for f in group_findings(hosts)
                 if _SEV_ORDER.get(f.severity, 9) <= cutoff]
