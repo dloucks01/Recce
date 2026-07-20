@@ -44,7 +44,14 @@ adds the layer engagements actually need:
 **No pip install required.** The tool uses only the Python standard library
 (3.9+), so it runs on an **airgapped** box out of the box — including writing and
 reading `.xlsx` (a self-contained stdlib writer, no openpyxl). Just copy the
-folder over.
+folder over and run **`python3 -m recce ...`** or **`./bin/recce ...`**.
+
+> `pip install .` is **optional** — it only creates a bare `recce` command on
+> PATH. recce has zero Python dependencies, so it never fetches anything, but
+> pip's default build step pulls `setuptools`/`wheel` from PyPI, so on an
+> airgapped box either use `--no-build-isolation` or (simpler) **just skip pip
+> and use `./bin/recce`**. `pyproject.toml` is there for staging boxes / an
+> internal mirror and for `recce --version`.
 
 It orchestrates these **system tools** if present (all standard on Kali):
 

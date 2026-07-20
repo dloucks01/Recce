@@ -15,7 +15,7 @@ pipeline with a real localhost self-scan. Almost every problem below is one
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `recce: command not found` | not pip-installed | Use `python3 -m recce ...` or `./bin/recce ...`; or `pip install .` from the project dir to get the `recce` command. |
+| `recce: command not found` | you expected a `recce` binary | You don't need one — run **`python3 -m recce ...`** or **`./bin/recce ...`**. (The bare `recce` command only exists if you `pip install`ed on a networked/staging box; it's never required and isn't needed airgapped.) |
 | `ModuleNotFoundError: No module named 'recce'` | run from the wrong dir / PATH lost under sudo | Use `./bin/recce` (sets PYTHONPATH), or run from the project root. |
 | `SyntaxError` / f-string errors on start | Python < 3.9 | recce needs **Python 3.9+**. Check `python3 --version`. |
 | Nothing to `pip install`? | intentional | recce is **stdlib-only** at runtime. There are no Python deps — only the *system* tools below. `requirements.txt` documents them. |
