@@ -111,47 +111,48 @@ def _weak_config(host_ip: str, port: Port | None, script: Script) -> Vuln | None
     out = script.output or ""
     low = out.lower()
     sev = title = None
+    cwe: list[str] = []
 
     if sid == "ftp-anon" and "anonymous ftp login allowed" in low:
-        sev, title = "medium", "Anonymous FTP login allowed"
+        sev, title, cwe = "medium", "Anonymous FTP login allowed", ["CWE-1392", "CWE-306"]
     elif sid == "ssl-enum-ciphers":
         if re.search(r"least strength:\s*[c-f]\b", low) or any(
                 w in out for w in ("SSLv2", "SSLv3", "RC4", "NULL", "EXPORT",
                                    "SWEET32", "anonymous")):
-            sev, title = "medium", "Weak SSL/TLS ciphers or protocols"
+            sev, title, cwe = "medium", "Weak SSL/TLS ciphers or protocols", ["CWE-327", "CWE-326"]
     elif sid == "ssl-cert":
         if "expired" in low:
-            sev, title = "low", "Expired TLS certificate"
+            sev, title, cwe = "low", "Expired TLS certificate", ["CWE-298", "CWE-295"]
         elif "self-signed" in low or "self signed" in low:
-            sev, title = "low", "Self-signed TLS certificate"
+            sev, title, cwe = "low", "Self-signed TLS certificate", ["CWE-295"]
     elif sid == "http-methods" and ("put" in low or "delete" in low or "trace" in low):
         if "potentially risky methods" in low:
-            sev, title = "low", "Risky HTTP methods enabled (PUT/DELETE/TRACE)"
+            sev, title, cwe = "low", "Risky HTTP methods enabled (PUT/DELETE/TRACE)", ["CWE-650"]
     elif sid == "http-webdav-scan" and "webdav" in low:
-        sev, title = "low", "WebDAV enabled"
+        sev, title, cwe = "low", "WebDAV enabled", ["CWE-650"]
     elif sid == "http-git" and ".git" in low:
-        sev, title = "medium", "Exposed .git repository"
+        sev, title, cwe = "medium", "Exposed .git repository", ["CWE-527", "CWE-538"]
     elif sid in ("mysql-empty-password", "ms-sql-empty-password") and \
             ("account has empty password" in low or "empty password" in low):
-        sev, title = "high", "Database account with empty password"
+        sev, title, cwe = "high", "Database account with empty password", ["CWE-521", "CWE-287"]
     elif sid == "redis-info" and "version" in low:
-        sev, title = "medium", "Unauthenticated Redis exposed"
+        sev, title, cwe = "medium", "Unauthenticated Redis exposed", ["CWE-306"]
     elif sid == "mongodb-info" and "version" in low:
-        sev, title = "medium", "Unauthenticated MongoDB exposed"
+        sev, title, cwe = "medium", "Unauthenticated MongoDB exposed", ["CWE-306"]
     elif sid == "telnet-encryption" and "does not support encryption" in low:
-        sev, title = "medium", "Telnet without encryption (cleartext)"
+        sev, title, cwe = "medium", "Telnet without encryption (cleartext)", ["CWE-319"]
     elif sid == "smtp-open-relay" and "is an open relay" in low:
-        sev, title = "high", "SMTP open relay"
+        sev, title, cwe = "high", "SMTP open relay", ["CWE-269"]
     elif sid == "nfs-showmount" and "/" in out:
-        sev, title = "low", "NFS exports readable"
+        sev, title, cwe = "low", "NFS exports readable", ["CWE-284"]
     elif sid.startswith("snmp") and ("public" in low or "private" in low):
-        sev, title = "medium", "SNMP community string exposed"
+        sev, title, cwe = "medium", "SNMP community string exposed", ["CWE-1392", "CWE-319"]
     elif sid == "dns-zone-transfer" and "domain" in low and "failed" not in low:
-        sev, title = "medium", "DNS zone transfer allowed"
+        sev, title, cwe = "medium", "DNS zone transfer allowed", ["CWE-200"]
     elif sid == "vnc-info" and "no authentication" in low:
-        sev, title = "high", "VNC without authentication"
+        sev, title, cwe = "high", "VNC without authentication", ["CWE-306"]
     elif sid == "http-open-proxy" and "potentially open proxy" in low:
-        sev, title = "medium", "Open HTTP proxy"
+        sev, title, cwe = "medium", "Open HTTP proxy", ["CWE-441"]
 
     if not sev:
         return None
@@ -164,6 +165,8 @@ def _weak_config(host_ip: str, port: Port | None, script: Script) -> Vuln | None
         title=title,
         output=out,
         severity=sev,
+        cwes=cwe,
+        source="config",
     )
 
 

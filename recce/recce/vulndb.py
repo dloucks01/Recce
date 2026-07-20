@@ -65,115 +65,365 @@ def _in_range(version: str, lo: str | None, hi: str | None,
 #
 # Keep entries high-signal (things that actually matter on internal tests) and
 # version-detectable from nmap -sV. Config-only findings live in parser.py.
+#
+# Fields:
+#   product     list of lowercase substrings matched against "product service"
+#   eq/lt/le/ge/gt   optional version bounds (omit all -> product-only advisory)
+#   os / os_lt  optional OS gate (os_lt without version = OS-only match)
+#   severity    critical/high/medium/low/info
+#   title       one-line finding name (also the dedupe key)
+#   cves        CVE references (may be empty)
+#   cwe         CWE weakness references (e.g. ["CWE-78"])
+#   remediation offline fix guidance
+#   desc        what/why for the operator
+#   advisory    True -> product-only informational lead (confidence "potential")
 
 SIGNATURES: list[dict] = [
     # --- FTP -------------------------------------------------------------------
     {"product": ["vsftpd"], "eq": "2.3.4", "severity": "critical",
      "title": "vsftpd 2.3.4 backdoor (smiley-face) - remote root",
-     "cves": ["CVE-2011-2523"],
+     "cves": ["CVE-2011-2523"], "cwe": ["CWE-78", "CWE-506"],
      "remediation": "Replace this build immediately; upgrade vsftpd.",
      "desc": "This exact build shipped with a backdoor that spawns a root shell "
              "on port 6200 when a ':)' username is sent."},
     {"product": ["proftpd"], "eq": "1.3.3c", "severity": "critical",
      "title": "ProFTPD 1.3.3c compromised source backdoor",
-     "cves": ["CVE-2010-4221"],
+     "cves": ["CVE-2010-4221"], "cwe": ["CWE-78", "CWE-506"],
      "remediation": "Upgrade ProFTPD to a current release.",
      "desc": "The 1.3.3c distribution tarball was trojaned; allows remote code exec."},
+    {"product": ["proftpd"], "ge": "1.3.5", "lt": "1.3.5b", "severity": "critical",
+     "title": "ProFTPD 1.3.5 mod_copy unauth file copy / RCE",
+     "cves": ["CVE-2015-3306"], "cwe": ["CWE-264"],
+     "remediation": "Upgrade ProFTPD to 1.3.5b/1.3.6+ or disable mod_copy.",
+     "desc": "SITE CPFR/CPTO lets an unauthenticated user copy files, often "
+             "leading to webshell upload and remote code execution."},
     # --- SSH -------------------------------------------------------------------
     {"product": ["openssh"], "lt": "7.7", "severity": "medium",
      "title": "OpenSSH < 7.7 username enumeration",
-     "cves": ["CVE-2018-15473"],
+     "cves": ["CVE-2018-15473"], "cwe": ["CWE-200", "CWE-203"],
      "remediation": "Upgrade OpenSSH to 7.7 or later.",
      "desc": "Timing/response differences let an unauthenticated attacker "
              "enumerate valid usernames - useful for password spraying."},
     {"product": ["openssh"], "lt": "9.3p2", "ge": "8.5", "severity": "high",
      "title": "OpenSSH 8.5-9.3 double-free (potential RCE)",
-     "cves": ["CVE-2023-38408", "CVE-2023-25136"],
+     "cves": ["CVE-2023-38408", "CVE-2023-25136"], "cwe": ["CWE-415"],
      "remediation": "Upgrade OpenSSH to 9.3p2+.",
      "desc": "Memory-safety issues in ssh-agent/forwarding paths that have been "
              "shown to be exploitable in some configurations."},
+    {"product": ["openssh"], "eq": "9.8p1", "severity": "critical",
+     "title": "OpenSSH 'regreSSHion' pre-auth RCE",
+     "cves": ["CVE-2024-6387"], "cwe": ["CWE-364"],
+     "remediation": "Upgrade OpenSSH to 9.8p1+ or set LoginGraceTime 0.",
+     "desc": "Signal-handler race in sshd allows unauthenticated remote code "
+             "execution as root on glibc Linux (32-bit demonstrated)."},
     # --- Apache HTTPD ----------------------------------------------------------
     {"product": ["apache httpd", "apache"], "ge": "2.4.49", "le": "2.4.50",
      "severity": "critical",
      "title": "Apache 2.4.49/2.4.50 path traversal & RCE",
-     "cves": ["CVE-2021-41773", "CVE-2021-42013"],
+     "cves": ["CVE-2021-41773", "CVE-2021-42013"], "cwe": ["CWE-22"],
      "remediation": "Upgrade to Apache httpd 2.4.51 or later.",
      "desc": "Unauthenticated path traversal that can read files outside the "
              "docroot and, with mod_cgi enabled, achieve remote code execution."},
     {"product": ["apache httpd", "apache"], "lt": "2.4.53", "ge": "2.4",
      "severity": "high",
      "title": "Apache httpd < 2.4.53 multiple vulns (mod_lua/proxy)",
-     "cves": ["CVE-2022-22720", "CVE-2022-23943"],
+     "cves": ["CVE-2022-22720", "CVE-2022-23943"], "cwe": ["CWE-444", "CWE-787"],
      "remediation": "Upgrade to the latest Apache httpd 2.4.x.",
      "desc": "HTTP request smuggling and out-of-bounds writes in several modules."},
+    {"product": ["apache httpd", "apache"], "ge": "2.4.17", "lt": "2.4.59",
+     "severity": "high",
+     "title": "Apache httpd < 2.4.59 mod_proxy SSRF / smuggling",
+     "cves": ["CVE-2023-25690", "CVE-2024-27316"], "cwe": ["CWE-444"],
+     "remediation": "Upgrade to Apache httpd 2.4.59 or later.",
+     "desc": "Request-smuggling and HTTP/2 memory-exhaustion issues in the "
+             "proxy/mod_http2 code paths."},
     # --- nginx -----------------------------------------------------------------
     {"product": ["nginx"], "lt": "1.21.0", "ge": "0.6.18", "severity": "high",
      "title": "nginx < 1.21.0 resolver off-by-one (CVE-2021-23017)",
-     "cves": ["CVE-2021-23017"],
-     "remediation": "Upgrade nginx to 1.21.0+ or disus the resolver directive.",
+     "cves": ["CVE-2021-23017"], "cwe": ["CWE-193", "CWE-787"],
+     "remediation": "Upgrade nginx to 1.21.0+ or drop the resolver directive.",
      "desc": "Off-by-one in the DNS resolver, potentially exploitable for RCE."},
-    # --- Microsoft IIS / Exchange / RDP ----------------------------------------
+    # --- Microsoft IIS / Exchange / RDP / SMB ----------------------------------
     {"product": ["microsoft iis", "iis httpd"], "lt": "7.5", "severity": "medium",
      "title": "Legacy Microsoft IIS (<= 7.0) - unsupported",
-     "cves": [],
+     "cves": [], "cwe": ["CWE-1104"],
      "remediation": "Migrate off end-of-life IIS/Windows Server.",
      "desc": "Runs on an unsupported Windows Server; multiple public exploits."},
     {"product": ["microsoft terminal services", "ms-wbt-server", "terminal services"],
      "os": "windows", "os_lt": "6.2", "severity": "critical",
      "title": "RDP on Windows <= 7/2008 R2 - BlueKeep exposure",
-     "cves": ["CVE-2019-0708"],
+     "cves": ["CVE-2019-0708"], "cwe": ["CWE-416"],
      "remediation": "Patch (MS mitigations for CVE-2019-0708) or disable RDP; "
                     "enable Network Level Authentication.",
      "desc": "Pre-auth wormable RDP RCE affecting Windows 7 / Server 2008 R2 and "
              "earlier. Confirm with a dedicated BlueKeep check before exploiting."},
-    # --- Samba -----------------------------------------------------------------
+    {"product": ["microsoft exchange", "outlook web", "owa"], "severity": "critical",
+     "title": "Microsoft Exchange exposed - ProxyLogon/ProxyShell risk",
+     "cves": ["CVE-2021-26855", "CVE-2021-34473", "CVE-2021-34523"],
+     "cwe": ["CWE-918", "CWE-22"], "advisory": True,
+     "remediation": "Apply current Exchange cumulative updates + security patches; "
+                    "restrict OWA/ECP exposure.",
+     "desc": "Internet/intranet-facing Exchange is a prime target (ProxyLogon "
+             "SSRF pre-auth, ProxyShell path confusion). Confirm build number and "
+             "patch level; unpatched = full mailbox/host compromise."},
+    # --- Samba / SMB -----------------------------------------------------------
     {"product": ["samba"], "ge": "3.5.0", "lt": "4.6.4", "severity": "critical",
      "title": "Samba 'SambaCry' remote code execution",
-     "cves": ["CVE-2017-7494"],
+     "cves": ["CVE-2017-7494"], "cwe": ["CWE-94"],
      "remediation": "Upgrade Samba to 4.6.4/4.5.10/4.4.14+ or set "
                     "'nt pipe support = no'.",
      "desc": "A malicious client can upload and cause the server to load a shared "
              "library, executing code as root."},
+    {"product": ["samba"], "lt": "3.5.0", "ge": "3.0", "severity": "high",
+     "title": "Legacy Samba 3.x - multiple RCE (incl. usermap_script)",
+     "cves": ["CVE-2007-2447"], "cwe": ["CWE-78"],
+     "remediation": "Upgrade Samba; this is end-of-life.",
+     "desc": "Old Samba 3.x has command-injection and heap RCE bugs "
+             "(usermap_script is a classic unauth root shell)."},
     # --- Databases -------------------------------------------------------------
     {"product": ["mysql"], "lt": "5.7.0", "ge": "5.0", "severity": "medium",
      "title": "End-of-life MySQL (< 5.7) exposed",
-     "cves": [],
+     "cves": [], "cwe": ["CWE-1104"],
      "remediation": "Upgrade to a supported MySQL/MariaDB and restrict network access.",
      "desc": "Unsupported MySQL with many public CVEs; should not be network-exposed."},
     {"product": ["mysql"], "ge": "5.5.0", "le": "5.5.63", "severity": "high",
      "title": "MySQL 5.5.x remote pre-auth issues",
-     "cves": ["CVE-2012-2122"],
+     "cves": ["CVE-2012-2122"], "cwe": ["CWE-287"],
      "remediation": "Upgrade MySQL; enforce strong auth.",
      "desc": "Some 5.5/5.6 builds allow an authentication bypass on repeated tries."},
     {"product": ["postgresql"], "lt": "11.0", "ge": "9.0", "severity": "medium",
      "title": "End-of-life PostgreSQL exposed",
-     "cves": [],
+     "cves": [], "cwe": ["CWE-1104"],
      "remediation": "Upgrade to a supported PostgreSQL major version.",
      "desc": "Unsupported PostgreSQL exposed on the network."},
+    {"product": ["mongodb"], "lt": "3.6.0", "severity": "high",
+     "title": "Legacy MongoDB (< 3.6) - default no-auth exposure",
+     "cves": [], "cwe": ["CWE-306"],
+     "remediation": "Upgrade MongoDB; enable authentication and bind to localhost.",
+     "desc": "Old MongoDB defaulted to no authentication and open binding - "
+             "frequently exposes entire databases."},
+    {"product": ["redis"], "lt": "6.0.0", "severity": "high",
+     "title": "Redis < 6.0 - no ACLs, common unauth RCE",
+     "cves": [], "cwe": ["CWE-306"],
+     "remediation": "Upgrade Redis 6+, require a password, bind to localhost.",
+     "desc": "Pre-6.0 Redis has no ACLs; unauthenticated access allows config "
+             "rewrite to drop SSH keys or cron jobs (RCE)."},
+    {"product": ["elasticsearch"], "lt": "6.0.0", "severity": "high",
+     "title": "Legacy Elasticsearch (< 6.0) - unauth data / Groovy RCE",
+     "cves": ["CVE-2015-1427", "CVE-2014-3120"], "cwe": ["CWE-95", "CWE-306"],
+     "remediation": "Upgrade Elasticsearch; enable security; never expose 9200.",
+     "desc": "Old Elasticsearch exposes all indices without auth and had "
+             "Groovy/MVEL sandbox-escape RCE in the search API."},
+    {"product": ["memcached"], "severity": "medium", "advisory": True,
+     "title": "Memcached exposed - amplification / data exposure",
+     "cves": ["CVE-2018-1000115"], "cwe": ["CWE-306"],
+     "remediation": "Bind memcached to localhost, disable UDP, firewall 11211.",
+     "desc": "Network-exposed memcached leaks cached data and is a massive UDP "
+             "reflection/amplification vector."},
     # --- Web apps / middleware -------------------------------------------------
     {"product": ["jenkins"], "lt": "2.319", "severity": "high",
      "title": "Outdated Jenkins - multiple RCE / auth bypass",
-     "cves": ["CVE-2019-1003000"],
+     "cves": ["CVE-2019-1003000", "CVE-2018-1000861"], "cwe": ["CWE-94"],
      "remediation": "Upgrade Jenkins to the latest LTS; restrict access.",
      "desc": "Old Jenkins is a frequent full-compromise vector (script console, "
              "unauth RCE chains)."},
+    {"product": ["jenkins"], "severity": "medium", "advisory": True,
+     "title": "Jenkins exposed - check for weak/default auth & CVE-2024-23897",
+     "cves": ["CVE-2024-23897"], "cwe": ["CWE-22", "CWE-1188"],
+     "remediation": "Require authentication, disable anonymous read, patch CLI.",
+     "desc": "Jenkins CI is high-value. Recent CLI arbitrary-file-read "
+             "(CVE-2024-23897) can leak secrets leading to RCE; also check for "
+             "anonymous access and default credentials."},
     {"product": ["apache tomcat", "tomcat"], "lt": "9.0.31", "ge": "6.0",
      "severity": "high",
      "title": "Apache Tomcat AJP 'Ghostcat' file read/inclusion",
-     "cves": ["CVE-2020-1938"],
+     "cves": ["CVE-2020-1938"], "cwe": ["CWE-22"],
      "remediation": "Upgrade Tomcat; disable/secure the AJP connector (8009).",
      "desc": "The AJP connector allows reading web-app files and, with upload, RCE."},
+    {"product": ["apache tomcat", "tomcat", "coyote"], "severity": "medium",
+     "advisory": True,
+     "title": "Tomcat exposed - check /manager for default credentials",
+     "cves": [], "cwe": ["CWE-1392", "CWE-798"],
+     "remediation": "Remove or firewall the Manager/Host-Manager apps; change "
+                    "default tomcat/admin credentials.",
+     "desc": "Tomcat Manager with default creds (tomcat/tomcat, admin/admin) gives "
+             "WAR-upload RCE - one of the most common internal footholds."},
     {"product": ["php"], "lt": "7.4.0", "ge": "5.0", "severity": "medium",
      "title": "End-of-life PHP (< 7.4) in use",
-     "cves": [],
+     "cves": [], "cwe": ["CWE-1104"],
      "remediation": "Upgrade to a supported PHP release.",
      "desc": "Unsupported PHP with many known vulns backing the web app."},
+    {"product": ["php-cgi", "php cgi"], "severity": "critical", "advisory": True,
+     "title": "PHP-CGI argument injection (CVE-2024-4577) exposure",
+     "cves": ["CVE-2024-4577", "CVE-2012-1823"], "cwe": ["CWE-88"],
+     "remediation": "Patch PHP; avoid running PHP as CGI; apply mod_rewrite guards.",
+     "desc": "PHP running as CGI (esp. on Windows/XAMPP) is exploitable for "
+             "unauthenticated RCE via query-string argument injection."},
+    {"product": ["drupal"], "lt": "7.58", "severity": "critical",
+     "title": "Drupal 'Drupalgeddon2' pre-auth RCE",
+     "cves": ["CVE-2018-7600"], "cwe": ["CWE-20"],
+     "remediation": "Upgrade Drupal to 7.58 / 8.5.1+.",
+     "desc": "Unauthenticated remote code execution via the Form API render "
+             "arrays - trivially exploitable."},
+    {"product": ["webmin"], "lt": "1.930", "severity": "critical",
+     "title": "Webmin < 1.930 backdoor / RCE",
+     "cves": ["CVE-2019-15107"], "cwe": ["CWE-78"],
+     "remediation": "Upgrade Webmin to 1.930+.",
+     "desc": "A malicious password_change.cgi path allows unauthenticated command "
+             "injection as root."},
+    {"product": ["confluence"], "severity": "critical", "advisory": True,
+     "title": "Atlassian Confluence exposed - OGNL/auth-bypass RCE risk",
+     "cves": ["CVE-2022-26134", "CVE-2023-22515"], "cwe": ["CWE-74", "CWE-288"],
+     "remediation": "Apply current Confluence security patches; restrict exposure.",
+     "desc": "Confluence has repeated pre-auth OGNL-injection and broken-access "
+             "RCE bugs. Confirm exact version; unpatched = full host compromise."},
+    {"product": ["phpmyadmin"], "severity": "medium", "advisory": True,
+     "title": "phpMyAdmin exposed - default/weak DB creds & LFI history",
+     "cves": ["CVE-2018-12613"], "cwe": ["CWE-98", "CWE-22"],
+     "remediation": "Restrict phpMyAdmin by IP, require strong auth, keep updated.",
+     "desc": "Exposed phpMyAdmin invites DB credential brute-force; older builds "
+             "had file-inclusion RCE. Try root/(blank) and common passwords."},
+    {"product": ["grafana"], "ge": "8.0.0", "lt": "8.3.1", "severity": "high",
+     "title": "Grafana 8.x path traversal (arbitrary file read)",
+     "cves": ["CVE-2021-43798"], "cwe": ["CWE-22"],
+     "remediation": "Upgrade Grafana to 8.3.1+.",
+     "desc": "Unauthenticated path traversal via plugin routes reads local files "
+             "(grafana.db, /etc/passwd) - harvest secrets for lateral movement."},
+    {"product": ["gitlab"], "severity": "high", "advisory": True,
+     "title": "GitLab exposed - ExifTool RCE / account-takeover risk",
+     "cves": ["CVE-2021-22205", "CVE-2023-7028"], "cwe": ["CWE-94", "CWE-640"],
+     "remediation": "Keep GitLab patched to the latest point release.",
+     "desc": "GitLab has had unauth ExifTool RCE and password-reset account "
+             "takeover. Confirm version; self-managed instances are prime targets."},
+    # --- VPN / edge appliances -------------------------------------------------
+    {"product": ["fortinet", "fortios", "fortigate", "fortigate ssl vpn"],
+     "severity": "critical", "advisory": True,
+     "title": "Fortinet FortiOS SSL-VPN exposed - path traversal / auth bypass",
+     "cves": ["CVE-2018-13379", "CVE-2022-40684"], "cwe": ["CWE-22", "CWE-287"],
+     "remediation": "Patch FortiOS; rotate all VPN credentials after exposure.",
+     "desc": "FortiOS SSL-VPN has pre-auth credential-file disclosure "
+             "(CVE-2018-13379) and admin auth-bypass (CVE-2022-40684). Highly "
+             "targeted; assume credential theft if unpatched."},
+    {"product": ["pulse secure", "pulse connect", "pulse-secure"],
+     "severity": "critical", "advisory": True,
+     "title": "Pulse Connect Secure exposed - pre-auth file read (CVE-2019-11510)",
+     "cves": ["CVE-2019-11510"], "cwe": ["CWE-22"],
+     "remediation": "Patch Pulse Secure; rotate credentials and session secrets.",
+     "desc": "Unauthenticated arbitrary file read leaks plaintext creds and "
+             "session data - a mass-exploited ransomware entry point."},
+    {"product": ["citrix", "netscaler"], "severity": "critical", "advisory": True,
+     "title": "Citrix ADC/Gateway exposed - Shitrix / CitrixBleed risk",
+     "cves": ["CVE-2019-19781", "CVE-2023-4966"], "cwe": ["CWE-22", "CWE-119"],
+     "remediation": "Patch Citrix ADC/Gateway; invalidate all active sessions.",
+     "desc": "Citrix ADC has pre-auth path-traversal RCE (Shitrix) and session "
+             "token leak (CitrixBleed). Confirm build; heavily exploited."},
+    {"product": ["palo alto", "globalprotect", "pan-os"], "severity": "critical",
+     "advisory": True,
+     "title": "Palo Alto GlobalProtect exposed - pre-auth RCE risk",
+     "cves": ["CVE-2019-1579", "CVE-2024-3400"], "cwe": ["CWE-77", "CWE-134"],
+     "remediation": "Patch PAN-OS to a fixed release; check for compromise.",
+     "desc": "GlobalProtect portal has had format-string and command-injection "
+             "pre-auth RCE. Confirm PAN-OS version; assume targeted."},
+    # --- Legacy / cleartext / misc services ------------------------------------
+    {"product": ["rsync"], "severity": "medium", "advisory": True,
+     "title": "rsync daemon exposed - check for anonymous module access",
+     "cves": [], "cwe": ["CWE-306"],
+     "remediation": "Require auth on rsync modules; firewall 873; use SSH transport.",
+     "desc": "Open rsync modules often allow anonymous read (and sometimes write) "
+             "of sensitive paths - list modules with 'rsync host::'."},
+    {"product": ["x11", "x window"], "severity": "high", "advisory": True,
+     "title": "X11 server exposed - possible unauthenticated access",
+     "cves": [], "cwe": ["CWE-284"],
+     "remediation": "Disable TCP listening (-nolisten tcp); use xauth/SSH forwarding.",
+     "desc": "An X11 server with access control disabled lets a remote attacker "
+             "capture keystrokes and screenshots (xspy/xwd)."},
+    {"product": ["rexec", "rlogin", "rshd", "rsh"], "severity": "high",
+     "advisory": True,
+     "title": "Berkeley r-services exposed (rsh/rlogin/rexec)",
+     "cves": [], "cwe": ["CWE-306", "CWE-319"],
+     "remediation": "Disable r-services; use SSH. Remove .rhosts/hosts.equiv trust.",
+     "desc": "r-services use trust-based, cleartext auth and are trivially "
+             "abused where host trust is configured."},
+    {"product": ["telnet"], "severity": "medium", "advisory": True,
+     "title": "Telnet service exposed (cleartext credentials)",
+     "cves": [], "cwe": ["CWE-319"],
+     "remediation": "Disable Telnet; use SSH.",
+     "desc": "Telnet transmits credentials and sessions in cleartext - trivial to "
+             "sniff on a shared segment."},
+    {"product": ["vnc"], "severity": "medium", "advisory": True,
+     "title": "VNC service exposed - check for weak/no authentication",
+     "cves": [], "cwe": ["CWE-287"],
+     "remediation": "Require strong VNC auth or tunnel over SSH; restrict access.",
+     "desc": "VNC often uses weak 8-char-truncated passwords or none at all; "
+             "confirm the auth type before assuming it's protected."},
+    {"product": ["snmp"], "severity": "medium", "advisory": True,
+     "title": "SNMP service exposed - check for default community strings",
+     "cves": [], "cwe": ["CWE-1392"],
+     "remediation": "Use SNMPv3 with auth+priv; remove public/private communities.",
+     "desc": "SNMP with 'public'/'private' leaks system, interface, ARP and "
+             "sometimes credential data - a rich enumeration source."},
+    {"product": ["isc bind", "bind"], "lt": "9.11.0", "severity": "medium",
+     "title": "Legacy ISC BIND (< 9.11) - multiple remote DoS/RCE",
+     "cves": [], "cwe": ["CWE-1104"],
+     "remediation": "Upgrade BIND to a supported branch.",
+     "desc": "Old BIND has a long list of remote crash and cache-poisoning CVEs."},
+    {"product": ["ntp", "ntpd"], "lt": "4.2.8", "severity": "medium",
+     "title": "Legacy NTP (< 4.2.8) - amplification & remote bugs",
+     "cves": ["CVE-2013-5211"], "cwe": ["CWE-406"],
+     "remediation": "Upgrade ntpd to 4.2.8+; disable monlist/mode 6-7.",
+     "desc": "Old ntpd supports monlist, a large DDoS-amplification and info-leak "
+             "vector, plus several remote crashes."},
+    {"product": ["dropbear"], "lt": "2016.72", "severity": "medium",
+     "title": "Legacy Dropbear SSH (< 2016.72)",
+     "cves": ["CVE-2016-7406", "CVE-2016-7407", "CVE-2016-7408"],
+     "cwe": ["CWE-94"],
+     "remediation": "Upgrade Dropbear (common on embedded/IoT devices).",
+     "desc": "Old Dropbear has format-string and command-injection issues; "
+             "usually indicates an unpatched embedded device."},
+    {"product": ["iprint", "cups"], "lt": "2.0.0", "severity": "medium",
+     "title": "Legacy CUPS printing service exposed",
+     "cves": [], "cwe": ["CWE-1104"],
+     "remediation": "Upgrade CUPS; restrict 631 to management networks.",
+     "desc": "Old CUPS builds have remote bugs; recent cups-browsed issues "
+             "(CVE-2024-47176 chain) make exposed printing services worth checking."},
+    {"product": ["jetdirect", "hp jetdirect", "printer", "pjl"],
+     "severity": "low", "advisory": True,
+     "title": "Network printer exposed - PJL/PostScript filesystem access",
+     "cves": [], "cwe": ["CWE-284"],
+     "remediation": "Restrict printer mgmt ports (9100/631/23); set an admin PIN.",
+     "desc": "Printers on 9100 often allow PJL/PostScript filesystem and NVRAM "
+             "access (PRET) - credential and config disclosure."},
+    {"product": ["ilo", "integrated lights-out", "idrac", "ipmi", "bmc"],
+     "severity": "high", "advisory": True,
+     "title": "Server management controller (iLO/iDRAC/IPMI) exposed",
+     "cves": ["CVE-2017-12542"], "cwe": ["CWE-798", "CWE-306"],
+     "remediation": "Isolate BMCs on a dedicated mgmt VLAN; change default creds.",
+     "desc": "Lights-out controllers ship with default creds and have pre-auth "
+             "bugs (iLO4 CVE-2017-12542, IPMI cipher-0/hash disclosure) that yield "
+             "full out-of-band control of the host."},
     # --- Mail ------------------------------------------------------------------
     {"product": ["exim"], "lt": "4.92", "ge": "4.87", "severity": "critical",
      "title": "Exim 4.87-4.91 remote code execution",
-     "cves": ["CVE-2019-10149"],
+     "cves": ["CVE-2019-10149"], "cwe": ["CWE-78"],
      "remediation": "Upgrade Exim to 4.92 or later.",
      "desc": "'Return of the WIZard' - unauthenticated RCE as root in default configs."},
+    {"product": ["exim"], "lt": "4.94.2", "ge": "4.0", "severity": "high",
+     "title": "Exim < 4.94.2 '21Nails' multiple vulns",
+     "cves": ["CVE-2020-28017", "CVE-2020-28021"], "cwe": ["CWE-787", "CWE-190"],
+     "remediation": "Upgrade Exim to 4.94.2 or later.",
+     "desc": "The 21Nails cluster includes several locally- and remotely-"
+             "exploitable memory-corruption bugs leading to root."},
+    {"product": ["dovecot"], "lt": "2.3.15", "ge": "2.3", "severity": "medium",
+     "title": "Legacy Dovecot (< 2.3.15)",
+     "cves": ["CVE-2021-33515"], "cwe": ["CWE-74"],
+     "remediation": "Upgrade Dovecot to 2.3.15+.",
+     "desc": "STARTTLS command-injection and other issues in older Dovecot."},
+    {"product": ["postfix"], "severity": "info", "advisory": True,
+     "title": "SMTP server exposed - verify relay & user enumeration controls",
+     "cves": [], "cwe": ["CWE-200"],
+     "remediation": "Disable VRFY/EXPN; ensure no open relay; require auth to submit.",
+     "desc": "Confirm the MTA does not allow open relay or VRFY/EXPN user "
+             "enumeration; check for anonymous submission on 25/587."},
 ]
 
 
@@ -205,7 +455,17 @@ def _matches(sig: dict, port: Port, host: Host) -> bool:
             lo=sig.get("ge") or sig.get("gt"), hi=sig.get("le") or sig.get("lt"),
             lo_incl="ge" in sig, hi_incl="le" in sig,
         )
+    # No version constraint: product-only advisory (matches any version).
     return True
+
+
+def _confidence(sig: dict) -> str:
+    """How sure we are the finding applies, given only version/product data."""
+    if sig.get("advisory"):
+        return "potential"   # product seen; version/patch not confirmed
+    if sig.get("os_lt"):
+        return "potential"   # OS-gated guess without a service version match
+    return "likely"          # a concrete version range matched
 
 
 def assess_host(host: Host) -> list[Vuln]:
@@ -219,16 +479,16 @@ def assess_host(host: Host) -> list[Vuln]:
             if sig["title"] in seen:
                 continue
             seen.add(sig["title"])
-            confidence = "potential" if sig.get("os_lt") else "likely"
+            banner = f"{port.product} {port.version}".strip() or port.service
             findings.append(Vuln(
                 ip=host.ip, port=port.portid, protocol=port.protocol,
                 script_id="version-db", state="version match",
                 title=sig["title"],
-                output=f"{port.product} {port.version} on {port.portid}/{port.protocol}"
-                       f" - {sig['desc']}",
+                output=f"{banner} on {port.portid}/{port.protocol} - {sig['desc']}",
                 severity=sig["severity"], ids=list(sig.get("cves", [])),
+                cwes=list(sig.get("cwe", [])),
                 source="version-db", remediation=sig.get("remediation", ""),
-                confidence=confidence,
+                confidence=_confidence(sig),
             ))
     return findings
 

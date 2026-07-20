@@ -33,6 +33,8 @@ sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
 #    eng/enumeration.xlsx  ->  read the "Start Here" tab, then use "Checklist"
 
 # 3) Vuln-scan the open ports it found (safe by default)
+#    Runs: NSE vuln+weak-config, the offline version->CVE/CWE engine,
+#    stdlib HTTP-header + TLS probes, and searchsploit exploit mapping.
 sudo ./bin/recce vulns -o eng
 
 # 4) Optional deeper phases (any time, on any subset)
@@ -60,7 +62,12 @@ targets to work on **just that subset** of what's already been enumerated —
 e.g. `sudo ./bin/recce vulns 10.0.20.0/24 -o eng`.
 
 Handy filters on `vulns`: `--only http smb` (just those services),
-`--unscanned` (only ports not yet done), `--aggressive` (intrusive checks).
+`--unscanned` (only ports not yet done), `--aggressive` (intrusive checks),
+`--no-probes` (skip the HTTP-header/TLS probes), `--no-searchsploit`.
+
+Every finding on the **Vulnerabilities** tab carries a severity, source
+(nse / version-db / probe / config), confidence, CVE refs and **CWE** refs, so
+you can sort and report by weakness class.
 
 ## Using the workbook
 
