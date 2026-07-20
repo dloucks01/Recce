@@ -626,6 +626,43 @@ class WriteupTest(unittest.TestCase):
         self.assertEqual(used - set(_CWE_NAME), set(), "CWEs with no reference name")
         for _keys, label, _cia in _CWE_TYPE:
             self.assertIn(label, _TYPE_IMPACT, f"type '{label}' has no impact wording")
+        # CWEs the NSE-script mapper can assign must also be named + typed.
+        from recce.report_docx import _NSE_CWE
+        nse_cwes = {c for cs in _NSE_CWE.values() for c in cs}
+        self.assertEqual(nse_cwes - typed, set(), "NSE-mapped CWEs with no type")
+        self.assertEqual(nse_cwes - set(_CWE_NAME), set(), "NSE-mapped CWEs with no name")
+
+    def test_nse_scripts_auto_map_to_cwe_and_cve(self):
+        from recce.models import Vuln
+        from recce.report_docx import group_findings
+
+        def finding_for(script_id, title=None):
+            h = Host(ip="10.0.0.9", ports=[Port(portid=445, service="microsoft-ds")],
+                     vulns=[Vuln(ip="10.0.0.9", port=445, protocol="tcp",
+                                 script_id=script_id, title=title or script_id,
+                                 severity="high", source="nse")])
+            return group_findings([h])[0]
+
+        # ms17-010 (no CVE in the id) -> mapped CVE + CWE.
+        f = finding_for("smb-vuln-ms17-010")
+        self.assertIn("CVE-2017-0144", f.cves)
+        self.assertIn("CWE-787", f.cwes)
+        # http-vuln-cveYYYY-N -> CVE parsed from the id + CWE mapped.
+        f = finding_for("http-vuln-cve2021-41773")
+        self.assertIn("CVE-2021-41773", f.cves)
+        self.assertIn("CWE-22", f.cwes)
+        # Heartbleed TLS script -> its CVE + CWE.
+        f = finding_for("ssl-heartbleed")
+        self.assertIn("CVE-2014-0160", f.cves)
+        self.assertIn("CWE-125", f.cwes)
+        # A version-db finding that already has CWE/CVE is NOT overridden.
+        h = Host(ip="10.0.0.9", ports=[Port(portid=80, service="http")],
+                 vulns=[Vuln(ip="10.0.0.9", port=80, protocol="tcp",
+                             script_id="version-db", title="Apache thing",
+                             severity="high", source="version-db",
+                             cwes=["CWE-22"], ids=["CVE-2021-41773"])])
+        f = group_findings([h])[0]
+        self.assertEqual(f.cwes, ["CWE-22"])
 
     def test_marquee_vulns_get_specific_impact(self):
         from recce.models import Vuln
