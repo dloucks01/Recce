@@ -175,6 +175,11 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
         for r in dc:
             if r["Conf."] == "potential":
                 self.assertEqual(r["Proven exploit"], "")
+        # The Overview total equals the number of proven-exploit rows on the sheet.
+        _h2, all_by_ip = rows_by_ip(self.sheets, "Vulnerabilities")
+        n_proven = sum(1 for rs in all_by_ip.values() for r in rs if r["Proven exploit"])
+        ov = ["|".join(str(c) for c in r) for r in self.sheets["Overview"]]
+        self.assertTrue(any(f"Findings with a proven exploit|{n_proven}" in t for t in ov))
         # ws01 has no findings at all.
         self.assertEqual(by_ip.get("10.0.10.25", []), [])
 

@@ -697,9 +697,11 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     # --- Totals (several labels link straight to the relevant sheet) ---
     sh.write([("Totals", "header"), ("", "header")])
     nav_set = set(nav)
+    proven = sum(1 for h in hosts for v in h.vulns if _proven_exploit_for(h, v))
     _links = {
         "Live hosts": "Checklist", "Open service ports": "Services",
         "Vuln findings": "Vulnerabilities", "High / Critical findings": "Vulnerabilities",
+        "Findings with a proven exploit": "Vulnerabilities",
         "Candidate exploits": "Exploits", "Domains / DCs": "Active Directory",
         "NTLM relay targets": "AD Quick Wins",
         "Kerberoastable / AS-REP": "AD Quick Wins",
@@ -710,6 +712,7 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         ("Open service ports", len(open_ports)),
         ("Vuln findings", sum(len(h.vulns) for h in hosts)),
         ("High / Critical findings", crit),
+        ("Findings with a proven exploit", proven),
         ("Candidate exploits", sum(len(h.exploits) for h in hosts)),
         ("Domains / DCs", f"{len(domains or ad.derive_domains(hosts))} / "
                           f"{len(ad.domain_controllers(hosts))}"),
