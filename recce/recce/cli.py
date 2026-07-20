@@ -1337,7 +1337,7 @@ def _add_discovery(pp) -> None:
 def _add_vuln_opts(pp) -> None:
     pp.add_argument("--aggressive", action="store_true",
                     help="run the full intrusive NSE 'vuln' category (can crash "
-                         "fragile services); default is safe detection only")
+                         "fragile services); default is deep safe detection")
     pp.add_argument("--offline", action="store_true",
                     help="airgapped: disable internet-dependent NSE (vulners)")
     pp.add_argument("--no-searchsploit", action="store_true",

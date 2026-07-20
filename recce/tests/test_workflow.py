@@ -619,9 +619,27 @@ class ScannerCommandTest(unittest.TestCase):
             agg = self._capture(s.vuln_scan, "1.2.3.4", [80],
                                 os.path.join(d, "v.xml"), s.PROFILES["standard"],
                                 aggressive=True)
-        self.assertIn("vuln and safe", " ".join(safe[0][0]))
+        safe_j, agg_j = " ".join(safe[0][0]), " ".join(agg[0][0])
+        self.assertIn("vuln and safe", safe_j)
         self.assertIn("--version-light", safe[0][0])   # not a full re-scan
-        self.assertIn("vuln or vulners", " ".join(agg[0][0]))
+        self.assertIn("vuln or vulners", agg_j)
+        # KEY FIX: high-value detection scripts that nmap does NOT tag "safe"
+        # (ms17-010, heartbleed, vsftpd backdoor) still run in the default scan -
+        # no flag needed. --aggressive adds the full intrusive vuln category.
+        for script in ("smb-vuln-ms17-010", "ssl-heartbleed", "ftp-vsftpd-backdoor"):
+            self.assertIn(script, safe_j)
+            self.assertIn(script, agg_j)
+
+    def test_enum_deep_scripts_on_standard_not_quick(self):
+        import recce.scanner as s
+        with tempfile.TemporaryDirectory() as d:
+            std = self._capture(s.enum_scan, "1.2.3.4", [80],
+                                os.path.join(d, "e.xml"), s.PROFILES["standard"])
+            quick = self._capture(s.enum_scan, "1.2.3.4", [80],
+                                  os.path.join(d, "e2.xml"), s.PROFILES["quick"])
+        # Deep service-enum scripts run in enum on standard, dropped on quick.
+        self.assertIn("http-enum", " ".join(std[0][0]))
+        self.assertNotIn("http-enum", " ".join(quick[0][0]))
 
     def test_version_all_profile_uses_version_all(self):
         import recce.scanner as s

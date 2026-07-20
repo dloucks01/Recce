@@ -30,6 +30,7 @@ class ScanProfile:
     timing: int = 4                   # nmap -T
     os_detect: bool = True
     ad_enrich: bool = True            # SMB / LDAP NSE scripts (enum phase)
+    deep_enum: bool = True            # service-aware deep enum scripts (enum phase)
     udp_top: int = 0                  # >0 -> also scan N top UDP ports (vulns phase)
     ping_discovery: bool = True       # discovery; False => treat all as up (-Pn)
     offline: bool = False             # drop internet-dependent scripts (vulners)
@@ -43,7 +44,7 @@ class ScanProfile:
 PROFILES: dict[str, ScanProfile] = {
     "quick": ScanProfile(name="quick", all_ports=False, top_ports=200,
                          os_detect=False, min_rate=2000, host_timeout=10,
-                         version_intensity=6),
+                         version_intensity=6, deep_enum=False),
     "standard": ScanProfile(name="standard"),
     "thorough": ScanProfile(name="thorough", min_rate=800, udp_top=100,
                             extra_nse=["banner"], host_timeout=40,
@@ -76,31 +77,76 @@ _AD_SCRIPTS = [
     "nbstat", "msrpc-enum",
 ]
 
-# Service-aware enumeration scripts. nmap only runs those whose portrule matches
-# the detected service, so listing many here is cheap - non-matching are skipped.
-_SERVICE_SCRIPTS = [
+# --- service-aware NSE scripts ------------------------------------------------
+# nmap only runs scripts whose portrule matches the detected service, so listing
+# many is cheap (non-matching ones are skipped). Every name is a standard,
+# long-shipping nmap script - an unknown name would abort the scan, so the lists
+# are curated. Two lists, both applied automatically (no flags to remember):
+#
+#   _ENUM_SCRIPTS   deep, non-intrusive service enumeration
+#   _VULN_DETECT    high-value vuln DETECTION that nmap does NOT tag "safe"
+#                   (ms17-010, heartbleed, shellshock, vsftpd backdoor...) - the
+#                   bare "vuln and safe" category MISSES these, so recce always
+#                   layers them in. `--aggressive` still adds the full intrusive
+#                   `vuln` category (XSS/SQLi/DoS probes) on top.
+
+_ENUM_SCRIPTS = [
     # HTTP / web
     "http-title", "http-headers", "http-server-header", "http-methods",
     "http-enum", "http-robots.txt", "http-webdav-scan", "http-auth",
-    "http-cors", "http-git", "http-open-proxy",
+    "http-cors", "http-git", "http-open-proxy", "http-generator",
+    "http-php-version", "http-favicon", "http-ntlm-info", "http-cookie-flags",
+    "http-apache-server-status", "http-userdir-enum", "http-vhosts",
+    "http-devframework", "http-wordpress-enum", "http-config-backup",
+    "http-internal-ip-disclosure", "http-comments-displayer",
     # TLS / SSL
     "ssl-cert", "ssl-enum-ciphers", "tls-nextprotoneg", "ssl-known-key",
+    "ssl-date", "tls-alpn",
     # SSH
     "ssh2-enum-algos", "ssh-auth-methods", "ssh-hostkey",
     # FTP / mail
-    "ftp-anon", "ftp-syst", "smtp-commands", "smtp-open-relay",
-    "pop3-capabilities", "imap-capabilities",
+    "ftp-anon", "ftp-syst", "ftp-bounce", "smtp-commands", "smtp-open-relay",
+    "smtp-ntlm-info", "smtp-enum-users", "pop3-capabilities", "pop3-ntlm-info",
+    "imap-capabilities", "imap-ntlm-info",
     # DNS
-    "dns-nsid", "dns-recursion", "dns-zone-transfer",
+    "dns-nsid", "dns-recursion", "dns-zone-transfer", "dns-service-discovery",
     # Databases
-    "mysql-info", "mysql-empty-password", "ms-sql-info", "ms-sql-ntlm-info",
+    "mysql-info", "mysql-databases", "mysql-users", "mysql-variables",
+    "mysql-empty-password", "ms-sql-info", "ms-sql-ntlm-info", "ms-sql-config",
     "ms-sql-empty-password", "oracle-tns-version", "mongodb-info",
-    "redis-info", "pgsql-info",
-    # SNMP / other UDP
-    "snmp-info", "snmp-interfaces", "snmp-sysdescr",
-    # Remote access / misc
-    "rdp-enum-encryption", "vnc-info", "telnet-encryption",
-    "nfs-showmount", "rpcinfo", "finger", "ntp-info",
+    "mongodb-databases", "redis-info", "cassandra-info", "couchdb-stats",
+    "memcached-info",
+    # SNMP
+    "snmp-info", "snmp-interfaces", "snmp-sysdescr", "snmp-netstat",
+    "snmp-processes", "snmp-win32-services", "snmp-win32-software",
+    "snmp-win32-users",
+    # Remote access
+    "rdp-enum-encryption", "rdp-ntlm-info", "vnc-info", "vnc-title",
+    "telnet-encryption", "telnet-ntlm-info", "x11-access",
+    # SMB extras (beyond the AD set)
+    "smb-mbenum", "smb-enum-services", "smb2-capabilities", "smb-system-info",
+    # Files / infra / misc
+    "nfs-showmount", "nfs-ls", "nfs-statfs", "rpcinfo", "finger", "ntp-info",
+    "ike-version", "ipmi-version", "upnp-info", "rsync-list-modules",
+    "afp-serverinfo", "afp-showmount", "sip-methods", "amqp-info", "epmd-info",
+]
+
+_VULN_DETECT = [
+    # SMB / Windows (detection only - does not exploit)
+    "smb-vuln-ms17-010", "smb-double-pulsar-backdoor", "smb-vuln-cve-2017-7494",
+    # TLS / crypto
+    "ssl-heartbleed", "ssl-poodle", "ssl-ccs-injection", "ssl-dh-params",
+    "sslv2-drown",
+    # HTTP CVE checks (read-only)
+    "http-shellshock", "http-vuln-cve2011-3192", "http-vuln-cve2010-2861",
+    "http-vuln-cve2013-0156", "http-vuln-cve2014-3704", "http-vuln-cve2015-1635",
+    "http-vuln-cve2017-5638", "http-vuln-cve2017-1001000",
+    "http-vuln-misfortune-cookie",
+    # Services
+    "ftp-vsftpd-backdoor", "ftp-proftpd-backdoor", "ftp-vuln-cve2010-4221",
+    "distcc-cve2004-2687", "rmi-vuln-classloader", "clamav-exec",
+    "mysql-vuln-cve2012-2122", "smtp-vuln-cve2010-4344", "smtp-vuln-cve2011-1720",
+    "smtp-vuln-cve2011-1764",
 ]
 
 
@@ -343,6 +389,8 @@ def enum_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     scripts = ["default"]                 # safe, gives http-title, ssl-cert, etc.
     if profile.ad_enrich:
         scripts += _AD_SCRIPTS            # smb-os-discovery, signing, ldap-rootdse
+    if profile.deep_enum:
+        scripts += _ENUM_SCRIPTS          # deep service-aware enumeration
     scripts += profile.extra_nse
     to_args, kill = _timeout_args(profile)
     cmd = [
@@ -366,24 +414,26 @@ def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
               creds: dict | None = None, aggressive: bool = False) -> str:
     """Per-open-port vulnerability pass.
 
-    Safe by default: nmap `vuln and safe` (detection-only scripts) plus the
-    safe service weak-config scripts. `aggressive=True` runs the full `vuln`
-    category (intrusive checks that can hang fragile services) and, if online,
-    the `vulners` CVE lookup.
+    Safe by default, but deeper than the raw `vuln and safe` category: many
+    high-value detection scripts (ms17-010, heartbleed, shellshock, vsftpd
+    backdoor...) are tagged `vuln` but NOT `safe`, so the bare safe category
+    misses them. recce always layers in the curated `_VULN_DETECT` set of
+    non-destructive checks plus the deep service-enum scripts, with no flags to
+    remember. `aggressive=True` adds the full intrusive `vuln` category
+    (XSS/SQLi/DoS probes) and, if online, the `vulners` CVE lookup.
     """
     if not ports:
         return _empty_xml(out_xml), None
     scan_type = "-sS" if _is_root() else "-sT"
 
+    # nmap --script grammar: a comma-separated list where each item is a boolean
+    # category expression OR a script name (each name portrule-filtered by nmap).
     if aggressive:
-        selection = "vuln"
-        if not profile.offline:
-            selection += " or vulners"
+        selection = "(vuln or vulners)" if not profile.offline else "(vuln)"
     else:
-        # Intersection of vuln + safe = non-intrusive detection scripts only.
-        selection = "vuln and safe"
-    # Add the safe service weak-config scripts (TLS/FTP/HTTP/SNMP/DB checks).
-    script_expr = f"({selection}) or ({','.join(_SERVICE_SCRIPTS)})"
+        selection = "(vuln and safe)"    # broad safe net...
+    named = _ENUM_SCRIPTS + _VULN_DETECT   # ...always plus the misses it leaves
+    script_expr = ",".join([selection] + list(dict.fromkeys(named)))
 
     # enum already did the heavy -sV; here we only need service names for NSE
     # portrules, so a light version probe (not a full re-scan) is enough.
