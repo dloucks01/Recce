@@ -22,8 +22,9 @@ from .models import Host
 WINDOWS_VECTORS = [
     ("System info & patches", "systeminfo ; wmic qfe list",
      "Feed to a local exploit suggester (WES-NG / Sherlock) offline."),
-    ("Automated enum", "winPEAS.exe / PowerUp.ps1 (Invoke-AllChecks)",
-     "Broad automated privesc surface."),
+    ("Automated enum", "recce-enum.ps1 (bundled) / winPEAS.exe / PowerUp.ps1",
+     "Run recce/local/recce-enum.ps1 on the host: read-only deep sweep of "
+     "privileges, services, tasks, creds, autoruns, patches."),
     ("Service perms / unquoted paths", "PowerUp: Get-ServiceUnquoted, "
      "Get-ModifiableServiceFile, Get-ModifiableService",
      "Writable service binary or unquoted path -> SYSTEM."),
@@ -62,8 +63,9 @@ WINDOWS_VECTORS = [
 LINUX_VECTORS = [
     ("Kernel & distro", "uname -a ; cat /etc/os-release",
      "Map kernel/distro to local exploits offline (linux-exploit-suggester)."),
-    ("Automated enum", "linPEAS.sh / LinEnum.sh",
-     "Broad automated privesc surface."),
+    ("Automated enum", "recce-enum.sh (bundled) / linPEAS.sh / LinEnum.sh",
+     "Run recce/local/recce-enum.sh on the host: read-only deep sweep of sudo, "
+     "SUID/caps, cron, writable services, creds, kernel LPE (PwnKit/DirtyPipe)."),
     ("Sudo rights", "sudo -l",
      "NOPASSWD entries + GTFOBins -> root; check sudo version (CVE-2021-3156)."),
     ("SUID/SGID binaries", "find / -perm -4000 -type f 2>/dev/null",
