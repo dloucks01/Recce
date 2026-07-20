@@ -57,12 +57,18 @@ def sample_hosts():
 
 
 def rows_by_ip(sheets, title):
-    """Return (header, {ip: [row-as-dict, ...]}) for a sheet with an IP column."""
+    """Return (header, {ip: [row-as-dict, ...]}) for a sheet with an IP column.
+
+    Skips collapsible group-header band rows (they carry a label in the IP column
+    but no Key), so callers only see real data rows keyed by a bare IP."""
     rows = sheets[title]
     hdr = rows[0]
     ipc = hdr.index("IP")
+    kidx = hdr.index("Key") if "Key" in hdr else None
     out: dict = {}
     for r in rows[1:]:
+        if kidx is not None and (len(r) <= kidx or not r[kidx]):
+            continue                       # group-header band row - not data
         if len(r) > ipc and r[ipc]:
             out.setdefault(str(r[ipc]), []).append(dict(zip(hdr, r)))
     return hdr, out
@@ -438,7 +444,7 @@ class WorkbookStructureTest(unittest.TestCase):
         self.assertEqual(crit.font.color.rgb, "FFFFFFFF")       # white text
         self.assertTrue(crit.font.bold)
 
-    def test_raw_script_sheets_split_host_and_port_level(self):
+    def test_raw_nse_sheet_scopes_host_and_port_scripts_per_host(self):
         from recce.models import Host, Port, Script
         hosts = [
             Host(ip="10.0.0.5", hostnames=["a"], ports=[Port(portid=445,
@@ -452,26 +458,60 @@ class WorkbookStructureTest(unittest.TestCase):
             out = os.path.join(d, "wb.xlsx")
             build_workbook(hosts, out)
             sheets = xlsx.read_sheets(out)
-        self.assertIn("Host Scripts", sheets)
-        self.assertIn("Scan Output", sheets)
+        self.assertIn("Raw NSE", sheets)
+        self.assertIn("Scope", sheets["Raw NSE"][0])          # unified Scope column
 
-        # Host-level script lands ONLY on Host Scripts, on the right IP.
-        _h, host_by_ip = rows_by_ip(sheets, "Host Scripts")
-        hblob = " ".join(v for row in host_by_ip["10.0.0.5"] for v in row.values())
-        self.assertIn("smb-os-discovery", hblob)
-        self.assertIn("OS: Windows", hblob)
-        self.assertEqual(set(host_by_ip), {"10.0.0.5"})       # only host w/ host scripts
-        # Host Scripts sheet has no Port column (host-wide, not per-port).
-        self.assertNotIn("Port", sheets["Host Scripts"][0])
+        _h, by_ip = rows_by_ip(sheets, "Raw NSE")
+        rows5 = {r["Script"]: r for r in by_ip["10.0.0.5"]}
+        # Host-level script -> Scope "host"; port script -> Scope "445".
+        self.assertEqual(rows5["smb-os-discovery"]["Scope"], "host")
+        self.assertEqual(rows5["smb-os-discovery"]["Output"], "OS: Windows")
+        self.assertEqual(rows5["smb2-security-mode"]["Scope"], "445")
+        # web02's per-port script lands on its own IP, no cross-host bleed.
+        rows6 = {r["Script"]: r for r in by_ip["10.0.0.6"]}
+        self.assertEqual(rows6["ftp-anon"]["Scope"], "21")
+        self.assertNotIn("ftp-anon", rows5)
 
-        # Port-level scripts land on Scan Output, and NOT the host-level one.
-        _h2, port_by_ip = rows_by_ip(sheets, "Scan Output")
-        pblob = " ".join(v for row in port_by_ip["10.0.0.5"] for v in row.values())
-        self.assertIn("smb2-security-mode", pblob)
-        self.assertNotIn("smb-os-discovery", pblob)           # host script not here
-        pblob6 = " ".join(v for row in port_by_ip["10.0.0.6"] for v in row.values())
-        self.assertIn("Anonymous FTP login allowed", pblob6)
-        self.assertNotIn("ftp-anon", pblob)                   # no cross-host bleed
+    def test_tab_colors_and_overview_nav_links(self):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            wb = load_workbook(out)
+        # Tab colours group the tabs into role bands.
+        self.assertIsNotNone(wb["Checklist"].sheet_properties.tabColor)
+        self.assertIsNotNone(wb["Vulnerabilities"].sheet_properties.tabColor)
+        # Overview is a nav hub: a jump bar + clickable totals link to real sheets.
+        ov = wb["Overview"]
+        targets = {c.hyperlink.location for row in ov.iter_rows()
+                   for c in row if c.hyperlink}
+        self.assertTrue(any("Checklist" in t for t in targets))
+        self.assertTrue(any("Vulnerabilities" in t for t in targets))
+        # Every link points at a sheet that actually exists (no dangling jumps).
+        present = {f"'{n}'" for n in wb.sheetnames}
+        for loc in targets:
+            self.assertTrue(loc.split("!")[0] in present, f"dangling link: {loc}")
+
+    def test_grouped_sheet_has_collapsible_host_bands(self):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            wb = load_workbook(out)
+        sv = wb["Services"]
+        self.assertEqual(sv.sheet_format.outlineLevelRow, 1)
+        self.assertFalse(sv.sheet_properties.outlinePr.summaryBelow)  # header above
+        # Detail rows are grouped (outline level 1); host-header rows are level 0.
+        levels = {sv.row_dimensions[r].outlineLevel
+                  for r in range(2, sv.max_row + 1)}
+        self.assertIn(1, levels)                              # some grouped detail
+        self.assertIn(0, levels)                              # some header/summary
 
 
 class ScannerCommandTest(unittest.TestCase):

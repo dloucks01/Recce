@@ -244,8 +244,12 @@ class PortStatusTest(unittest.TestCase):
             self.assertIn("Status", hdr)
             self.assertIn("Notes", hdr)
             si = hdr.index("Status")
-            # Every port row defaults to "Not started".
-            for r in rows[1:]:
+            ki = hdr.index("Key")
+            # Every port DATA row defaults to "Not started" (skip the collapsible
+            # host-header band rows, which carry no Key).
+            data_rows = [r for r in rows[1:] if len(r) > ki and r[ki]]
+            self.assertTrue(data_rows)
+            for r in data_rows:
                 self.assertEqual(r[si], STATUS_TODO)
             # The dropdown offers all three states (find the sheet whose
             # data-validation lists them, not merely any sheet mentioning them).
