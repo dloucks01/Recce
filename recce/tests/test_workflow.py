@@ -438,7 +438,7 @@ class WorkbookStructureTest(unittest.TestCase):
         self.assertEqual(crit.font.color.rgb, "FFFFFFFF")       # white text
         self.assertTrue(crit.font.bold)
 
-    def test_scan_output_sheet_carries_raw_script_text_per_host(self):
+    def test_raw_script_sheets_split_host_and_port_level(self):
         from recce.models import Host, Port, Script
         hosts = [
             Host(ip="10.0.0.5", hostnames=["a"], ports=[Port(portid=445,
@@ -452,16 +452,26 @@ class WorkbookStructureTest(unittest.TestCase):
             out = os.path.join(d, "wb.xlsx")
             build_workbook(hosts, out)
             sheets = xlsx.read_sheets(out)
+        self.assertIn("Host Scripts", sheets)
         self.assertIn("Scan Output", sheets)
-        _hdr, by_ip = rows_by_ip(sheets, "Scan Output")
-        # Host-level and port-level scripts both surface, on the right IP.
-        blob5 = " ".join(v for row in by_ip["10.0.0.5"] for v in row.values())
-        self.assertIn("smb2-security-mode", blob5)
-        self.assertIn("signing enabled but not required", blob5)
-        self.assertIn("smb-os-discovery", blob5)             # host-level script
-        blob6 = " ".join(v for row in by_ip["10.0.0.6"] for v in row.values())
-        self.assertIn("Anonymous FTP login allowed", blob6)
-        self.assertNotIn("ftp-anon", blob5)                  # no cross-host bleed
+
+        # Host-level script lands ONLY on Host Scripts, on the right IP.
+        _h, host_by_ip = rows_by_ip(sheets, "Host Scripts")
+        hblob = " ".join(v for row in host_by_ip["10.0.0.5"] for v in row.values())
+        self.assertIn("smb-os-discovery", hblob)
+        self.assertIn("OS: Windows", hblob)
+        self.assertEqual(set(host_by_ip), {"10.0.0.5"})       # only host w/ host scripts
+        # Host Scripts sheet has no Port column (host-wide, not per-port).
+        self.assertNotIn("Port", sheets["Host Scripts"][0])
+
+        # Port-level scripts land on Scan Output, and NOT the host-level one.
+        _h2, port_by_ip = rows_by_ip(sheets, "Scan Output")
+        pblob = " ".join(v for row in port_by_ip["10.0.0.5"] for v in row.values())
+        self.assertIn("smb2-security-mode", pblob)
+        self.assertNotIn("smb-os-discovery", pblob)           # host script not here
+        pblob6 = " ".join(v for row in port_by_ip["10.0.0.6"] for v in row.values())
+        self.assertIn("Anonymous FTP login allowed", pblob6)
+        self.assertNotIn("ftp-anon", pblob)                   # no cross-host bleed
 
 
 class ScannerCommandTest(unittest.TestCase):
