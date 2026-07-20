@@ -878,7 +878,7 @@ def cmd_writeups(args: argparse.Namespace) -> int:
     shots: dict = {}
     if not args.no_screenshots and not screenshot.available():
         print("[!] No headless browser found; skipping auto-screenshots (add them "
-              "by hand in Word). Install chromium to enable web screenshots.")
+              "by hand in Word). Install firefox or chromium to enable them.")
     elif not args.no_screenshots:
         web_hosts = [h for h in hosts
                      if any(screenshot._web_url(p) for p in h.open_ports)]
@@ -936,7 +936,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("ldapsearch", False, "credentialed AD LDAP enumeration"),
         ("netexec", False, "credentialed SMB/AD enum (credenum phase)"),
         ("ssh", False, "credentialed Linux local checks (credenum phase)"),
-        ("chromium", False, "auto web screenshots in finding write-ups"),
+        ("browser", False, "auto web screenshots in write-ups (firefox/chromium)"),
     ]
     nmap_ok = False
     for name, required, desc in tools:
@@ -944,9 +944,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if name == "netexec":
             from . import credenum
             present = credenum.smb_tool() is not None   # nxc / crackmapexec too
-        if name == "chromium":
+        if name == "browser":
             from . import screenshot
-            present = screenshot.available()             # chrome variants too
+            present = screenshot.available()             # firefox / chrome variants
+            found = screenshot.browser_tool()
+            if found:
+                desc = f"auto web screenshots in write-ups (using {found})"
         if name == "nmap":
             nmap_ok = present
         mark = "OK  " if present else ("MISSING (required)" if required else "-   (optional)")
