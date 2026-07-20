@@ -415,6 +415,136 @@ class WeakConfigFindingTest(unittest.TestCase):
         self.assertEqual(v.severity, "critical")
 
 
+def _docx_text(path):
+    import zipfile
+    import xml.etree.ElementTree as ET
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(path) as z:
+        for n in z.namelist():          # every xml part must be well-formed
+            if n.endswith((".xml", ".rels")):
+                ET.fromstring(z.read(n))
+        root = ET.fromstring(z.read("word/document.xml"))
+        parts = z.namelist()
+    return "\n".join("".join(t.text or "" for t in p.iter(f"{W}t"))
+                     for p in root.iter(f"{W}p")), parts
+
+
+class DocxWriterTest(unittest.TestCase):
+    def test_writer_parts_and_text(self):
+        from recce.docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "t.docx")
+            doc = Document()
+            doc.title("Hello")
+            doc.heading("Section")
+            doc.field("Severity", "HIGH")
+            doc.placeholder("do this")
+            doc.save(out)
+            text, parts = _docx_text(out)
+        self.assertIn("[Content_Types].xml", parts)
+        self.assertIn("word/document.xml", parts)
+        self.assertIn("Hello", text)
+        self.assertIn("Severity: HIGH", text)
+        self.assertIn("[TESTER: do this]", text)
+
+    def test_image_embed(self):
+        import struct
+        import binascii
+        import zlib
+        from recce.docx import Document, _png_size
+        sig = b"\x89PNG\r\n\x1a\n"
+
+        def chunk(t, dat):
+            return (struct.pack(">I", len(dat)) + t + dat
+                    + struct.pack(">I", binascii.crc32(t + dat) & 0xffffffff))
+        png = (sig + chunk(b"IHDR", struct.pack(">IIBBBBB", 640, 480, 8, 2, 0, 0, 0))
+               + chunk(b"IDAT", zlib.compress(b"\x00" + b"\xff\x00\x00" * 640))
+               + chunk(b"IEND", b""))
+        self.assertEqual(_png_size(png), (640, 480))
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "img.docx")
+            doc = Document()
+            doc.image(png, caption="cap")
+            doc.save(out)
+            _text, parts = _docx_text(out)
+            import zipfile
+            with zipfile.ZipFile(out) as z:
+                rels = z.read("word/_rels/document.xml.rels").decode()
+                body = z.read("word/document.xml").decode()
+        self.assertIn("word/media/image1.png", parts)
+        self.assertIn("/image", rels)
+        self.assertIn("r:embed", body)
+
+
+class WriteupTest(unittest.TestCase):
+    def _hosts(self):
+        from recce.models import Vuln
+        h1 = Host(ip="10.0.20.5", hostnames=["web01"],
+                  ports=[Port(portid=443, service="https")],
+                  vulns=[Vuln(ip="10.0.20.5", port=443, protocol="tcp",
+                              script_id="ssl-enum-ciphers",
+                              title="Weak SSL/TLS ciphers or protocols",
+                              severity="medium", source="config",
+                              cwes=["CWE-327"], remediation="Disable weak ciphers.",
+                              output="TLSv1.0 offered")])
+        h2 = Host(ip="10.0.20.9", hostnames=["web02"],
+                  ports=[Port(portid=443, service="https")],
+                  vulns=[Vuln(ip="10.0.20.9", port=443, protocol="tcp",
+                              script_id="ssl-enum-ciphers",
+                              title="Weak SSL/TLS ciphers or protocols",
+                              severity="medium", source="config", cwes=["CWE-327"],
+                              output="RC4 offered"),
+                         Vuln(ip="10.0.20.9", port=21, protocol="tcp",
+                              script_id="version-db",
+                              title="vsftpd 2.3.4 backdoor", severity="critical",
+                              source="version-db", ids=["CVE-2011-2523"],
+                              cwes=["CWE-78"], remediation="Upgrade vsftpd.")])
+        return [h1, h2]
+
+    def test_grouping_across_hosts(self):
+        from recce.report_docx import group_findings
+        findings = group_findings(self._hosts())
+        # 2 distinct findings; critical sorts first.
+        self.assertEqual([f.severity for f in findings], ["critical", "medium"])
+        tls = next(f for f in findings if "SSL" in f.title)
+        self.assertEqual(sorted(a[0] for a in tls.affected),
+                         ["10.0.20.5", "10.0.20.9"])   # spans both hosts
+
+    def test_build_writeups_and_no_overwrite(self):
+        from recce.report_docx import build_writeups
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "writeups")
+            summary = build_writeups(self._hosts(), out)
+            self.assertEqual(summary["total"], 2)
+            self.assertEqual(len(summary["written"]), 2)
+            f_crit = next(p for p in os.listdir(out) if p.startswith("F-001"))
+            text, _ = _docx_text(os.path.join(out, f_crit))
+            for expect in ("F-001", "Affected systems:", "CWE-78",
+                           "CVE-2011-2523", "Recommendations", "Evidence",
+                           "Mission Risk and Impact", "[TESTER:"):
+                self.assertIn(expect, text)
+            # Re-run: existing files are kept, not overwritten.
+            again = build_writeups(self._hosts(), out)
+            self.assertEqual(len(again["written"]), 0)
+            self.assertEqual(len(again["skipped"]), 2)
+
+    def test_min_severity_filter(self):
+        from recce.report_docx import build_writeups
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "w")
+            summary = build_writeups(self._hosts(), out, min_severity="high")
+            self.assertEqual(summary["total"], 1)   # only the critical
+
+    def test_screenshot_url_classification(self):
+        from recce import screenshot
+        self.assertTrue(screenshot._web_url(Port(portid=443, service="https")))
+        self.assertTrue(screenshot._web_url(Port(portid=8080, service="http-proxy")))
+        self.assertIsNone(screenshot._web_url(Port(portid=22, service="ssh")))
+        # No browser in the test env -> capture is a no-op, never raises.
+        h = Host(ip="1.2.3.4", ports=[Port(portid=80, service="http")])
+        self.assertEqual(screenshot.capture_for_host(h), [])
+
+
 class CredEnumTest(unittest.TestCase):
     NXC = (
         r"SMB  10.0.0.10  445  DC01  [*] Windows Server 2019 Build 17763 "
@@ -1077,6 +1207,7 @@ class CliSmokeTest(unittest.TestCase):
         for argv in (["enum", "10.0.0.1", "-y"], ["vulns", "10.0.0.0/24"],
                      ["db", "-o", "x"], ["privesc", "--scan"], ["scan", "10.0.0.1"],
                      ["credenum", "-u", "a", "-p", "b", "-d", "corp.local"],
+                     ["writeups", "--min-severity", "high", "--no-screenshots"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
                      ["demo"], ["doctor", "--no-self-scan"]):
             ns = p.parse_args(argv)

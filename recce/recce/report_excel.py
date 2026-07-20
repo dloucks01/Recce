@@ -468,6 +468,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("privesc [targets]", "Priv-esc playbook (+ --scan for remote checks)."),
         ("credenum -u U -p P -d DOM", "Authenticated enum (netexec/impacket/ssh) "
                                       "- shares, roasting, local admin, hashes."),
+        ("writeups", "Generate a Word (.docx) write-up per finding - finish each "
+                     "in Word (screenshots auto-added for web when a browser is present)."),
         ("status / report", "Show progress / rebuild this workbook from the datastore."),
     ]:
         sh.write([cmd, desc])

@@ -863,6 +863,45 @@ def cmd_credenum(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_writeups(args: argparse.Namespace) -> int:
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns` first.")
+        return 1
+    store = Store(paths["db"])
+    _import_excel_tracking(store, paths)   # honour any Excel edits first
+    hosts = _selected_hosts(store.all_hosts(), args)
+    out_dir = os.path.join(args.output_dir, "writeups")
+    from .report_docx import build_writeups
+    from . import screenshot
+
+    shots: dict = {}
+    if not args.no_screenshots and not screenshot.available():
+        print("[!] No headless browser found; skipping auto-screenshots (add them "
+              "by hand in Word). Install chromium to enable web screenshots.")
+    elif not args.no_screenshots:
+        web_hosts = [h for h in hosts
+                     if any(screenshot._web_url(p) for p in h.open_ports)]
+        if web_hosts:
+            print(f"[*] Capturing web screenshots for {len(web_hosts)} host(s) "
+                  f"(headless browser) ...")
+            for h in web_hosts:
+                grabbed = screenshot.capture_for_host(h)
+                if grabbed:
+                    shots[h.ip] = grabbed
+                    print(f"    [+] {h.ip}: {len(grabbed)} screenshot(s)")
+    summary = build_writeups(hosts, out_dir, min_severity=args.min_severity,
+                             screenshots=shots, overwrite=args.overwrite)
+    store.close()
+    print(f"\n[+] Finding write-ups: {len(summary['written'])} generated, "
+          f"{len(summary['skipped'])} kept (already edited), "
+          f"{summary['total']} finding(s) total.")
+    print(f"    -> {out_dir}/  (open each .docx in Word to finish it)")
+    if summary["skipped"]:
+        print("    (use --overwrite to regenerate the kept ones - loses edits)")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check that this box can run the tool, and optionally prove it with a
     real localhost self-scan. Run this on any system before an engagement."""
@@ -888,6 +927,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("ldapsearch", False, "credentialed AD LDAP enumeration"),
         ("netexec", False, "credentialed SMB/AD enum (credenum phase)"),
         ("ssh", False, "credentialed Linux local checks (credenum phase)"),
+        ("chromium", False, "auto web screenshots in finding write-ups"),
     ]
     nmap_ok = False
     for name, required, desc in tools:
@@ -895,6 +935,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if name == "netexec":
             from . import credenum
             present = credenum.smb_tool() is not None   # nxc / crackmapexec too
+        if name == "chromium":
+            from . import screenshot
+            present = screenshot.available()             # chrome variants too
         if name == "nmap":
             nmap_ok = present
         mark = "OK  " if present else ("MISSING (required)" if required else "-   (optional)")
@@ -1372,6 +1415,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cep.add_argument("--aggressive", action="store_true",
                      help="also dump hashes with secretsdump (needs admin/DA)")
     cep.set_defaults(func=cmd_credenum)
+
+    # Reporting: per-finding Word write-ups from the template.
+    wu = sub.add_parser("writeups",
+                        help="generate one Word (.docx) write-up per finding")
+    wu.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    wu.add_argument("-o", "--output-dir", default="engagement")
+    wu.add_argument("--min-severity", default="info",
+                    choices=["critical", "high", "medium", "low", "info"],
+                    help="only findings at or above this severity")
+    wu.add_argument("--no-screenshots", action="store_true",
+                    help="don't auto-capture web screenshots (add them in Word)")
+    wu.add_argument("--overwrite", action="store_true",
+                    help="regenerate even where a write-up exists (loses tester edits)")
+    wu.set_defaults(func=cmd_writeups)
 
     # Convenience: enum + vulns in one shot.
     s = sub.add_parser("scan", help="run enum then vulns in one shot")

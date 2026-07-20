@@ -327,6 +327,32 @@ policy findings become **Vulnerabilities**. It targets each host by surface
 `credenum` run covers a mixed environment. `recce doctor` shows which of these
 tools are installed.
 
+## Finding write-ups (`writeups`)
+
+`recce writeups -o eng` generates **one Word (`.docx`) report per finding**,
+matching a walkthrough template. Findings are grouped by title across hosts, so
+one issue spanning many systems is a single write-up listing every affected
+`IP:port`.
+
+recce **auto-fills** everything it knows — Finding ID, title, affected systems,
+severity, CWE, CVE, tools/techniques used, a drafted vulnerability type and
+(CIA) security aspect, recommendations (from the offline KB), a plain-language
+narrative draft, and the raw **Evidence**. The fields only a tester can supply —
+**Mission Risk & Impact**, **Level of Difficulty**, and the step-by-step
+**walkthrough with screenshots** — are written as clearly-marked `[TESTER: …]`
+placeholders. You open each `.docx` in Word, finish it, and paste screenshots
+inline. **recce never overwrites an edited write-up** (re-run to add docs for new
+findings; `--overwrite` forces a rebuild).
+
+The whole writer is **pure standard-library** (a `.docx` is a zip of XML, like
+the workbook) — no python-docx/Node needed, so it runs on the airgapped box.
+
+**Screenshots (web only).** If a headless browser is present (Chromium ships on
+Kali; or point `RECCE_BROWSER` at one), recce screenshots HTTP/HTTPS targets and
+embeds them under the walkthrough automatically. Non-web findings are evidenced
+by their captured tool output. Disable with `--no-screenshots`; filter with
+`--min-severity high`.
+
 ## Coverage tracking
 
 The goal: know **at any moment** which systems/services you've looked at and
@@ -479,6 +505,8 @@ are color-flagged).
 | `enumeration.xlsx` | **Start Here** (self-guide) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
+| `writeups/*.docx`  | One Word write-up per finding (`recce writeups`) — finish in Word |
+| `recce.log`        | Scan errors / timeouts / incomplete hosts (also on the Overview tab) |
 | `results.sqlite`   | Normalized datastore (resume + re-report) |
 | `raw/*.xml`        | Every raw nmap XML, for auditing / re-parsing |
 
@@ -517,6 +545,9 @@ recce/               the package (python -m recce)
   db.py              database detection + engine-specific NSE + inventory
   privesc.py         Windows/Linux priv-esc findings + playbook knowledge base
   credenum.py        credentialed enum via netexec / impacket / ssh (tool-gated)
+  docx.py            standard-library .docx writer (no python-docx) + image embed
+  report_docx.py     per-finding Word write-ups from the walkthrough template
+  screenshot.py      optional headless-browser web screenshots (tool-gated)
   exploits.py        offline exploit mapping via searchsploit (Exploit-DB)
   vulndb.py          offline version->CVE/CWE vulnerability engine (+ remediation)
   probes.py          stdlib HTTP-header + TLS enrichment probes (airgapped)
