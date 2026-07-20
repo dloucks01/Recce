@@ -892,11 +892,20 @@ def cmd_writeups(args: argparse.Namespace) -> int:
                     print(f"    [+] {h.ip}: {len(grabbed)} screenshot(s)")
     summary = build_writeups(hosts, out_dir, min_severity=args.min_severity,
                              screenshots=shots, overwrite=args.overwrite)
+    title = store.get_meta("engagement") or args.title
+    combined_path = None
+    if not args.no_combined:
+        from .report_docx import build_combined
+        combined_path = os.path.join(out_dir, "findings_report.docx")
+        build_combined(hosts, combined_path, title=f"{title} - Findings Report",
+                       min_severity=args.min_severity, screenshots=shots)
     store.close()
     print(f"\n[+] Finding write-ups: {len(summary['written'])} generated, "
           f"{len(summary['skipped'])} kept (already edited), "
           f"{summary['total']} finding(s) total.")
     print(f"    -> {out_dir}/  (open each .docx in Word to finish it)")
+    if combined_path:
+        print(f"[+] Combined report (summary table + all findings): {combined_path}")
     if summary["skipped"]:
         print("    (use --overwrite to regenerate the kept ones - loses edits)")
     return 0
@@ -1422,11 +1431,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wu.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
     wu.add_argument("-o", "--output-dir", default="engagement")
+    wu.add_argument("--title", default="Pentest Enumeration",
+                    help="engagement title shown on the combined report")
     wu.add_argument("--min-severity", default="info",
                     choices=["critical", "high", "medium", "low", "info"],
                     help="only findings at or above this severity")
     wu.add_argument("--no-screenshots", action="store_true",
                     help="don't auto-capture web screenshots (add them in Word)")
+    wu.add_argument("--no-combined", action="store_true",
+                    help="skip the single combined findings_report.docx")
     wu.add_argument("--overwrite", action="store_true",
                     help="regenerate even where a write-up exists (loses tester edits)")
     wu.set_defaults(func=cmd_writeups)

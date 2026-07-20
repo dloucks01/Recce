@@ -200,6 +200,38 @@ class Document:
         if caption:
             self.para(caption, italic=True, color=_MUTED)
 
+    def table(self, header: list[str], rows: list[list[str]],
+              widths: list[int] | None = None) -> None:
+        """A bordered table with a shaded header row. Widths in DXA (sum ~9360)."""
+        ncol = len(header)
+        if not widths:
+            widths = [9360 // ncol] * ncol
+        borders = "".join(
+            f'<w:{e} w:val="single" w:sz="4" w:space="0" w:color="BFBFBF"/>'
+            for e in ("top", "left", "bottom", "right", "insideH", "insideV"))
+        grid = "".join(f'<w:gridCol w:w="{w}"/>' for w in widths)
+
+        def cell(text, w, *, is_header=False):
+            shd = ('<w:shd w:val="clear" w:color="auto" w:fill="D9E1F2"/>'
+                   if is_header else "")
+            rpr = "<w:rPr><w:b/></w:rPr>" if is_header else ""
+            run = (f'<w:r>{rpr}<w:t xml:space="preserve">{escape(str(text))}'
+                   f'</w:t></w:r>') if str(text) else ""
+            return (f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{shd}'
+                    f'<w:vAlign w:val="center"/></w:tcPr><w:p>{run}</w:p></w:tc>')
+
+        trs = ['<w:tr>' + "".join(cell(h, widths[i], is_header=True)
+                                  for i, h in enumerate(header)) + '</w:tr>']
+        for row in rows:
+            trs.append('<w:tr>' + "".join(
+                cell(row[i] if i < len(row) else "", widths[i])
+                for i in range(ncol)) + '</w:tr>')
+        self._paras.append(
+            f'<w:tbl><w:tblPr><w:tblW w:w="{sum(widths)}" w:type="dxa"/>'
+            f'<w:tblBorders>{borders}</w:tblBorders></w:tblPr>'
+            f'<w:tblGrid>{grid}</w:tblGrid>{"".join(trs)}</w:tbl>')
+        self.para("")   # Word wants a paragraph after a table
+
     def page_break(self) -> None:
         self._paras.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
 
