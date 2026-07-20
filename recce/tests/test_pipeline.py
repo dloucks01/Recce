@@ -783,12 +783,12 @@ class StepCheckboxTest(unittest.TestCase):
         self.assertTrue(tr.step_auto(h, "db"))
 
     def test_db_not_applicable_when_no_db(self):
-        # An SSH-only Linux host: DB, Web and SMB/AD steps simply don't apply.
+        # An SSH-only Linux host: DB, Web and AD steps simply don't apply.
         h = Host(ip="10.0.0.6", os_family="Linux", enumerated=True,
                  ports=[Port(portid=22, service="ssh")])
         self.assertFalse(tr.step_applies(h, "db"))
         self.assertFalse(tr.step_applies(h, "web"))
-        self.assertFalse(tr.step_applies(h, "smbad"))
+        self.assertFalse(tr.step_applies(h, "ad"))
         # Universal steps still apply.
         self.assertTrue(tr.step_applies(h, "enum"))
         self.assertTrue(tr.step_applies(h, "vuln"))
@@ -797,27 +797,59 @@ class StepCheckboxTest(unittest.TestCase):
         web = Host(ip="10.0.0.7", os_family="Linux",
                    ports=[Port(portid=443, service="https")])
         self.assertTrue(tr.step_applies(web, "web"))
-        self.assertFalse(tr.step_applies(web, "smbad"))   # Linux, no SMB
+        self.assertFalse(tr.step_applies(web, "ad"))   # Linux web, not a DC
         self.assertFalse(tr.step_applies(web, "db"))
 
-        win = Host(ip="10.0.0.8", os_family="Windows",
+        # A plain SMB file server is NOT an AD host (SMB is tracked on Services).
+        smb = Host(ip="10.0.0.8", os_family="Windows",
                    ports=[Port(portid=445, service="microsoft-ds")])
-        self.assertTrue(tr.step_applies(win, "smbad"))    # Windows + SMB
-        self.assertFalse(tr.step_applies(win, "web"))
+        self.assertFalse(tr.step_applies(smb, "ad"))
+
+        # A DC (LDAP/Kerberos) is an AD host.
+        dc = Host(ip="10.0.0.10", os_family="Windows",
+                  ports=[Port(portid=389, service="ldap"),
+                         Port(portid=88, service="kerberos-sec")])
+        self.assertTrue(tr.step_applies(dc, "ad"))
+
+        # Kill-chain markers apply to anything with an open port.
+        for step in ("access", "creds", "lateral"):
+            self.assertTrue(tr.step_applies(web, step))
+        dead = Host(ip="10.0.0.11", state="up", ports=[])
+        for step in ("access", "creds", "lateral", "vuln"):
+            self.assertFalse(tr.step_applies(dead, step))
 
         # Priv-esc only applies once the phase has run (a foothold exists).
-        self.assertFalse(tr.step_applies(win, "privesc"))
-        win.privesc_checked = True
-        self.assertTrue(tr.step_applies(win, "privesc"))
+        self.assertFalse(tr.step_applies(dc, "privesc"))
+        dc.privesc_checked = True
+        self.assertTrue(tr.step_applies(dc, "privesc"))
 
-    def test_smbad_is_manual_signoff(self):
-        # SMB/AD applies to a domain host but never auto-checks - it's a manual
-        # review sign-off, so it starts unchecked even after enumeration.
-        win = Host(ip="10.0.0.8", os_family="Windows", enumerated=True,
-                   roles=["Domain Controller"],
-                   ports=[Port(portid=445, service="microsoft-ds")])
-        self.assertTrue(tr.step_applies(win, "smbad"))
-        self.assertFalse(tr.step_auto(win, "smbad"))
+    def test_manual_steps_never_auto_check(self):
+        # AD review + kill-chain markers are operator sign-offs: applicable but
+        # never auto-completed by the tool, even after enumeration.
+        dc = Host(ip="10.0.0.10", os_family="Windows", enumerated=True,
+                  roles=["Domain Controller"],
+                  ports=[Port(portid=389, service="ldap"),
+                         Port(portid=88, service="kerberos-sec")])
+        for step in ("ad", "access", "creds", "lateral"):
+            self.assertTrue(tr.step_applies(dc, step))
+            self.assertFalse(tr.step_auto(dc, step))
+
+    def test_manual_marker_ticks_persist(self):
+        # Ticking a manual kill-chain box is recorded as an override and, unlike
+        # auto steps, no phase clears it.
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(os.path.join(d, "t.sqlite"))
+            store.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                   enumerated=True,
+                                   ports=[Port(portid=80, service="http")]))
+            akey = tr.step_key("access", "10.0.0.5")
+            cli._reconcile_steps(store, {akey: (True, "")})   # tester ticked it
+            self.assertTrue(store.get_tracking()[akey][0])
+            # Unticking matches the auto default (False) -> override cleared.
+            cli._reconcile_steps(store, {akey: (False, "")})
+            self.assertNotIn(akey, store.get_tracking())
+            store.close()
 
     def test_web_step_auto_done_when_web_ports_scanned(self):
         h = Host(ip="10.0.0.9", enumerated=True,
@@ -827,8 +859,8 @@ class StepCheckboxTest(unittest.TestCase):
         self.assertTrue(tr.step_auto(h, "web"))
 
     def test_na_step_renders_dash_and_no_override(self):
-        # A Linux SSH box: the DB/Web/SMB-AD columns show N/A, not a checkbox,
-        # and reading the workbook back records no step override for them.
+        # A Linux SSH box: the DB/Web/AD columns show N/A, not a checkbox, and
+        # reading the workbook back records no step override for them.
         h = Host(ip="10.0.0.6", os_family="Linux", enumerated=True,
                  ports=[Port(portid=22, service="ssh")])
         with tempfile.TemporaryDirectory() as d:
@@ -837,14 +869,15 @@ class StepCheckboxTest(unittest.TestCase):
             rows = xlsx.read_sheets(out)["Checklist"]
             header = rows[0]
             row = rows[1]
-            for col in ("DB", "Web", "SMB/AD"):
+            for col in ("DB", "Web", "AD"):
                 self.assertEqual(row[header.index(col)], tr.STEP_NA)
             back = read_workbook_tracking(out)
             self.assertNotIn(tr.step_key("db", "10.0.0.6"), back)
             self.assertNotIn(tr.step_key("web", "10.0.0.6"), back)
-            self.assertNotIn(tr.step_key("smbad", "10.0.0.6"), back)
-            # The universal Enumerated step is still tracked.
+            self.assertNotIn(tr.step_key("ad", "10.0.0.6"), back)
+            # Universal steps (enum + kill-chain, host has an open port) are tracked.
             self.assertIn(tr.step_key("enum", "10.0.0.6"), back)
+            self.assertIn(tr.step_key("access", "10.0.0.6"), back)
 
     def test_checkbox_reflects_auto_then_override(self):
         h = self._host(enumerated=True)

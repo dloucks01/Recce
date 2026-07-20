@@ -122,48 +122,49 @@ The **Checklist** sheet (right after Coverage) is the at-a-glance answer to
 "which IPs are done and what's left." One row per IP, with a **checkbox for each
 workflow step**:
 
-| Reviewed | IP | Hostname | OS | # Open | # Vulns | Enumerated | Vuln-scan | Web | SMB/AD | DB | Priv-esc | Notes |
-|:--:|---|---|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|---|
-| ☐ | 10.0.10.10 | dc01 | Windows | 6 | 1 | ✅ | ☐ | — | ✅ | — | — | |
-| ☐ | 10.0.20.5 | web01 | Linux | 3 | 4 | ✅ | ✅ | ✅ | — | ☐ | — | |
-| ☐ | 10.0.20.9 | file01 | Linux | 1 | 0 | ✅ | ☐ | — | — | — | — | |
+| Reviewed | IP | OS | … | Enum | Vuln | Web | AD | DB | Access | Priv-esc | Creds | Lateral | Notes |
+|:--:|---|---|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|---|
+| ☐ | 10.0.10.10 (dc01) | Windows | | ✅ | ☐ | — | ☐ | — | ☐ | — | ☐ | ☐ | |
+| ☐ | 10.0.20.5 (web01) | Linux | | ✅ | ✅ | ✅ | — | ☐ | ☐ | — | ☐ | ☐ | |
+| ☐ | 10.0.20.9 (smb01) | Windows | | ✅ | ☐ | — | — | — | ☐ | — | ☐ | ☐ | |
 
-The step checkboxes are **auto-default, manual-override — and only appear where
-the step actually applies to the host:**
+The step columns are **two kinds**, and each **only appears where it applies**
+(an irrelevant step shows **`—` (N/A)**, so a checked box always means real work):
 
-- **Not every host gets every box.** A step that's irrelevant shows **`—` (N/A)**
-  instead of a checkbox, so a checked box always means real work happened:
-  - **Enumerated** and **Vuln-scan** — universal (Vuln-scan is `—` only if the
-    host has no open ports).
-  - **Web** — only on hosts serving HTTP/HTTPS.
-  - **SMB/AD** — only on Windows / domain-facing hosts (SMB/LDAP/Kerberos or a
-    discovered role). A plain Linux box never shows an AD box. This one is a
-    **manual sign-off** — it starts unchecked and you tick it once you've actually
-    reviewed users/shares/roasting/relay (the tool can't know when you're done).
-  - **DB** — only on hosts running a database.
-  - **Priv-esc** — appears once you've run the `privesc` phase against the host
-    (i.e. you have a foothold to escalate from); `—` until then, so it isn't a
-    column of permanently-empty boxes.
-- Each (except the manual SMB/AD box) **auto-checks (turns green)** when the tool
-  completes that step — `enum` ticks Enumerated, `vulns` ticks Vuln-scan/Web once
-  the relevant ports are scanned, `db` ticks DB, `privesc` ticks Priv-esc.
-- You can **tick or untick any real box by hand** — mark a step you did manually,
-  or untick one to flag "redo." Your manual choice **persists and overrides the
-  tool** on later report refreshes.
-- Re-running that phase on the host **resets the box to the tool's state**.
-- Filter `Vuln-scan = ☐` to see exactly which hosts still need scanning; `—`
-  cells are skipped by the filter, so you never chase a phase that doesn't apply.
-- Rows are **grouped by subnet** (a Subnet column, sorted), so each subnet's hosts
-  sit together — filter to one subnet to work it end to end.
+- **Auto surfaces** — the tool fills these in and they turn green when done:
+  - **Enumerated** — universal. **Vuln-scan** — any host with an open port.
+  - **Web** — hosts serving HTTP/HTTPS; green once the web ports are scanned.
+  - **DB** — hosts running a database; green once `db` runs.
+- **Manual sign-offs** — operator work the tool can't detect; start unchecked,
+  you tick them as you go:
+  - **AD** — only on **domain controllers / directory hosts** (LDAP / Kerberos /
+    GC, or a discovered DC role). A plain SMB file server is *not* an AD host —
+    its SMB surface is tracked per-port on the **Services** tab. Tick AD once
+    you've reviewed users/shares/roasting/delegation/ADCS.
+  - **Access** (initial access / shell / valid creds on this host) → **Priv-esc**
+    (appears once the `privesc` phase runs) → **Creds** (harvested secrets) →
+    **Lateral** (tried credential reuse / pivot from here). These are the
+    kill-chain coverage markers — they answer "did we actually try?" per host.
+- The long tail of services — **SMB, remote access (SSH/RDP/WinRM/VNC), mail,
+  SNMP, DNS, …** — deliberately has **no column here**; each such port is tracked
+  with its own tri-state status on the **Services** tab, so the checklist stays
+  readable while nothing goes untracked.
+- You can **tick or untick any real box by hand**; your choice **persists and
+  overrides the tool** on later refreshes. Re-running an auto phase resets that
+  box to the tool's state; manual boxes stay exactly as you left them.
+- Filter a column to `☐` to see what's left; `—` cells are skipped, so you never
+  chase a step that doesn't apply. Rows are **grouped by subnet**.
 
 The **Overview** tab's per-subnet coverage table accounts for **every subnet in
 scope** — even ones with no live hosts — showing addresses in range, live hosts
-found, and per-surface completion (Enumerated / Vuln-scanned / Web / SMB-AD / DB)
-where the denominator counts only hosts that surface applies to. That's your
-guarantee no subnet — or surface — is missed.
+found, and auto-surface completion (Enumerated / Vuln-scanned / Web / DB) where
+the denominator counts only hosts that surface applies to. That's your guarantee
+no subnet — or surface — is missed.
 
 The **Reviewed** checkbox is your per-host sign-off (ticking it here or on the
-Hosts tab both count). `status` prints per-step completion counts.
+Hosts tab both count). `status` prints auto progress *and* your manual sign-off
+counts (AD reviewed, Access, Priv-esc, Creds, Lateral) so you can see kill-chain
+coverage at a glance.
 
 ### The Services tab — per-port status
 
