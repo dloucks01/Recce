@@ -56,6 +56,158 @@ _SOURCE_TOOL = {
 _SEV_COLOR = {"critical": "C00000", "high": "C15A11", "medium": "9C7A00",
               "low": "2E5AAC", "info": "5F6F6E"}
 
+# --- auto-drafted narrative building blocks (plain, management-level language) ---
+
+# Port -> plain-language description of what the service is/does, for the opening
+# context sentence. Falls back to banner keywords, then a generic phrase.
+_SERVICE_ROLE = {
+    80: "web service", 443: "web service (HTTPS)", 8080: "web service",
+    8443: "web service (HTTPS)", 8000: "web service", 8888: "web service",
+    8081: "web service", 9443: "web service (HTTPS)",
+    21: "file-transfer (FTP) service", 22: "remote-administration (SSH) service",
+    23: "remote-terminal (Telnet) service", 25: "mail (SMTP) service",
+    110: "mail (POP3) service", 143: "mail (IMAP) service", 53: "DNS service",
+    389: "directory (LDAP) service", 636: "directory (LDAPS) service",
+    3268: "Active Directory directory service",
+    88: "Kerberos authentication service",
+    445: "Windows file-sharing (SMB) service",
+    139: "Windows file-sharing (SMB) service",
+    3389: "remote-desktop (RDP) service",
+    5985: "Windows remote-management (WinRM) service",
+    5986: "Windows remote-management (WinRM) service",
+    3306: "database service (MySQL)", 5432: "database service (PostgreSQL)",
+    1433: "database service (Microsoft SQL Server)", 1521: "database service (Oracle)",
+    27017: "database service (MongoDB)", 6379: "in-memory data store (Redis)",
+    161: "network-management (SNMP) service", 2049: "file-sharing (NFS) service",
+}
+
+# Vulnerability type (from _vuln_type) -> plain-language "an attacker could ..."
+_TYPE_IMPACT = {
+    "Injection / Remote Code Execution":
+        "run their own commands on the affected system - in practice this often "
+        "means full control of the host, its data, and any credentials stored on it",
+    "SQL Injection":
+        "read or alter the information held in the application's database, exposing "
+        "sensitive records or corrupting data",
+    "Cross-Site Scripting":
+        "run malicious content in the browser of a legitimate user, which can be "
+        "used to steal their session or trick them into unwanted actions",
+    "Path Traversal / File Inclusion":
+        "read files outside the intended area of the application - and in some cases "
+        "run code - exposing configuration, credentials, or source",
+    "Authentication / Access Control Weakness":
+        "bypass or abuse the service's sign-in and access controls to reach data or "
+        "functions that should be restricted",
+    "Privilege Escalation":
+        "raise their level of access on the system, moving from a limited foothold "
+        "toward full administrative control",
+    "Cleartext Transmission of Sensitive Data":
+        "observe sensitive information - including credentials - as it crosses the "
+        "network, because it is not encrypted",
+    "Cryptographic / TLS Weakness":
+        "undermine the encryption protecting the service, potentially exposing or "
+        "tampering with data in transit",
+    "Information / Credential Disclosure":
+        "obtain sensitive information - such as internal details or credentials - "
+        "that makes further attack easier",
+    "Security Misconfiguration":
+        "take advantage of an insecure default or misconfiguration to gain access or "
+        "information they should not have",
+    "Resource Exhaustion / Denial of Service":
+        "disrupt or disable the service, denying it to legitimate users",
+    "Unmaintained / Default Components":
+        "exploit publicly known weaknesses in outdated or default components that no "
+        "longer receive security fixes",
+    "Embedded Malicious Code / Backdoor":
+        "use a built-in backdoor to gain direct, unauthenticated access to the system",
+}
+_FALLBACK_IMPACT = ("weaken the security of the affected service, potentially "
+                    "exposing data or functionality to unauthorized access")
+_SEV_FRAME = {
+    "critical": "This is considered a critical-risk exposure",
+    "high": "This is considered a high-risk exposure",
+    "medium": "This is considered a moderate-risk issue",
+    "low": "This is considered a lower-risk issue",
+    "info": "This is an informational observation",
+}
+
+
+def _join(items: list[str]) -> str:
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _service_role(port: int, banner: str) -> str:
+    role = _SERVICE_ROLE.get(port)
+    if role:
+        return role
+    b = (banner or "").lower()
+    if "http" in b:
+        return "web service"
+    if "ssh" in b:
+        return "remote-administration (SSH) service"
+    if "ftp" in b:
+        return "file-transfer (FTP) service"
+    if "smb" in b or "microsoft-ds" in b or "netbios" in b:
+        return "Windows file-sharing (SMB) service"
+    if any(k in b for k in ("sql", "postgres", "mysql", "oracle", "mongo")):
+        return "database service"
+    if "ldap" in b:
+        return "directory (LDAP) service"
+    return "network service"
+
+
+def _narrative(f: Finding) -> list[str]:
+    """Auto-draft a 3-paragraph, management-level narrative: what the service is,
+    what was found (and where / how sure), and the plain-language impact."""
+    if not f.affected:
+        return [f"During testing, {f.title.lower()} was identified. {_SEV_FRAME.get(f.severity.lower(), 'This is an issue')}."]
+    ip0, port0, _hn0 = f.affected[0]
+    banner0 = f.services.get((ip0, port0), "")
+    roles = []
+    for ip, port, _hn in f.affected:
+        r = _service_role(port, f.services.get((ip, port), ""))
+        if r not in roles:
+            roles.append(r)
+
+    # 1) Context - what the affected component is.
+    if len(roles) == 1:
+        ctx = f"This finding concerns a {roles[0]}"
+        if banner0:
+            ctx += f" ({banner0})"
+        ctx += ", exposed on the network to the tested environment."
+    else:
+        ctx = (f"This finding concerns {_join(roles)} exposed on the network to the "
+               "tested environment.")
+
+    # 2) What was found, where, and how confident we are.
+    n = len(f.affected)
+    where = _join([f"{ip}" + (f" ({hn})" if hn else "")
+                   for ip, _p, hn in f.affected[:3]])
+    more = f", and {n - 3} other system(s)" if n > 3 else ""
+    cve = f" (tracked as {', '.join(f.cves[:3])})" if f.cves else ""
+    found = (f"During testing, recce identified {f.title.lower()}{cve}, affecting "
+             f"{n} system(s) - {where}{more}.")
+    if f.confidence == "potential":
+        found += (" This was inferred from the service's version and banner data, so "
+                  "it should be confirmed through hands-on validation before it is "
+                  "relied upon.")
+    elif f.confidence == "likely":
+        found += " The detected version falls within a range known to be affected."
+
+    # 3) Plain-language impact, framed by severity.
+    vtype, _cia = _vuln_type(f.cwes)
+    impact = _TYPE_IMPACT.get(vtype, _FALLBACK_IMPACT)
+    frame = _SEV_FRAME.get(f.severity.lower(), "This is an issue")
+    consequence = (f"{frame}: if exploited, an attacker could {impact}.")
+    return [ctx, found, consequence]
+
 
 @dataclass
 class Finding:
@@ -214,9 +366,8 @@ def _finding_body(doc: Document, f: Finding, fid: str,
 
     doc.heading("Narrative", 2)
     doc.placeholder("Refine the plain-language summary below for management.")
-    doc.para(f"During testing, {f.title.lower()} was identified on "
-             f"{len(f.affected)} system(s). This condition could allow an "
-             f"attacker to weaken the security of the affected service.")
+    for paragraph in _narrative(f):
+        doc.para(paragraph)
 
     doc.heading("Finding Details", 2)
     doc.field("Finding ID", fid, mono=True)
