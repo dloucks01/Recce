@@ -81,6 +81,12 @@ you can sort and report by weakness class.
   shows **`—`** instead of a checkbox — no Web box without a web server, no
   SMB/AD box on a plain Linux host, no DB box without a database, no Priv-esc box
   until you've run `privesc` there. So a checked box always means real work.
+  (**SMB/AD** is a manual sign-off — it starts unchecked; tick it once you've
+  reviewed users/shares/roasting on that host.)
+- **Services** tab = one row per **open port**, grouped by IP, each with its own
+  **Status** dropdown — **☐ Not started / ◐ In progress / ☑ Done** — plus a Notes
+  cell. Done rows go green, in-progress amber. This is where you track exactly
+  which ports you've looked at, are working, or haven't touched yet.
 - **Overview** tab = every subnet in scope (even ones with no live hosts), showing
   addresses in range, live hosts found, and per-surface completion — so no subnet
   (or surface) gets missed.

@@ -97,8 +97,10 @@ def step_auto(host, step: str) -> bool:
         wp = _web_ports(host)
         return host.enumerated and bool(wp) and all(p.vuln_scanned for p in wp)
     if step == "smbad":
-        # SMB/LDAP/AD scripts run as part of the enum pass.
-        return host.enumerated
+        # Manual sign-off: the tool runs SMB/LDAP/AD scripts during enum, but
+        # reviewing users/shares/roasting/relay is operator work, so this box
+        # starts unchecked and is ticked by hand when you've actually reviewed it.
+        return False
     if step == "db":
         return host.db_scanned
     if step == "privesc":
