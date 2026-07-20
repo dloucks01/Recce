@@ -337,12 +337,21 @@ one issue spanning many systems is a single write-up listing every affected
 recce **auto-fills** everything it knows — Finding ID, title, affected systems,
 severity, CWE, CVE, tools/techniques used, a drafted vulnerability type and
 (CIA) security aspect, recommendations (from the offline KB), a plain-language
-narrative draft, and the raw **Evidence**. The fields only a tester can supply —
-**Mission Risk & Impact**, **Level of Difficulty**, and the step-by-step
-**walkthrough with screenshots** — are written as clearly-marked `[TESTER: …]`
-placeholders. You open each `.docx` in Word, finish it, and paste screenshots
-inline. **recce never overwrites an edited write-up** (re-run to add docs for new
-findings; `--overwrite` forces a rebuild).
+narrative draft, and the raw **Evidence**. It also **drafts the technical
+walkthrough step-by-step** — the discovery command (`nmap -sV -p …`), a
+confirmation step tailored to how it was detected (the NSE script, a `curl -I`
+header check, `ssl-enum-ciphers`, `netexec`…), and any mapped searchsploit
+exploit (`EDB-…`). The fields only a tester can supply — **Mission Risk &
+Impact**, **Level of Difficulty**, and the exploitation *result* + screenshots —
+are `[TESTER: …]` placeholders. You open each `.docx` in Word, finish it, and
+paste screenshots inline. **recce never overwrites an edited write-up** (re-run
+to add docs for new findings; `--overwrite` forces a rebuild).
+
+**Combined report.** Alongside the per-finding docs, `writeups` also produces
+`writeups/findings_report.docx` — a single document with a **severity summary
+table**, a **findings table** (ID · severity · title · CWE · affected hosts),
+and every finding as a section. It's a regenerated rollup (not hand-edited), so
+it always reflects the current data; skip it with `--no-combined`.
 
 The whole writer is **pure standard-library** (a `.docx` is a zip of XML, like
 the workbook) — no python-docx/Node needed, so it runs on the airgapped box.
@@ -505,7 +514,7 @@ are color-flagged).
 | `enumeration.xlsx` | **Start Here** (self-guide) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
-| `writeups/*.docx`  | One Word write-up per finding (`recce writeups`) — finish in Word |
+| `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) |
 | `recce.log`        | Scan errors / timeouts / incomplete hosts (also on the Overview tab) |
 | `results.sqlite`   | Normalized datastore (resume + re-report) |
 | `raw/*.xml`        | Every raw nmap XML, for auditing / re-parsing |
