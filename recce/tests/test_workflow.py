@@ -488,7 +488,8 @@ class MarkdownCsvFidelityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             md = os.path.join(d, "r.md")
             build_markdown(sample_hosts(), md, title="Eng", domains=[])
-            text = open(md).read()
+            with open(md) as fh:
+                text = fh.read()
         self.assertIn("Eng", text)
         self.assertIn("10.0.10.10", text)
         # The DC's finding is present and tied to the DC's IP line.
@@ -502,7 +503,8 @@ class MarkdownCsvFidelityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "s.csv")
             build_csv(sample_hosts(), p)
-            rows = list(csvmod.reader(open(p)))
+            with open(p) as fh:
+                rows = list(csvmod.reader(fh))
         hdr, data = rows[0], rows[1:]
         self.assertEqual(len(data), sum(len(FACTS[ip]["ports"]) for ip in FACTS))
         ipc, portc = hdr.index("ip"), hdr.index("port")
