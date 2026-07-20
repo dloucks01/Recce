@@ -19,29 +19,88 @@ from typing import Any
 COVERAGE_CATEGORIES = ["hosts", "services", "vulns", "exploits", "quick_wins", "accounts"]
 
 # Per-host workflow steps shown as checkboxes on the Checklist: header -> step id.
-STEP_COLUMNS = {"Enumerated": "enum", "Vuln-scan": "vuln", "DB": "db",
-                "Priv-esc": "privesc"}
+# Order is the natural workflow: identify -> broad vuln pass -> per-surface
+# deep-dives (only shown where that surface exists) -> post-exploitation.
+STEP_COLUMNS = {"Enumerated": "enum", "Vuln-scan": "vuln", "Web": "web",
+                "SMB/AD": "smbad", "DB": "db", "Priv-esc": "privesc"}
+
+# What a step cell shows when the step does not apply to a host (e.g. no web
+# server -> no Web box; a Linux box with no SMB -> no SMB/AD box). This is
+# rendered instead of a checkbox and is never counted as done or outstanding.
+STEP_NA = "—"   # em dash
+
+# Ports/service hints used to decide which per-surface steps apply to a host.
+_WEB_PORTS = {80, 443, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9443, 3000, 5000}
+_WEB_SVC_HINTS = ("http", "https", "www")
+_SMB_AD_PORTS = {88, 135, 139, 389, 445, 464, 636, 3268, 3269}
 
 
 def step_key(step: str, ip: str) -> str:
     return f"step:{step}:{ip}"
 
 
-def step_auto(host, step: str) -> bool:
-    """Tool-completion state for a step (the checkbox's default value).
+def _web_ports(host) -> list:
+    out = []
+    for p in host.open_ports:
+        svc = (p.service or "").lower()
+        if p.portid in _WEB_PORTS or any(k in svc for k in _WEB_SVC_HINTS):
+            out.append(p)
+    return out
 
-    A step is 'done' when the tool has completed it, or when it is not applicable
-    (a host with no open ports needs no vuln scan; a host with no DB needs no DB
-    scan). The operator can still override any of these on the sheet.
+
+def _is_windows_or_domain(host) -> bool:
+    fam = (host.os_family or host.os_name or "").lower()
+    if "windows" in fam:
+        return True
+    if host.roles or host.accounts:      # DC / SMB / LDAP enrichment landed
+        return True
+    return any(p.portid in _SMB_AD_PORTS for p in host.open_ports)
+
+
+def step_applies(host, step: str) -> bool:
+    """Whether a step is relevant to this host at all.
+
+    Non-applicable steps render as N/A on the Checklist rather than a checkbox,
+    so a checked box always means real work happened (a Linux box gets no AD box,
+    a host with no database gets no DB box, etc.).
+    """
+    if step == "enum":
+        return True
+    if step == "vuln":
+        return bool(host.open_ports)
+    if step == "web":
+        return bool(_web_ports(host))
+    if step == "smbad":
+        return _is_windows_or_domain(host)
+    if step == "db":
+        from . import db as dbmod
+        return bool(dbmod.db_ports(host))
+    if step == "privesc":
+        # Only relevant once there's a foothold to escalate from - which the tool
+        # learns about when the priv-esc phase is actually run against the host.
+        return host.privesc_checked
+    return False
+
+
+def step_auto(host, step: str) -> bool:
+    """Tool-completion (done) state for an APPLICABLE step - the checkbox default.
+
+    Only meaningful when step_applies(host, step) is true; callers render N/A for
+    steps that don't apply. The operator can still override any box on the sheet.
     """
     if step == "enum":
         return host.enumerated
     if step == "vuln":
         op = host.open_ports
-        return host.enumerated and (not op or all(p.vuln_scanned for p in op))
+        return host.enumerated and bool(op) and all(p.vuln_scanned for p in op)
+    if step == "web":
+        wp = _web_ports(host)
+        return host.enumerated and bool(wp) and all(p.vuln_scanned for p in wp)
+    if step == "smbad":
+        # SMB/LDAP/AD scripts run as part of the enum pass.
+        return host.enumerated
     if step == "db":
-        from . import db as dbmod
-        return host.enumerated and (not dbmod.db_ports(host) or host.db_scanned)
+        return host.db_scanned
     if step == "privesc":
         return host.privesc_checked
     return False

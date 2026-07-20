@@ -97,6 +97,10 @@ def _reconcile_steps(store: Store, step_edits: dict) -> None:
         except ValueError:
             continue
         host = store.get_host(ip)
+        # A step that no longer applies to the host carries no override.
+        if host and not tr.step_applies(host, step):
+            store.delete_tracking(key)
+            continue
         auto = tr.step_auto(host, step) if host else False
         if shown == auto:
             store.delete_tracking(key)     # follow the tool
@@ -874,21 +878,28 @@ def cmd_status(args: argparse.Namespace) -> int:
         c = cov[cat]
         print(f"  {labels[cat]:<13}[{bar(c['pct'])}] {c['pct']:3d}%  {c['done']}/{c['total']}")
 
-    # Tool progress (auto): per-step completion across all hosts.
-    from . import db as dbmod
-    enumerated = sum(1 for h in hosts if h.enumerated)
-    vuln_done = sum(1 for h in hosts if h.vuln_step in ("done", "n/a"))
-    db_hosts = [h for h in hosts if dbmod.db_ports(h)]
-    db_done = sum(1 for h in db_hosts if h.db_scanned)
+    # Tool progress (auto): per-step completion, counting only hosts the step
+    # applies to (a Linux box isn't counted against DB/SMB-AD coverage).
+    def phase_count(step):
+        applic = [h for h in hosts if tr.step_applies(h, step)]
+        return sum(1 for h in applic if tr.step_auto(h, step)), len(applic)
+
+    en_d, en_t = phase_count("enum")
+    vs_d, vs_t = phase_count("vuln")
+    web_d, web_t = phase_count("web")
+    ad_d, ad_t = phase_count("smbad")
+    db_d, db_t = phase_count("db")
     pe_done = sum(1 for h in hosts if h.privesc_checked)
     open_ports = [p for h in hosts for p in h.open_ports]
     scanned_ports = sum(1 for p in open_ports if p.vuln_scanned)
-    print("\n  Tool progress (auto) - per step, hosts complete / total:")
-    print(f"    Enumerated    {enumerated}/{len(hosts)}")
-    print(f"    Vuln-scanned  {vuln_done}/{len(hosts)}"
+    print("\n  Tool progress (auto) - per step, hosts complete / applicable:")
+    print(f"    Enumerated    {en_d}/{en_t}")
+    print(f"    Vuln-scanned  {vs_d}/{vs_t}"
           + (f"   ({scanned_ports}/{len(open_ports)} open ports)" if open_ports else ""))
-    print(f"    DB-scanned    {db_done}/{len(db_hosts)}   (hosts with DB services)")
-    print(f"    Priv-esc      {pe_done}/{len(hosts)}")
+    print(f"    Web           {web_d}/{web_t}   (hosts serving HTTP/HTTPS)")
+    print(f"    SMB/AD        {ad_d}/{ad_t}   (Windows / domain-facing hosts)")
+    print(f"    DB-scanned    {db_d}/{db_t}   (hosts with DB services)")
+    print(f"    Priv-esc      {pe_done}/{len(hosts)}   (post-exploitation performed)")
     pending = [h.ip for h in hosts if h.enumerated
                and any(not p.vuln_scanned for p in h.open_ports)]
     if pending:
@@ -918,9 +929,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     o = args.output_dir
     if not hosts:
         nxt = f"recce enum <targets> -o {o}   # nothing scanned yet"
-    elif enumerated < len(hosts) or vuln_done < len(hosts):
+    elif en_d < en_t or vs_d < vs_t:
         nxt = f"recce vulns --unscanned -o {o}   # vuln-scan the rest"
-    elif db_hosts and db_done < len(db_hosts):
+    elif db_t and db_d < db_t:
         nxt = f"recce db -o {o}   # enumerate the databases"
     elif pe_done < len(hosts):
         nxt = f"recce privesc -o {o}   # build the priv-esc playbook"
