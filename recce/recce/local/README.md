@@ -13,7 +13,11 @@ vectors and sensitive exposure — a linPEAS / winPEAS–style deep sweep.
 - `-q` / `-Quiet` — print findings only (skip the raw dumps).
 - `-o` / `-OutFile` — also write everything to a file.
 
-Lines marked **`[!]`** are worth a closer look.
+Lines marked **`[!]`** are worth a closer look. Each run ends with a
+**"How to exploit"** reference that maps every vector the script flags to the
+concrete escalation commands (GTFOBins/sudo/SUID/caps/cron/kernel on Linux;
+Potato/Se-privileges/services/GPP/DLL-hijack on Windows), so a `[!]` finding
+above has a matching how-to below.
 
 **Pre-flight it on the first run** — `-t` (Linux) / `-SelfTest` (Windows):
 parse-checks the script with the native parser (`bash -n` / the PowerShell
