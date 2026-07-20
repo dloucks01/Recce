@@ -12,9 +12,6 @@ identification (NSE `vuln` + `vulners`), and deep **Active Directory** analysis 
 DC identification, NTLM-relay target discovery, and credentialed LDAP
 enumeration of users, SPNs, roastable accounts, delegation, groups and trusts.
 
-> ⚠️ **Authorization required.** Only scan systems you have explicit, written
-> permission to test. The tool asks you to confirm authorization at startup.
-
 > 🚀 **New here? Read [QUICKSTART.md](QUICKSTART.md)** — a one-page guide that
 > gets you from zero to a filled-in workbook in five commands. There is also a
 > `./bin/recce` wrapper so you can skip typing `python3 -m recce`, and a
@@ -95,6 +92,7 @@ sudo python -m recce vulns 10.0.10.5 -o acme       # just one host
 sudo python -m recce vulns -o acme --only http smb # just web + SMB
 sudo python -m recce vulns -o acme --unscanned     # only what's left
 sudo python -m recce vulns -o acme --aggressive    # intrusive vuln NSE
+sudo python -m recce vulns -o acme --fast          # top-signal only + progress/ETA
 
 # ── Databases (per host / subnet / range, safe by default) ──
 sudo python -m recce db -o acme                    # all DB services
@@ -313,6 +311,25 @@ The playbook is generated offline from what `enum` already found (no scanning);
 `--scan` additionally runs the remote privesc NSE checks (`--aggressive` includes
 intrusive ones like MS08-067 that can crash services).
 
+### On-target enum → `ingest`
+
+recce ships two **read-only** on-target sweeps in `recce/local/` — `recce-enum.sh`
+(Linux) and `recce-enum.ps1` (Windows), a linPEAS/winPEAS-style deep dive that
+changes nothing on the host. Once you have a shell, run one on the target, save
+its output, and fold the `[!]` findings straight into that host's **Priv-Esc**
+sheet:
+
+```bash
+# on the target:
+./recce-enum.sh -o loot.txt                                  # Linux (-t self-tests)
+powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt # Windows (-SelfTest)
+# back on Kali:
+recce ingest loot.txt -o eng          # matches the host by name (or --host IP)
+```
+
+`ingest` needs no tools or network — it parses text recce itself produced. Findings
+land as rows tagged **on-target finding** at the top of the host's Priv-Esc section.
+
 ## Credentialed enumeration (`credenum`)
 
 Once you have valid creds, `credenum` runs the *authenticated* checks nmap can't
@@ -336,6 +353,10 @@ recce credenum -u alice -p 'Passw0rd!' -d corp.local --aggressive    # + secrets
 - **ssh** — Linux host-level checks (`id`, `sudo -l`, `uname`, SUID sweep);
   key auth or, for passwords, `sshpass` if present. Flags NOPASSWD sudo and
   unusual SUID binaries.
+
+At the end of the phase `credenum` prints a per-host **authentication
+success/fail table** (user account · privileged account · SSH), so you can see
+at a glance which creds worked where and which rows to re-check.
 
 Results fold into the normal model: accounts and shares land on **Users &
 Accounts**, roasted accounts flow into **AD Quick Wins**, and access/loot/weak-
@@ -470,10 +491,13 @@ For a time-boxed engagement, three levers cut wall-clock dramatically:
   `--subnet`, `--unscanned`).
 - **`--workers N`** — scan N hosts concurrently (default 6). The single biggest
   win for large scopes.
-- **`--fast`** — one **network-wide masscan sweep** finds open ports across the
-  whole scope at high packet-rate, then nmap scans *only* those host:port pairs
-  concurrently. Skips slow per-host `-p-` entirely. Falls back to nmap if masscan
-  isn't installed.
+- **`--fast`** — "go fast" end to end. On the sweep it runs one **network-wide
+  masscan** (open ports across the whole scope at high packet-rate, then nmap
+  scans *only* those host:port pairs; falls back to nmap if masscan is absent).
+  On the vuln pass (`vulns --fast`, or `scan --fast`) it runs **only the curated
+  top-signal detection scripts** — no broad `vuln and safe` category, no deep
+  service enum — and prints a live **progress % + ETA**, making a big `/24`
+  tractable. (`--aggressive` is the opposite end when you want maximum coverage.)
 - **`--refresh-every N`** — regenerate the workbook every N hosts (default 10) so
   you can start triaging in Excel while the scan continues. `0` disables.
 - **`--profile quick`** for first-pass triage (top-200 ports, no vuln scripts),
@@ -531,7 +555,7 @@ are color-flagged).
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) |

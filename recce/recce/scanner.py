@@ -411,7 +411,8 @@ def enum_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
 # --- phase 3b: vulnerability scan (targeted, safe-by-default) --------------------
 
 def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
-              creds: dict | None = None, aggressive: bool = False) -> str:
+              creds: dict | None = None, aggressive: bool = False,
+              fast: bool = False) -> str:
     """Per-open-port vulnerability pass.
 
     Safe by default, but deeper than the raw `vuln and safe` category: many
@@ -421,6 +422,11 @@ def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     non-destructive checks plus the deep service-enum scripts, with no flags to
     remember. `aggressive=True` adds the full intrusive `vuln` category
     (XSS/SQLi/DoS probes) and, if online, the `vulners` CVE lookup.
+
+    `fast=True` is the opposite end: run ONLY the curated `_VULN_DETECT`
+    top-signal checks - no broad `(vuln and safe)` category, no deep service
+    enum - so a whole /24 finishes quickly when you just want the high-value
+    hits. (`fast` and `aggressive` are mutually exclusive; aggressive wins.)
     """
     if not ports:
         return _empty_xml(out_xml), None
@@ -430,21 +436,27 @@ def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     # category expression OR a script name (each name portrule-filtered by nmap).
     if aggressive:
         selection = "(vuln or vulners)" if not profile.offline else "(vuln)"
+        named = _ENUM_SCRIPTS + _VULN_DETECT
+    elif fast:
+        selection = None                 # skip the broad category net entirely
+        named = _VULN_DETECT             # top-signal detection scripts only
     else:
         selection = "(vuln and safe)"    # broad safe net...
-    named = _ENUM_SCRIPTS + _VULN_DETECT   # ...always plus the misses it leaves
-    script_expr = ",".join([selection] + list(dict.fromkeys(named)))
+        named = _ENUM_SCRIPTS + _VULN_DETECT   # ...always plus the misses it leaves
+    parts = ([selection] if selection else []) + list(dict.fromkeys(named))
+    script_expr = ",".join(parts)
 
     # enum already did the heavy -sV; here we only need service names for NSE
     # portrules, so a light version probe (not a full re-scan) is enough.
     to_args, kill = _timeout_args(profile, profile.host_timeout * 2 if aggressive
                                   else None)
+    script_to = "90s" if fast else "180s"
     cmd = [
         "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
         "-sV", "--version-light",
         "-p", ",".join(str(p) for p in sorted(set(ports))),
         "--script", script_expr,
-        "--script-timeout", "180s", *to_args,
+        "--script-timeout", script_to, *to_args,
     ]
     cmd += _creds_args(creds)
     cmd += [ip, "-oX", out_xml]
