@@ -161,8 +161,8 @@ found, and auto-surface completion (Enumerated / Vuln-scanned / Web / DB) where
 the denominator counts only hosts that surface applies to. That's your guarantee
 no subnet — or surface — is missed.
 
-The **Reviewed** checkbox is your per-host sign-off (ticking it here or on the
-Hosts tab both count). `status` prints auto progress *and* your manual sign-off
+The **Reviewed** checkbox is your per-host sign-off (on the Checklist row).
+`status` prints auto progress *and* your manual sign-off
 counts (AD reviewed, Access, Priv-esc, Creds, Lateral) so you can see kill-chain
 coverage at a glance.
 
@@ -412,7 +412,7 @@ workbook is updated **in place**:
 - **rows you've already reviewed keep their position and your checkbox/notes**,
 - **new IPs/services are appended at the bottom** of each sheet (so nothing you've
   worked through shifts around), and
-- the Dashboard/Coverage/AD tabs recompute.
+- the Overview / Active Directory tabs recompute.
 
 Practical rule for a spreadsheet-only workflow: **do your tracking in the
 checkbox and `Notes` columns.** The tool re-lays-out the sheets each run, so those
