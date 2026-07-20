@@ -67,7 +67,7 @@ $hasImp = ($priv -match 'SeImpersonatePrivilege\s+.*Enabled') -or ($priv -match 
 if($hasImp){
   Finding "SeImpersonate / SeAssignPrimaryToken held -> Potato to SYSTEM on patched Win10/11 & Server 2016-2022:"
   Finding "   GodPotato / SigmaPotato (DCOM/RPC, most reliable), PrintSpoofer (spooler pipe),"
-  Finding "   SharpEfsPotato / EfsPotato (MS-EFSR), JuicyPotatoNG. e.g.  GodPotato -cmd \"cmd /c whoami\""
+  Finding '   SharpEfsPotato / EfsPotato (MS-EFSR), JuicyPotatoNG. e.g.  GodPotato -cmd "cmd /c whoami"'
 }
 if($priv -match 'SeBackupPrivilege\s+.*Enabled'){ Finding "SeBackupPrivilege -> read any file (SAM/SYSTEM/NTDS) -> hash dump" }
 if($priv -match 'SeRestorePrivilege\s+.*Enabled'){ Finding "SeRestorePrivilege -> write any file / service hijack -> SYSTEM" }
@@ -77,6 +77,9 @@ if($priv -match 'SeDebugPrivilege\s+.*Enabled'){ Finding "SeDebugPrivilege -> in
 Info "Group membership:"
 whoami /groups 2>$null | Where-Object { $_ -match 'S-1-|Administrators|BUILTIN' } | ForEach-Object { Info $_.Trim() }
 if((whoami /groups) -match 'S-1-5-32-544'){ Finding "Current token is in the local Administrators group (may need UAC bypass to use it)" }
+# Process integrity level (Medium = UAC-limited; High/System = already elevated).
+$il = (whoami /groups) 2>$null | Select-String 'Mandatory Level'
+if($il){ Info ("Integrity level: " + ($il -replace '.*Mandatory Level\s*','' -split '\s{2,}')[0]) }
 
 # ============================================================ users & groups
 Sec "Users, groups & password policy"
@@ -184,6 +187,61 @@ Info "Registry password search (bounded):"
 foreach($rk in @('HKLM:\SOFTWARE','HKCU:\SOFTWARE')){
   reg query ($rk -replace ':','') /f password /t REG_SZ /s 2>$null | Select-Object -First 15 | ForEach-Object { Info $_ }
 }
+# Group Policy Preferences cpassword - AES key is public, so these decrypt to
+# plaintext domain creds. Search SYSVOL (if reachable) + the local GPO cache.
+Info "GPP cpassword search (Groups.xml / Services.xml / etc.):"
+$gppPaths = @("$env:SystemRoot\SYSVOL", "$env:ProgramData\Microsoft\Group Policy\History",
+              "$env:ALLUSERSPROFILE\Microsoft\Group Policy\History")
+$dom = (Get-CimInstance Win32_ComputerSystem).Domain
+if($dom -and $dom -ne 'WORKGROUP'){ $gppPaths += "\\$dom\SYSVOL" }
+foreach($gp in $gppPaths){
+  Get-ChildItem -Path $gp -Recurse -Include Groups.xml,Services.xml,ScheduledTasks.xml,DataSources.xml,Printers.xml,Drives.xml -ErrorAction SilentlyContinue |
+    ForEach-Object {
+      if(Select-String -Path $_.FullName -Pattern 'cpassword' -Quiet){
+        Finding ("GPP cpassword in: " + $_.FullName + " -> gpp-decrypt the cpassword value")
+      }
+    }
+}
+# DPAPI master keys + credential blobs (decrypt offline / with mimikatz on a lab).
+Info "DPAPI master keys & credential blobs:"
+foreach($dp in @("$env:APPDATA\Microsoft\Protect","$env:LOCALAPPDATA\Microsoft\Credentials",
+                 "$env:APPDATA\Microsoft\Credentials","$env:SystemRoot\System32\config\systemprofile\AppData\Roaming\Microsoft\Protect")){
+  if(Test-Path $dp){ Get-ChildItem $dp -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Info ("   " + $_.FullName) } }
+}
+# Kerberos tickets in the current session.
+Info "Kerberos tickets (klist):"
+(klist) 2>$null | Select-String 'Client|Server|#' | Select-Object -First 20 | ForEach-Object { Info $_.ToString().Trim() }
+# Cloud / orchestration creds.
+foreach($cd in @("$env:USERPROFILE\.aws\credentials","$env:USERPROFILE\.azure","$env:USERPROFILE\.config\gcloud",
+                 "$env:USERPROFILE\.kube\config","$env:APPDATA\gcloud\credentials.db")){
+  if(Test-Path $cd){ Finding ("Cloud/orchestration creds present: " + $cd) }
+}
+# SCCM network-access account cache.
+foreach($sc in @("$env:SystemRoot\ccmcache","HKLM:\SOFTWARE\Microsoft\SMS")){
+  if(Test-Path $sc){ Info ("SCCM present: " + $sc + " (check for Network Access Account creds)") }
+}
+# App-specific stored sessions (often with recoverable passwords).
+Info "App credential stores (PuTTY / WinSCP / OpenVPN / FileZilla / VNC):"
+$ppk = RegGet 'HKCU:\SOFTWARE\SimonTatham\PuTTY\Sessions' 'HostName'
+if(Test-Path 'HKCU:\SOFTWARE\SimonTatham\PuTTY\Sessions'){ Finding "PuTTY saved sessions present (check ProxyPassword / stored keys)" }
+if(Test-Path 'HKCU:\SOFTWARE\Martin Prikryl\WinSCP 2\Sessions'){ Finding "WinSCP saved sessions present -> passwords are recoverable" }
+foreach($fz in @("$env:APPDATA\FileZilla\sitemanager.xml","$env:APPDATA\FileZilla\recentservers.xml")){
+  if(Test-Path $fz){ Finding ("FileZilla stored servers: " + $fz + " (Base64 passwords)") }
+}
+Get-ChildItem "$env:USERPROFILE\OpenVPN\config","$env:PROGRAMFILES\OpenVPN\config" -Filter *.ovpn -ErrorAction SilentlyContinue | ForEach-Object { Info ("OpenVPN config: " + $_.FullName) }
+foreach($vnc in @('HKLM:\SOFTWARE\RealVNC\vncserver','HKLM:\SOFTWARE\TightVNC\Server','HKCU:\SOFTWARE\ORL\WinVNC3\Password')){
+  if(Test-Path $vnc){ Finding ("VNC server config present: " + $vnc + " (recoverable password)") }
+}
+# RDP saved connections + password-manager databases + browser creds.
+if(Test-Path 'HKCU:\SOFTWARE\Microsoft\Terminal Server Client\Servers'){
+  Info "Saved RDP connections:"; (Get-ChildItem 'HKCU:\SOFTWARE\Microsoft\Terminal Server Client\Servers').PSChildName | ForEach-Object { Info ("   " + $_) }
+}
+Get-ChildItem $env:USERPROFILE -Recurse -Include *.kdbx,*.kdb,*.psafe3,*.opvault -ErrorAction SilentlyContinue | ForEach-Object { Finding ("Password-manager DB: " + $_.FullName) } | Select-Object -First 10
+foreach($br in @("$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data",
+                 "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Login Data")){
+  if(Test-Path $br){ Finding ("Browser saved-login DB: " + $br + " (DPAPI-protected; decrypt on the host)") }
+}
+Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles" -Recurse -Include logins.json,key4.db -ErrorAction SilentlyContinue | ForEach-Object { Finding ("Firefox creds: " + $_.FullName) }
 
 # ============================================================ hardening state
 Sec "OS hardening & defences"
@@ -198,6 +256,57 @@ try{ $dg = (Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microso
 try{ $mp = Get-MpComputerStatus; Info ("Defender: RealTime=" + $mp.RealTimeProtectionEnabled + " Tamper=" + $mp.IsTamperProtected) }catch{ Info "Defender status: n/a" }
 Info ("Language mode: " + $ExecutionContext.SessionState.LanguageMode)
 try{ (Get-AppLockerPolicy -Effective -Xml) | Out-Null; Info "AppLocker policy present (review allowed paths)" }catch{ Info "AppLocker: none/unavailable" }
+# UAC detail (bypass surface) + token-filter policy (pass-the-hash local admin).
+$cpa = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorAdmin'
+$fat = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'FilterAdministratorToken'
+$latfp = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'LocalAccountTokenFilterPolicy'
+Info ("UAC ConsentPromptBehaviorAdmin=" + $cpa + "  FilterAdministratorToken=" + $fat)
+if($latfp -eq 1){ Finding "LocalAccountTokenFilterPolicy=1 -> local admin accounts usable remotely (PtH-friendly)" }
+# PowerShell logging (if off, your activity is quieter; PSv2 dodges AMSI/CLM/logging).
+$sbl = RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging' 'EnableScriptBlockLogging'
+$ml  = RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging' 'EnableModuleLogging'
+$tr  = RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription' 'EnableTranscripting'
+Info ("PowerShell logging: ScriptBlock=" + $sbl + " Module=" + $ml + " Transcription=" + $tr)
+if((Test-Path "$env:WINDIR\Microsoft.NET\Framework\v2.0.50727") -or (Test-Path "$env:WINDIR\Microsoft.NET\Framework64\v2.0.50727")){
+  Info ".NET 2.0 present -> PowerShell v2 (powershell -v 2) downgrade dodges AMSI / SBL / CLM"
+}
+# LAPS (managed local-admin password) - reachable to some principals.
+if((Test-Path "$env:ProgramFiles\LAPS\CSE\AdmPwd.dll") -or (RegGet 'HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd' 'AdmPwdEnabled')){
+  Info "LAPS present -> if you can read ms-Mcs-AdmPwd in AD, you have the local admin password"
+}
+# BitLocker.
+try{ (Get-BitLockerVolume -MountPoint C: 2>$null) | ForEach-Object { Info ("BitLocker C: " + $_.ProtectionStatus) } }catch{}
+# NTLM / SMB posture.
+$lmc = RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LmCompatibilityLevel'
+Info ("LmCompatibilityLevel=" + $lmc + "  (<3 allows weak NTLM/LM)")
+try{ Info ("SMB signing required(server)=" + (Get-SmbServerConfiguration).RequireSecuritySignature) }catch{}
+# WSUS over HTTP -> attacker-in-the-middle can push a malicious update (SYSTEM).
+$wus = RegGet 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' 'WUServer'
+if($wus){ Info ("WSUS server: " + $wus); if($wus -match '^http://'){ Finding ("WSUS over cleartext HTTP (" + $wus + ") -> WSUSpect / update injection to SYSTEM") } }
+# Sysmon (are your actions being recorded?).
+if(Get-Service -Name Sysmon*,Sysmon64 -ErrorAction SilentlyContinue){ Info "Sysmon service present (activity is being logged)" }
+
+# ============================================================ AV / EDR
+Sec "AV / EDR detection"
+Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct 2>$null | ForEach-Object { Info ("AV product: " + $_.displayName) }
+$edr = 'CarbonBlack|cb.exe|cylance|CrowdStrike|csagent|SentinelOne|sentinel|cortex|traps|Sophos|MsMpEng|windefend|elastic|winlogbeat|xagt|FireEye|Tanium|Qualys|CylanceSvc|CSFalcon|WdFilter'
+Get-Process 2>$null | Where-Object { $_.Name -match $edr } | Select-Object -Unique Name | ForEach-Object { Finding ("EDR/AV process: " + $_.Name) }
+Get-Service 2>$null | Where-Object { $_.Name -match $edr -or $_.DisplayName -match $edr } | Select-Object -Unique Name | ForEach-Object { Info ("EDR/AV service: " + $_.Name) }
+
+# ============================================================ named pipes / IFEO
+Sec "Named pipes & image-hijack autoruns"
+Info "Named pipes (pipe abuse / impersonation surface):"
+try{
+  [System.IO.Directory]::GetFiles("\\.\pipe\") | ForEach-Object { $_ -replace '\\\\\.\\pipe\\','' } |
+    Sort-Object -Unique | Select-Object -First 40 | ForEach-Object { Info ("   " + $_) }
+}catch{ Info "   (could not enumerate named pipes)" }
+# Image File Execution Options debuggers + Winlogon userinit/shell hijacks.
+Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options' 2>$null | ForEach-Object {
+  $d = RegGet $_.PSPath 'Debugger'; if($d){ Finding ("IFEO debugger set on " + $_.PSChildName + " -> " + $d) }
+}
+$ui = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'Userinit'
+$sh = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'Shell'
+Info ("Winlogon Userinit=" + $ui + "  Shell=" + $sh + " (non-default values are suspicious / hijackable)")
 
 # ============================================================ PATH / writable dirs
 Sec "PATH & writable-directory hijack"
@@ -225,12 +334,18 @@ Info "Listening / connections:"; (netstat -ano) 2>$null | Select-String 'LISTENI
 Info "Routes:"; (route print) 2>$null | Select-Object -First 20 | ForEach-Object { Info $_ }
 Info "Shares:"; Get-SmbShare 2>$null | ForEach-Object { Info ($_.Name + "  " + $_.Path) }
 Info ("Firewall profiles: "); (Get-NetFirewallProfile 2>$null) | ForEach-Object { Info ("   " + $_.Name + " enabled=" + $_.Enabled) }
+# RDP exposure + NLA (NLA off widens the attack surface / allows some CVEs).
+$rdpDeny = RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' 'fDenyTSConnections'
+$nla     = RegGet 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' 'UserAuthentication'
+Info ("RDP enabled=" + ($rdpDeny -eq 0) + "  NLA required=" + ($nla -eq 1))
+if($rdpDeny -eq 0 -and $nla -ne 1){ Finding "RDP enabled with NLA OFF -> broader pre-auth surface" }
 
 # ============================================================ processes / misc
 Sec "Processes running as SYSTEM / other users"
 Get-CimInstance Win32_Process | ForEach-Object {
-  $o = $_.GetOwner(); if($o.User){ "{0,-28} pid={1,-6} {2}\{3}" -f $_.Name,$_.ProcessId,$o.Domain,$o.User }
-} 2>$null | Sort-Object -Unique | Select-Object -First 60 | ForEach-Object { Info $_ }
+  $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue
+  if($o.User){ "{0,-28} pid={1,-6} {2}\{3}" -f $_.Name,$_.ProcessId,$o.Domain,$o.User }
+} | Sort-Object -Unique | Select-Object -First 60 | ForEach-Object { Info $_ }
 
 Sec "Environment variables"
 Get-ChildItem Env: | ForEach-Object { Info ($_.Name + "=" + $_.Value) }

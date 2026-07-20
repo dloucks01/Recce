@@ -25,16 +25,23 @@ NFS `no_root_squash`, credential hunting (SSH keys, history, `.env`/app configs,
 cloud creds, Kerberos ccache/keytab, GPG), root-process `/proc/*/environ` leaks,
 web-app config files, writable shared-library dirs, network, installed software.
 
-**Windows:** OS/build + hotfixes (for WES-NG), token privileges → **Potato**
-recommendations (SeImpersonate → GodPotato/PrintSpoofer/EfsPotato/JuicyPotatoNG),
-SeBackup/Restore/TakeOwnership/LoadDriver/Debug, users/groups/password policy,
-services (unquoted paths, writable binaries/keys), scheduled tasks,
-AlwaysInstallElevated, autoruns & startup, credential hunting (cmdkey, autologon,
-unattend/sysprep, SAM/SYSTEM backups, PowerShell history, WiFi keys, IIS
-web.config, registry password search), hardening state (UAC, WDigest, LSA PPL,
-Credential/Device Guard, Defender, AppLocker, language mode), writable
-PATH/Program Files dirs (DLL hijack), installed software, network, SYSTEM
-processes, environment.
+**Windows** (modelled on winPEAS / PrivescCheck / Seatbelt / PowerUp):
+OS/build + hotfixes (for WES-NG), token privileges → **Potato** recommendations
+(SeImpersonate → GodPotato/PrintSpoofer/EfsPotato/JuicyPotatoNG) +
+SeBackup/Restore/TakeOwnership/LoadDriver/Debug, integrity level, users/groups/
+password policy; services (unquoted paths, writable binaries/registry keys),
+scheduled tasks, AlwaysInstallElevated, autoruns + **IFEO/Winlogon** hijacks.
+**Credential hunting:** cmdkey, registry autologon, unattend/sysprep, SAM/SYSTEM
+backups, PowerShell history, WiFi keys, IIS web.config, registry password search,
+**GPP cpassword** (SYSVOL + GPO cache), **DPAPI master keys**, **Kerberos tickets**
+(klist), cloud creds (AWS/Azure/GCP/kube), SCCM cache, app stores
+(PuTTY/WinSCP/FileZilla/OpenVPN/VNC), **saved RDP**, password-manager DBs, browser
+login DBs. **Hardening/defence state:** UAC detail + LocalAccountTokenFilterPolicy,
+WDigest, LSA PPL, Credential/Device Guard, **PowerShell logging** (SBL/module/
+transcription) + PSv2 downgrade, LAPS, BitLocker, LmCompatibilityLevel/SMB signing,
+**WSUS-over-HTTP**, Sysmon, **AV/EDR detection**, AppLocker, language mode.
+**Also:** DLL-hijack dirs (PATH/Program Files), named pipes, RDP/NLA config,
+installed software, network + firewall + shares, SYSTEM processes, environment.
 
 ## Safety & AV
 
