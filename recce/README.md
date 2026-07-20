@@ -194,26 +194,44 @@ but cheap:
 - **SNMP/DNS/misc**: `snmp-info`, `dns-zone-transfer`, `nfs-showmount`, `rpcinfo`,
   `vnc-info`, `telnet-encryption`, `rdp-enum-encryption`
 
-**Two vulnerability channels feed the Vulnerabilities sheet:**
+**Four vulnerability channels feed the Vulnerabilities sheet** (all work
+airgapped, none need internet):
 
-1. **NSE `vuln` category** (local, works airgapped) plus **weak-config findings**
-   parsed from the enumeration scripts above — anonymous FTP, weak/expired TLS,
-   risky HTTP methods, empty DB passwords, cleartext Telnet, SMTP open relay,
-   exposed Redis/Mongo, SNMP community strings, DNS zone transfer, etc. — each
-   assigned a severity.
-2. **`searchsploit` (Exploit-DB, offline)** maps every service's product+version
-   to known public exploits and lists them on a dedicated **Exploits** sheet
-   (EDB-ID, type, title, CVEs, local path). This is the offline replacement for
-   nmap's `vulners` script, which needs internet.
+1. **NSE `vuln` category** (local) plus **weak-config findings** parsed from the
+   enumeration scripts above — anonymous FTP, weak/expired TLS, risky HTTP
+   methods, empty DB passwords, cleartext Telnet, SMTP open relay, exposed
+   Redis/Mongo, SNMP community strings, DNS zone transfer, etc.
+2. **Offline version→CVE engine** (`vulndb.py`) — a curated knowledge base of
+   50+ high-signal signatures that matches the product+version data `enum`
+   already collected against known CVEs, with a description and **remediation**.
+   Covers FTP/SSH/web servers, Samba/SMB, databases, CI/web apps (Jenkins,
+   Tomcat, Drupal, Confluence, GitLab, Grafana…), VPN/edge appliances (Fortinet,
+   Pulse, Citrix, Palo Alto), Exchange, and default-credential advisories for
+   Tomcat/Jenkins/iLO/iDRAC. This is the airgapped replacement for nmap's
+   internet-only `vulners` script. Findings are tagged `likely` (a concrete
+   version range matched) or `potential` (a product-only advisory lead).
+3. **Pure-Python enrichment probes** (`probes.py`, stdlib only) — an active
+   layer stock Kali needs extra tooling (testssl.sh, nikto, httpx) for:
+   **HTTP security-header analysis** (missing HSTS/CSP/X-Frame-Options/
+   X-Content-Type-Options, version-disclosing `Server` banners) and **TLS
+   certificate & protocol analysis** (expired/self-signed/soon-to-expire certs,
+   hostname mismatch, negotiable SSLv3/TLS 1.0/1.1). Disable with `--no-probes`.
+4. **`searchsploit` (Exploit-DB, offline)** maps every service's product+version
+   to known public exploits on a dedicated **Exploits** sheet (EDB-ID, type,
+   title, CVEs, local path).
+
+Every finding also carries **CWE** references (in a dedicated column) alongside
+its CVEs, so you can group and report weaknesses by class.
 
 > **Airgapped tip:** run with `--offline` to drop the internet-dependent
 > `vulners` script; you still get the local `vuln` category, all weak-config
-> findings, and `searchsploit` exploit mapping. Install `exploitdb` for
-> searchsploit (`apt install exploitdb`, and it ships on Kali).
+> findings, the offline version→CVE engine, the HTTP/TLS probes, and
+> `searchsploit` exploit mapping. Install `exploitdb` for searchsploit
+> (`apt install exploitdb`, and it ships on Kali).
 
 Toggles (on `vulns`/`scan`): `--aggressive`, `--offline`, `--no-searchsploit`,
-`--udp-top N`, plus positional targets, `--only`, `--unscanned` to target a
-subset.
+`--no-probes`, `--udp-top N`, plus positional targets, `--only`, `--unscanned`
+to target a subset.
 
 ## Databases (`db`)
 
@@ -423,7 +441,8 @@ recce/               the package (python -m recce)
   db.py              database detection + engine-specific NSE + inventory
   privesc.py         Windows/Linux priv-esc findings + playbook knowledge base
   exploits.py        offline exploit mapping via searchsploit (Exploit-DB)
-  vulndb.py          offline version->CVE vulnerability engine (+ remediation)
+  vulndb.py          offline version->CVE/CWE vulnerability engine (+ remediation)
+  probes.py          stdlib HTTP-header + TLS enrichment probes (airgapped)
   tracking.py        coverage + per-step keys, progress computation (shared)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)
   store.py           SQLite datastore: hosts + domains + tracking, merge-on-rescan
