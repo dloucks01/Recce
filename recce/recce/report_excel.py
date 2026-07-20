@@ -32,6 +32,14 @@ CHECKBOX_HEADERS = {"Reviewed", "Checked", "Triaged"}
 CHECKLIST_TITLE = "Checklist"
 Tracking = dict  # {key: (reviewed_bool, notes_str)}
 
+# Per-port tri-state work status (Services sheet): a tester marks each open port
+# not-started / in-progress / done. Symbol-prefixed so the cell reads at a glance.
+STATUS_TODO = "☐ Not started"
+STATUS_WIP = "◐ In progress"
+STATUS_DONE = "☑ Done"
+STATUS_VALUES = [STATUS_TODO, STATUS_WIP, STATUS_DONE]
+STATUS_HEADERS = {"Status"}
+
 _SEV_STYLE = {
     "critical": "sev_critical", "high": "sev_high", "medium": "sev_medium",
     "low": "sev_low", "info": "sev_info",
@@ -131,11 +139,14 @@ def _styler_accounts(d: dict) -> dict:
 # --- tracked-sheet specs --------------------------------------------------------
 
 def _spec_services(hosts: list[Host]) -> SheetSpec:
+    """One row per open port, grouped by IP. Each port has its own tri-state work
+    Status (not started / in progress / done) and a Notes cell, so a tester can
+    track exactly which ports they've looked at, are working, or haven't touched."""
     cols = [
-        ("Checked", "checkbox", 9), ("IP", "data", 16),
+        ("Status", "status", 15), ("IP", "data", 16),
         ("Hostname", "data", 24), ("Port", "data", 7), ("Proto", "data", 6),
         ("Service", "data", 16), ("Product", "data", 22), ("Version", "data", 16),
-        ("Extra info", "data", 24), ("CPE", "data", 30), ("Notes", "notes", 28),
+        ("Extra info", "data", 24), ("CPE", "data", 30), ("Notes", "notes", 30),
         ("Key", "key", 4),
     ]
     rows = []
@@ -305,7 +316,9 @@ def _spec_accounts(hosts: list[Host]) -> SheetSpec:
 # --- writing a tracked sheet (with stable ordering) ------------------------------
 
 def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
-                order: list[str] | None = None) -> None:
+                order: list[str] | None = None,
+                statuses: dict | None = None) -> None:
+    statuses = statuses or {}
     sheet.write([(h, "header") for h, _, _ in spec.cols])
 
     rows_by_key = {r["key"]: r for r in spec.rows}
@@ -343,6 +356,11 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
                 shown = tracking[stepkey][0] if stepkey in tracking else auto
                 cells.append(xlsx.CHECK_ON if shown else xlsx.CHECK_OFF)
                 active_check_rows.setdefault(ci, []).append(excel_row)
+            elif role == "status":
+                # Explicit tri-state wins; otherwise fall back to the reviewed
+                # flag (a port already marked done shows Done, else Not started).
+                cells.append(statuses.get(key)
+                             or (STATUS_DONE if rev else STATUS_TODO))
             elif role == "notes":
                 cells.append(note)
             elif role == "key":
@@ -371,6 +389,10 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             sqref = " ".join(f"{letter}{r}" for r in active)
             sheet.dropdown(i, 2, last, sqref=sqref)
             sheet.green_when_true(i, 2, last, sqref=sqref)
+        elif role == "status":
+            sheet.dropdown(i, 2, last, values=STATUS_VALUES)
+            sheet.highlight_when_equal(i, 2, last, STATUS_DONE, dxf_id=0)  # green
+            sheet.highlight_when_equal(i, 2, last, STATUS_WIP, dxf_id=1)   # amber
         elif h in CHECKBOX_HEADERS:
             sheet.dropdown(i, 2, last)
             sheet.green_when_true(i, 2, last)
@@ -391,13 +413,17 @@ def _build_guide(wb, meta: dict) -> None:
     sh.write([("How to use it", "title")])
     for line in [
         "1. Go to the CHECKLIST tab - one row per IP, a checkbox for each step.",
-        "2. Step boxes (Enumerated / Vuln-scan / DB / Priv-esc) turn green (TRUE) "
-        "automatically when the tool finishes that step for the host.",
+        "2. Step boxes (Enumerated / Vuln-scan / Web / SMB/AD / DB / Priv-esc) turn "
+        "green automatically when the tool finishes that step. Steps that don't "
+        "apply to a host show '—' instead of a box; SMB/AD is a manual sign-off.",
         "3. You can tick/untick any box by hand - your choice sticks (untick to "
         "flag 'redo'). Tick 'Reviewed' when you're personally done with a host.",
         "4. The boxes are ☑ / ☐ dropdowns: click the cell and pick ☑ to check it.",
-        "5. Filter a step column to ☐ to see exactly which hosts still need it.",
-        "6. The OVERVIEW tab and the `status` command show overall progress.",
+        "5. Use the SERVICES tab to track each open PORT: set its Status dropdown "
+        "to Not started / In progress / Done and jot findings in Notes.",
+        "6. Filter a step column to ☐ (or Services Status to 'Not started') to see "
+        "exactly what still needs work.",
+        "7. The OVERVIEW tab and the `status` command show overall progress.",
     ]:
         sh.write([line])
     sh.write([""])
@@ -415,7 +441,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
         ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
-        ("Services", "Every open port with product/version; filter by product."),
+        ("Services", "Every open port + a per-port Status (not started / in "
+                     "progress / done) and Notes - track each port you work."),
         ("Services by Product", "Who runs the same service+version (mass-patch view)."),
     ]:
         sh.write([tab, desc])
@@ -578,11 +605,13 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
                    domains: list[Domain] | None = None,
                    tracking: Tracking | None = None,
                    order_map: dict | None = None,
-                   scope: dict | None = None) -> str:
+                   scope: dict | None = None,
+                   statuses: dict | None = None) -> str:
     meta = meta or {}
     domains = domains or []
     tracking = tracking or {}
     order_map = order_map or {}
+    statuses = statuses or {}
     wb = xlsx.Workbook()
     _build_guide(wb, meta)
     _build_overview(wb, hosts, meta, domains, tracking, scope)
@@ -590,12 +619,14 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     for spec in pre:
         if spec.skip_if_empty and not spec.rows:
             continue
-        _write_spec(wb.add_sheet(spec.title), spec, tracking, order_map.get(spec.title))
+        _write_spec(wb.add_sheet(spec.title), spec, tracking,
+                    order_map.get(spec.title), statuses)
     _build_active_directory(wb, hosts, domains)
     for spec in post:
         if spec.skip_if_empty and not spec.rows:
             continue
-        _write_spec(wb.add_sheet(spec.title), spec, tracking, order_map.get(spec.title))
+        _write_spec(wb.add_sheet(spec.title), spec, tracking,
+                    order_map.get(spec.title), statuses)
     wb.save(out_path)
     return out_path
 
@@ -603,7 +634,8 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
 def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
                     domains: list[Domain] | None = None,
                     tracking: Tracking | None = None,
-                    scope: dict | None = None) -> str:
+                    scope: dict | None = None,
+                    statuses: dict | None = None) -> str:
     """Regenerate preserving existing row order (new rows appended) + tracking.
 
     The tool re-lays-out the sheet each time; the operator's checkboxes, notes and
@@ -611,7 +643,8 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
     adds is not preserved - track via the checkbox/Notes columns.)
     """
     order_map = read_key_order(path) if os.path.exists(path) else {}
-    return build_workbook(hosts, path, meta, domains, tracking, order_map, scope)
+    return build_workbook(hosts, path, meta, domains, tracking, order_map, scope,
+                          statuses)
 
 
 def read_key_order(path: str) -> dict[str, list[str]]:
@@ -632,13 +665,15 @@ def read_key_order(path: str) -> dict[str, list[str]]:
     return order
 
 
-def read_workbook_tracking(path: str) -> Tracking:
-    """{key: (reviewed_bool, notes)} for every row carrying a Key value."""
+def read_workbook_edits(path: str) -> tuple[Tracking, dict]:
+    """Parse operator edits once. Returns ({key: (reviewed, notes)}, {key: status})
+    where `status` holds the per-port tri-state from any Status column."""
     result: Tracking = {}
+    statuses: dict = {}
     try:
         sheets = xlsx.read_sheets(path)
     except Exception:
-        return result
+        return result, statuses
     def as_bool(v) -> bool:
         s = str(v).strip()
         return s == xlsx.CHECK_ON or s.upper() in ("TRUE", "1", "X", "YES", "DONE")
@@ -668,14 +703,26 @@ def read_workbook_tracking(path: str) -> Tracking:
         if "Key" not in header:
             continue
         kidx = header.index("Key")
-        cbidx = next((i for i, h in enumerate(header) if h in CHECKBOX_HEADERS), 0)
+        cbidx = next((i for i, h in enumerate(header) if h in CHECKBOX_HEADERS), None)
+        stidx = next((i for i, h in enumerate(header) if h in STATUS_HEADERS), None)
         nidx = header.index("Notes") if "Notes" in header else None
         for r in rows[1:]:
             if len(r) <= kidx or not r[kidx]:
                 continue
-            reviewed = as_bool(r[cbidx]) if cbidx < len(r) else False
-            note = r[nidx] if (nidx is not None and nidx < len(r)) else ""
             key = str(r[kidx])
+            note = r[nidx] if (nidx is not None and nidx < len(r)) else ""
+            status = ""
+            if stidx is not None and stidx < len(r):
+                status = str(r[stidx]).strip()
+            # reviewed comes from a real checkbox, or from a tri-state Status == Done.
+            if cbidx is not None and cbidx < len(r):
+                reviewed = as_bool(r[cbidx])
+            elif status:
+                reviewed = status == STATUS_DONE
+            else:
+                reviewed = False
+            if status:
+                statuses[key] = status
             # A key can appear on more than one sheet (e.g. Checklist + Hosts both
             # carry host:<ip>). Combine: reviewed if ticked anywhere; keep a note.
             prev = result.get(key)
@@ -683,4 +730,14 @@ def read_workbook_tracking(path: str) -> Tracking:
                 result[key] = (prev[0] or reviewed, prev[1] or note)
             else:
                 result[key] = (reviewed, note)
-    return result
+    return result, statuses
+
+
+def read_workbook_tracking(path: str) -> Tracking:
+    """{key: (reviewed_bool, notes)} for every row carrying a Key value."""
+    return read_workbook_edits(path)[0]
+
+
+def read_workbook_status(path: str) -> dict:
+    """{key: status_str} for rows whose sheet has a tri-state Status column."""
+    return read_workbook_edits(path)[1]

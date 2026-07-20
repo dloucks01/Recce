@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS tracking (
     key      TEXT PRIMARY KEY,
     reviewed INTEGER DEFAULT 0,
     notes    TEXT DEFAULT '',
+    status   TEXT DEFAULT '',
     updated  TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS meta (
@@ -46,7 +47,15 @@ class Store:
         self.path = path
         self.conn = sqlite3.connect(path)
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a datastore was first created."""
+        with closing(self.conn.cursor()) as cur:
+            cols = {r[1] for r in cur.execute("PRAGMA table_info(tracking)").fetchall()}
+            if "status" not in cols:
+                cur.execute("ALTER TABLE tracking ADD COLUMN status TEXT DEFAULT ''")
 
     def close(self) -> None:
         self.conn.close()
@@ -229,6 +238,31 @@ class Store:
         with closing(self.conn.cursor()) as cur:
             rows = cur.execute("SELECT key, reviewed, notes FROM tracking").fetchall()
         return {r[0]: (bool(r[1]), r[2] or "") for r in rows}
+
+    def bulk_set_status(self, items: dict[str, tuple], when: str = "") -> int:
+        """items: {key: (status_str, reviewed_bool, notes)}. Persists a per-item
+        tri-state status (e.g. a per-port 'in progress') alongside the reviewed
+        flag so coverage still works (reviewed True == the port is done)."""
+        n = 0
+        with closing(self.conn.cursor()) as cur:
+            for key, (status, reviewed, notes) in items.items():
+                cur.execute(
+                    "INSERT INTO tracking(key, reviewed, notes, status, updated) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                    "reviewed=excluded.reviewed, notes=excluded.notes, "
+                    "status=excluded.status, updated=excluded.updated",
+                    (key, 1 if reviewed else 0, notes or "", status or "", when),
+                )
+                n += 1
+        self.conn.commit()
+        return n
+
+    def get_statuses(self) -> dict[str, str]:
+        """Return {key: status_str} for rows that carry a non-empty status."""
+        with closing(self.conn.cursor()) as cur:
+            rows = cur.execute(
+                "SELECT key, status FROM tracking WHERE status != ''").fetchall()
+        return {r[0]: r[1] for r in rows}
 
     def set_meta(self, key: str, value: str) -> None:
         with closing(self.conn.cursor()) as cur:
