@@ -76,6 +76,11 @@ def _subnet_sort_key(subnet: str):
 _STEP_WIDTHS = {"Enumerated": 11, "Vuln-scan": 11, "Web": 7, "AD": 6, "DB": 6,
                 "Access": 8, "Priv-esc": 10, "Creds": 8, "Lateral": 8}
 
+# How many leading identity columns to freeze per sheet (in addition to the
+# header row), so the host IP stays on-screen while scrolling through the wide
+# right-hand columns. 0 (default) freezes only the header row.
+_FREEZE_COLS = {"Checklist": 3, "Services": 2, "Vulnerabilities": 3}
+
 
 def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     """One row per IP, grouped by subnet, with a checkbox for each workflow step.
@@ -234,6 +239,43 @@ def _spec_exploits(hosts: list[Host]) -> SheetSpec:
     return SheetSpec("Exploits", cols, rows, skip_if_empty=True)
 
 
+def _clip(text: str, limit: int = 2000) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + " ...[truncated]"
+
+
+def _styler_raw(d: dict) -> dict:
+    return {"Output": "wrap"}
+
+
+def _spec_raw_output(hosts: list[Host]) -> SheetSpec:
+    """Raw NSE script output, verbatim - one row per script run (host- or
+    port-level). The unparsed evidence behind the parsed sheets: whatever nmap's
+    scripts printed, kept as-is so a tester can read the source, cite it in a
+    write-up, or catch something the parsers didn't surface."""
+    cols = [
+        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 20),
+        ("Port", "data", 7), ("Script", "data", 26), ("Output", "data", 90),
+        ("Notes", "notes", 26), ("Key", "key", 4),
+    ]
+    rows = []
+    for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
+        for s in h.host_scripts:
+            if not (s.output or "").strip():
+                continue
+            rows.append({"key": f"raw:{h.ip}:host:{s.id}", "data": {
+                "IP": h.ip, "Hostname": h.hostname, "Port": "host",
+                "Script": s.id, "Output": _clip(s.output)}})
+        for p in sorted(h.open_ports, key=lambda p: p.portid):
+            for s in p.scripts:
+                if not (s.output or "").strip():
+                    continue
+                rows.append({"key": f"raw:{h.ip}:{p.portid}:{s.id}", "data": {
+                    "IP": h.ip, "Hostname": h.hostname, "Port": p.portid,
+                    "Script": s.id, "Output": _clip(s.output)}})
+    return SheetSpec("Scan Output", cols, rows, _styler_raw, skip_if_empty=True)
+
+
 def _styler_databases(d: dict) -> dict:
     return {"Auth": "sev_high"} if d.get("Auth") else {}
 
@@ -351,35 +393,44 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
         checks = row.get("checks", {})   # {header: (stepkey, auto_default, applies)}
         rev, note = tracking.get(key, (False, ""))
         styles = spec.styler(data) if spec.styler else {}
+        band = (excel_row % 2 == 0)      # zebra-stripe even data rows
+        data_style = "cell_band" if band else "cell"
+        center_style = "center_band" if band else "center"
         cells = []
         for ci, (header, role, _w) in enumerate(spec.cols, start=1):
             if role == "checkbox":
-                cells.append(xlsx.CHECK_ON if rev else xlsx.CHECK_OFF)
+                cells.append((xlsx.CHECK_ON if rev else xlsx.CHECK_OFF, center_style))
             elif role == "check":
                 stepkey, auto, applies = checks.get(header, ("", False, True))
                 if not applies:
-                    cells.append(tr.STEP_NA)     # not relevant to this host
+                    cells.append((tr.STEP_NA, center_style))  # not relevant here
                     continue
                 shown = tracking[stepkey][0] if stepkey in tracking else auto
-                cells.append(xlsx.CHECK_ON if shown else xlsx.CHECK_OFF)
+                cells.append((xlsx.CHECK_ON if shown else xlsx.CHECK_OFF, center_style))
                 active_check_rows.setdefault(ci, []).append(excel_row)
             elif role == "status":
                 # Explicit tri-state wins; otherwise fall back to the reviewed
                 # flag (a port already marked done shows Done, else Not started).
-                cells.append(statuses.get(key)
-                             or (STATUS_DONE if rev else STATUS_TODO))
+                cells.append((statuses.get(key)
+                              or (STATUS_DONE if rev else STATUS_TODO), data_style))
             elif role == "notes":
-                cells.append(note)
+                cells.append((note, data_style))
             elif role == "key":
-                cells.append(key)
+                cells.append((key, data_style))
             else:
                 val = data.get(header, "")
                 st = styles.get(header)
-                cells.append((val, st) if st else val)
+                if st == "wrap" and band:
+                    st = "wrap_band"          # keep wrapping but band the row
+                cells.append((val, st) if st else (val, data_style))
         sheet.write(cells)
 
     ncols = len(spec.cols)
     sheet.freeze_header = True
+    sheet.hide_gridlines = True          # our hairline rules read cleaner than gridlines
+    sheet.header_height = 22
+    # Freeze the identity columns so the IP stays visible when scrolling right.
+    sheet.freeze_cols = _FREEZE_COLS.get(spec.title, 0)
     sheet.autofilter_cols = ncols
     for i, (_h, role, w) in enumerate(spec.cols, start=1):
         sheet.set_col(i, w, hidden=(role == "key"))
@@ -454,6 +505,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
         ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
+        ("Scan Output", "Raw NSE script output, verbatim - the evidence behind "
+                        "the parsed sheets (cite it in write-ups)."),
     ]:
         sh.write([tab, desc])
     sh.write([""])
@@ -637,7 +690,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
 
         Start Here, Overview, Checklist, Services, Vulnerabilities, Exploits,
         Services by Product, Databases, Active Directory, AD Quick Wins,
-        Users & Accounts, Priv-Esc.
+        Users & Accounts, Priv-Esc, Scan Output.
 
     Rationale for the pairings you flip between:
       * Checklist <-> Services  - host <-> its open ports (the working pair).
@@ -649,7 +702,8 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
     return [_spec_checklist(hosts), _spec_services(hosts), _spec_vulns(hosts),
             _spec_exploits(hosts), _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
-           [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts)]
+           [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts),
+            _spec_raw_output(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,

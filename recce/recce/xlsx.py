@@ -26,6 +26,9 @@ STYLE = {
     "default": 0, "header": 1, "bold": 2, "title": 3, "sub": 4, "boldred": 5,
     "sev_critical": 6, "sev_high": 7, "sev_medium": 8, "sev_low": 9,
     "sev_info": 10, "done": 11, "wrap": 12,
+    # zebra-banding + row-separator variants used by the report writer so data
+    # sheets get subtle alternating rows and clean rules instead of raw gridlines.
+    "cell": 13, "cell_band": 14, "wrap_band": 15, "center": 16, "center_band": 17,
 }
 
 # Checkbox glyphs: an empty ballot box (off) and a checked one (on). These read
@@ -33,46 +36,62 @@ STYLE = {
 CHECK_ON = "☑"    # ballot box with check
 CHECK_OFF = "☐"   # ballot box
 
+# Palette (AARRGGBB). A calmer, higher-contrast set than raw Office defaults:
+#   header  = clean medium blue, white bold
+#   band    = very light blue-grey for alternating rows
+#   sev ramp: critical/high are solid with WHITE text (legible); medium/low/info
+#             are soft tints with black text; done = soft green.
+#   rule    = light-grey hairline under every data cell (row separator)
 STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <fonts count="6">
-<font><sz val="11"/><color rgb="FF000000"/><name val="Calibri"/></font>
+<font><sz val="11"/><color rgb="FF212121"/><name val="Calibri"/></font>
 <font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>
-<font><b/><sz val="11"/><color rgb="FF000000"/><name val="Calibri"/></font>
-<font><b/><sz val="16"/><color rgb="FF1F3864"/><name val="Calibri"/></font>
-<font><i/><sz val="10"/><color rgb="FF555555"/><name val="Calibri"/></font>
+<font><b/><sz val="11"/><color rgb="FF212121"/><name val="Calibri"/></font>
+<font><b/><sz val="15"/><color rgb="FF1F3864"/><name val="Calibri"/></font>
+<font><i/><sz val="10"/><color rgb="FF595959"/><name val="Calibri"/></font>
 <font><b/><sz val="11"/><color rgb="FFC00000"/><name val="Calibri"/></font>
 </fonts>
-<fills count="9">
+<fills count="10">
 <fill><patternFill patternType="none"/></fill>
 <fill><patternFill patternType="gray125"/></fill>
-<fill><patternFill patternType="solid"><fgColor rgb="FF1F3864"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FF2F5496"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFF2F6FC"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFC00000"/></patternFill></fill>
-<fill><patternFill patternType="solid"><fgColor rgb="FFFF6D6D"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFED7D31"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFFFC000"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFFFE699"/></patternFill></fill>
-<fill><patternFill patternType="solid"><fgColor rgb="FFD9E1F2"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFDDEBF7"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/></patternFill></fill>
 </fills>
-<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<borders count="3">
+<border><left/><right/><top/><bottom/><diagonal/></border>
+<border><left/><right/><top/><bottom style="thin"><color rgb="FFDCE1E8"/></bottom><diagonal/></border>
+<border><left/><right/><top/><bottom style="medium"><color rgb="FF1F3864"/></bottom><diagonal/></border>
+</borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="13">
+<cellXfs count="18">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
-<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="2" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
 <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
 <xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>
 <xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1"/>
-<xf numFmtId="0" fontId="5" fillId="0" borderId="0" xfId="0" applyFont="1"/>
-<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>
-<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>
-<xf numFmtId="0" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1"/>
-<xf numFmtId="0" fontId="0" fillId="6" borderId="0" xfId="0" applyFill="1"/>
-<xf numFmtId="0" fontId="0" fillId="7" borderId="0" xfId="0" applyFill="1"/>
-<xf numFmtId="0" fontId="0" fillId="8" borderId="0" xfId="0" applyFill="1"/>
-<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="5" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"/>
+<xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="0" fontId="1" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="6" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="7" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="8" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="9" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+<xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
 </cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-<dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFEB9C"/></patternFill></fill></dxf></dxfs>
+<dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFE699"/></patternFill></fill></dxf></dxfs>
 </styleSheet>"""
 
 _CONTENT_TYPES = (
@@ -109,6 +128,9 @@ class Sheet:
         self.col_widths: dict[int, float] = {}
         self.hidden_cols: set[int] = set()
         self.freeze_header = False
+        self.freeze_cols = 0            # also freeze the first N columns (left pane)
+        self.hide_gridlines = False     # hide native gridlines (we draw our own rules)
+        self.header_height: float | None = None
         self.autofilter_cols = 0
         self._dv_rules: list[tuple[str, str]] = []   # (sqref, comma-joined list values)
         self._cf_rules: list[tuple[str, str, int]] = []  # (sqref, equals-value, dxfId)
@@ -181,6 +203,9 @@ class Sheet:
         out = []
         for r, row in enumerate(self._rows, start=1):
             cells = []
+            row_attr = f'<row r="{r}">'
+            if r == 1 and self.header_height:
+                row_attr = f'<row r="1" ht="{self.header_height:.0f}" customHeight="1">'
             for c, (value, style) in enumerate(row, start=1):
                 if value is None or value == "":
                     if style:
@@ -195,18 +220,34 @@ class Sheet:
                 else:
                     text = escape(str(value))
                     cells.append(f'<c r="{ref}"{s_attr} t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>')
-            out.append(f'<row r="{r}">' + "".join(cells) + "</row>")
+            out.append(row_attr + "".join(cells) + "</row>")
         return "".join(out)
 
+    def _pane_xml(self) -> str:
+        """Frozen pane: header row and/or the first N identity columns."""
+        x, y = self.freeze_cols, (1 if self.freeze_header else 0)
+        if not x and not y:
+            return ""
+        top_left = f"{col_letter(x + 1)}{y + 1}"
+        active = "bottomRight" if (x and y) else ("topRight" if x else "bottomLeft")
+        split = ""
+        if x:
+            split += f' xSplit="{x}"'
+        if y:
+            split += f' ySplit="{y}"'
+        return (f'<pane{split} topLeftCell="{top_left}" activePane="{active}" '
+                f'state="frozen"/>'
+                f'<selection pane="{active}" activeCell="{top_left}" '
+                f'sqref="{top_left}"/>')
+
     def to_xml(self) -> str:
-        views = ""
-        if self.freeze_header:
-            views = ('<sheetViews><sheetView workbookViewId="0">'
-                     '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
-                     '<selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
-                     '</sheetView></sheetViews>')
+        grid = ' showGridLines="0"' if self.hide_gridlines else ""
+        pane = self._pane_xml()
+        if pane:
+            views = (f'<sheetViews><sheetView{grid} workbookViewId="0">'
+                     f'{pane}</sheetView></sheetViews>')
         else:
-            views = '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+            views = f'<sheetViews><sheetView{grid} workbookViewId="0"/></sheetViews>'
 
         autofilter = ""
         if self.autofilter_cols:

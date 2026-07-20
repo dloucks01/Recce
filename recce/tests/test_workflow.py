@@ -414,6 +414,55 @@ class WorkbookStructureTest(unittest.TestCase):
             wb = load_workbook(out)
             self.assertIn("Checklist", wb.sheetnames)
 
+    def test_styling_freeze_gridlines_and_severity_contrast(self):
+        """The polish pass: identity columns frozen, gridlines off, and critical
+        severity is solid with white text (openpyxl reads the applied styles)."""
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            wb = load_workbook(out)
+        self.assertEqual(wb["Checklist"].freeze_panes, "D2")   # header + 3 id cols
+        self.assertEqual(wb["Services"].freeze_panes, "C2")
+        self.assertFalse(wb["Checklist"].sheet_view.showGridLines)
+        vs = wb["Vulnerabilities"]
+        hdr = [c.value for c in vs[1]]
+        sev_i = hdr.index("Severity") + 1
+        crit = next(vs.cell(row=r, column=sev_i)
+                    for r in range(2, vs.max_row + 1)
+                    if vs.cell(row=r, column=sev_i).value == "CRITICAL")
+        self.assertEqual(crit.fill.fgColor.rgb, "FFC00000")     # solid red
+        self.assertEqual(crit.font.color.rgb, "FFFFFFFF")       # white text
+        self.assertTrue(crit.font.bold)
+
+    def test_scan_output_sheet_carries_raw_script_text_per_host(self):
+        from recce.models import Host, Port, Script
+        hosts = [
+            Host(ip="10.0.0.5", hostnames=["a"], ports=[Port(portid=445,
+                 service="microsoft-ds", scripts=[Script(id="smb2-security-mode",
+                 output="Message signing enabled but not required")])],
+                 host_scripts=[Script(id="smb-os-discovery", output="OS: Windows")]),
+            Host(ip="10.0.0.6", ports=[Port(portid=21, service="ftp",
+                 scripts=[Script(id="ftp-anon", output="Anonymous FTP login allowed")])]),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, out)
+            sheets = xlsx.read_sheets(out)
+        self.assertIn("Scan Output", sheets)
+        _hdr, by_ip = rows_by_ip(sheets, "Scan Output")
+        # Host-level and port-level scripts both surface, on the right IP.
+        blob5 = " ".join(v for row in by_ip["10.0.0.5"] for v in row.values())
+        self.assertIn("smb2-security-mode", blob5)
+        self.assertIn("signing enabled but not required", blob5)
+        self.assertIn("smb-os-discovery", blob5)             # host-level script
+        blob6 = " ".join(v for row in by_ip["10.0.0.6"] for v in row.values())
+        self.assertIn("Anonymous FTP login allowed", blob6)
+        self.assertNotIn("ftp-anon", blob5)                  # no cross-host bleed
+
 
 class ScannerCommandTest(unittest.TestCase):
     """Verify the actual nmap command assembled for each phase (mock _run)."""
