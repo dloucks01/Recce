@@ -924,6 +924,10 @@ class VulnDbTest(unittest.TestCase):
             "JetBrains TeamCity": "TeamCity",
             "VMware ESXi": "ESXi",
             "Apache CouchDB": "CouchDB",
+            "Ivanti Connect Secure": "Ivanti",
+            "F5 BIG-IP": "BIG-IP",
+            "MikroTik RouterOS": "MikroTik",
+            "Cisco ASA": "Cisco ASA",
         }
         for product, expect in cases.items():
             h = Host(ip="1.1.1.1", ports=[Port(portid=8080, service="http",

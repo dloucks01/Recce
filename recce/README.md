@@ -237,11 +237,13 @@ airgapped, none need internet):
    methods, empty DB passwords, cleartext Telnet, SMTP open relay, exposed
    Redis/Mongo, SNMP community strings, DNS zone transfer, etc.
 2. **Offline version→CVE engine** (`vulndb.py`) — a curated knowledge base of
-   **80+ high-signal signatures** that matches the product+version data `enum`
+   **95+ high-signal signatures** that matches the product+version data `enum`
    already collected against known CVEs, with a description, CWE(s) and
    **remediation**. Covers FTP/SSH/web servers, Samba/SMB, databases, CI/web apps
-   (Jenkins, Tomcat, Drupal, Confluence, GitLab, Grafana…), VPN/edge appliances
-   (Fortinet, Pulse, Citrix, Palo Alto), Exchange, **virtualization (vCenter,
+   (Jenkins, Tomcat, Drupal, Confluence, GitLab, Grafana…), **edge/VPN/firewall
+   appliances (Fortinet, Pulse/Ivanti, Citrix, Palo Alto, SonicWall, F5 BIG-IP,
+   Cisco ASA/Smart Install, MikroTik, Zyxel, DrayTek, Sophos, Barracuda)**,
+   Exchange, **virtualization (vCenter,
    ESXi, Horizon), Java middleware (WebLogic, JBoss, ActiveMQ, ColdFusion, Solr,
    Zimbra, Jetty), dev/CI/infra exposure (Docker API, Kubernetes/kubelet, etcd,
    Nexus, TeamCity, SonarQube), monitoring (Zabbix, Cacti, PRTG, Nagios, CouchDB,
