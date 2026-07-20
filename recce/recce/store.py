@@ -39,6 +39,14 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS issues (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      TEXT DEFAULT '',
+    ip      TEXT DEFAULT '',
+    phase   TEXT DEFAULT '',
+    level   TEXT DEFAULT 'warning',
+    message TEXT DEFAULT ''
+);
 """
 
 
@@ -263,6 +271,35 @@ class Store:
             rows = cur.execute(
                 "SELECT key, status FROM tracking WHERE status != ''").fetchall()
         return {r[0]: r[1] for r in rows}
+
+    # --- scan issues (errors / incomplete scans, surfaced to the operator) ------
+
+    def add_issue(self, ip: str, phase: str, level: str, message: str,
+                  ts: str = "") -> None:
+        with closing(self.conn.cursor()) as cur:
+            cur.execute(
+                "INSERT INTO issues(ts, ip, phase, level, message) VALUES(?,?,?,?,?)",
+                (ts, ip, phase, level, message),
+            )
+        self.conn.commit()
+
+    def get_issues(self) -> list[dict]:
+        """All logged scan issues, newest first."""
+        with closing(self.conn.cursor()) as cur:
+            rows = cur.execute(
+                "SELECT ts, ip, phase, level, message FROM issues "
+                "ORDER BY id DESC").fetchall()
+        return [{"ts": r[0], "ip": r[1], "phase": r[2], "level": r[3],
+                 "message": r[4]} for r in rows]
+
+    def count_issues(self) -> dict[str, int]:
+        """{'error': n, 'warning': m, 'total': t}."""
+        with closing(self.conn.cursor()) as cur:
+            rows = cur.execute(
+                "SELECT level, COUNT(*) FROM issues GROUP BY level").fetchall()
+        out = {r[0]: r[1] for r in rows}
+        out["total"] = sum(out.values())
+        return out
 
     def set_meta(self, key: str, value: str) -> None:
         with closing(self.conn.cursor()) as cur:

@@ -35,15 +35,37 @@ class ScanProfile:
     offline: bool = False             # drop internet-dependent scripts (vulners)
     extra_nse: list[str] = field(default_factory=list)
     scanner: str = "nmap"             # nmap | masscan (masscan for the port sweep)
+    host_timeout: int = 20            # minutes; per-host ceiling (nmap --host-timeout)
+    version_intensity: int = 8        # -sV probe intensity 0-9 (higher = better ID)
+    version_all: bool = False         # --version-all: try every probe (thorough)
 
 
 PROFILES: dict[str, ScanProfile] = {
     "quick": ScanProfile(name="quick", all_ports=False, top_ports=200,
-                         os_detect=False, min_rate=2000),
+                         os_detect=False, min_rate=2000, host_timeout=10,
+                         version_intensity=6),
     "standard": ScanProfile(name="standard"),
     "thorough": ScanProfile(name="thorough", min_rate=800, udp_top=100,
-                            extra_nse=["banner"]),
+                            extra_nse=["banner"], host_timeout=40,
+                            version_all=True),
 }
+
+
+@dataclass
+class ScanIssue:
+    """A scan that errored or didn't fully complete - surfaced to the operator."""
+
+    level: str        # "error" (nothing usable) | "warning" (partial results)
+    message: str
+
+
+@dataclass
+class RunOutcome:
+    returncode: int = 0
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False    # subprocess hard timeout (nmap itself hung)
+    missing: bool = False      # the tool wasn't on PATH
 
 # AD / Windows enrichment scripts (safe, non-intrusive category).
 _AD_SCRIPTS = [
@@ -110,60 +132,117 @@ def check_environment(profile: ScanProfile) -> list[str]:
     return warnings
 
 
-def _run(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+def _run(cmd: list[str], timeout: int | None = None) -> RunOutcome:
+    """Run a command, capturing output. Never raises for timeout/missing tool -
+    returns a RunOutcome the caller inspects, so one bad host can't stall a run."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return RunOutcome(p.returncode, p.stdout or "", p.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        return RunOutcome(returncode=124, stdout=e.stdout or "", stderr=e.stderr or "",
+                          timed_out=True)
+    except FileNotFoundError:
+        return RunOutcome(returncode=127, missing=True)
+
+
+def _timeout_args(profile: ScanProfile, minutes: int | None = None):
+    """Return (nmap --host-timeout args, subprocess-kill-timeout seconds).
+
+    The nmap host-timeout fires first and lets nmap skip the slow host and still
+    write its XML; the subprocess timeout is a hard backstop for a truly hung
+    nmap. 0/None disables both."""
+    m = profile.host_timeout if minutes is None else minutes
+    if not m or m <= 0:
+        return [], None
+    return ["--host-timeout", f"{m}m"], m * 60 + 120
+
+
+def _version_args(profile: ScanProfile) -> list[str]:
+    """Service-detection flags. --version-all (intensity 9, every probe) when the
+    profile asks for it, else an explicit intensity."""
+    if profile.version_all:
+        return ["-sV", "--version-all"]
+    return ["-sV", "--version-intensity", str(profile.version_intensity)]
+
+
+def _issue_from(outcome: RunOutcome, out_xml: str, phase: str,
+                minutes: int | None) -> ScanIssue | None:
+    """Classify a run's outcome into an operator-facing issue, or None if fine."""
+    if outcome.missing:
+        return ScanIssue("error", f"{phase}: nmap not found on PATH")
+    if outcome.timed_out:
+        return ScanIssue("error",
+                         f"{phase}: hard-timed-out (nmap unresponsive); results "
+                         f"may be missing")
+    blob = f"{outcome.stdout}\n{outcome.stderr}".lower()
+    if "host timeout" in blob or "due to host timeout" in blob:
+        span = f" after {minutes}m" if minutes else ""
+        return ScanIssue("warning",
+                         f"{phase}: host timed out{span} - partial results kept")
+    if outcome.returncode not in (0, None) and (
+            not os.path.exists(out_xml) or os.path.getsize(out_xml) < 80):
+        err = (outcome.stderr or outcome.stdout or "").strip().splitlines()
+        detail = err[-1] if err else f"exit {outcome.returncode}"
+        return ScanIssue("error", f"{phase}: nmap failed ({detail})")
+    return None
 
 
 # --- phase 1: discovery ----------------------------------------------------------
 
-def discover_hosts(targets_file: str, out_xml: str) -> str:
-    """Ping-sweep the targets; return path to nmap XML listing live hosts."""
+def discover_hosts(targets_file: str, out_xml: str) -> tuple[str, ScanIssue | None]:
+    """Ping-sweep the targets; return (xml path, issue|None) listing live hosts."""
     cmd = [
         "nmap", "-sn", "-PE", "-PP",
         "-PS21,22,23,25,80,135,139,443,445,3389,3306,8080",
-        "-PA80,443,3389", "-n", "--max-retries", "1",
+        "-PA80,443,3389", "-n", "--max-retries", "1", "--host-timeout", "3m",
         "-iL", targets_file, "-oX", out_xml,
     ]
-    proc = _run(cmd)
-    if proc.returncode != 0 and not os.path.exists(out_xml):
-        raise ScannerError(f"Host discovery failed: {proc.stderr.strip()}")
-    return out_xml
+    outcome = _run(cmd)
+    if outcome.missing:
+        return out_xml, ScanIssue("error", "discovery: nmap not found on PATH")
+    if outcome.returncode not in (0, None) and not os.path.exists(out_xml):
+        detail = (outcome.stderr or "").strip().splitlines()
+        return out_xml, ScanIssue(
+            "error", f"discovery: nmap failed ({detail[-1] if detail else 'error'})")
+    return out_xml, _issue_from(outcome, out_xml, "discovery", None)
 
 
 # --- phase 2: full port sweep ----------------------------------------------------
 
-def full_port_scan(ip: str, out_xml: str, profile: ScanProfile) -> str:
-    """Full/top TCP port sweep for one host; returns XML path."""
+def full_port_scan(ip: str, out_xml: str,
+                   profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Full/top TCP port sweep for one host; returns (xml path, issue|None)."""
     if profile.scanner == "masscan" and _have("masscan"):
         return _masscan_ports(ip, out_xml, profile)
 
     scan_type = "-sS" if _is_root() else "-sT"
     port_spec = ["-p-"] if profile.all_ports else ["--top-ports", str(profile.top_ports)]
+    to_args, kill = _timeout_args(profile)
     cmd = [
         "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
-        "--min-rate", str(profile.min_rate), "--open",
-        *port_spec, ip, "-oX", out_xml,
+        "--min-rate", str(profile.min_rate), "--max-retries", "2", "--open",
+        *to_args, *port_spec, ip, "-oX", out_xml,
     ]
-    _run(cmd)
-    return out_xml
+    outcome = _run(cmd, timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "port-sweep", profile.host_timeout)
 
 
-def _masscan_ports(ip: str, out_xml: str, profile: ScanProfile) -> str:
+def _masscan_ports(ip: str, out_xml: str,
+                   profile: ScanProfile) -> tuple[str, ScanIssue | None]:
     port_range = "0-65535" if profile.all_ports else f"0-{profile.top_ports}"
     tmp = out_xml + ".masscan.xml"
     _run(["masscan", ip, "-p", port_range, "--rate", str(profile.min_rate * 10),
-          "-oX", tmp])
+          "-oX", tmp], timeout=(profile.host_timeout * 60 + 120) or None)
     # Re-emit as an nmap-shaped XML by re-scanning just the open ports with nmap.
     ports = _extract_masscan_ports(tmp)
     if not ports:
-        # Write a minimal empty nmap run so downstream parsing is uniform.
-        with open(out_xml, "w") as fh:
-            fh.write('<?xml version="1.0"?><nmaprun start="0"></nmaprun>')
-        return out_xml
+        return _empty_xml(out_xml), None
     scan_type = "-sS" if _is_root() else "-sT"
-    _run(["nmap", scan_type, "-Pn", "-n", "--open",
-          "-p", ",".join(str(p) for p in ports), ip, "-oX", out_xml])
-    return out_xml
+    to_args, kill = _timeout_args(profile)
+    outcome = _run(["nmap", scan_type, "-Pn", "-n", "--open", *to_args,
+                    "-p", ",".join(str(p) for p in ports), ip, "-oX", out_xml],
+                   timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "port-sweep", profile.host_timeout)
 
 
 def masscan_sweep(ips: list[str], out_xml: str, profile: ScanProfile) -> dict[str, list[int]]:
@@ -251,32 +330,34 @@ def _creds_args(creds: dict | None) -> list[str]:
 
 
 def enum_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
-              creds: dict | None = None) -> str:
+              creds: dict | None = None) -> tuple[str, ScanIssue | None]:
     """Light pass: version/OS detection + safe default scripts + AD facts.
 
-    Deliberately cheap so the spreadsheet populates fast. No vuln scanning here -
-    that is the separate vuln_scan() phase.
+    Deliberately cheap so the spreadsheet populates fast. This is where accurate
+    service detection happens (it feeds the offline vuln DB), so version probing
+    is turned up here. No vuln scanning here - that is the separate vuln_scan().
     """
     if not ports:
-        return _empty_xml(out_xml)
+        return _empty_xml(out_xml), None
     scan_type = "-sS" if _is_root() else "-sT"
     scripts = ["default"]                 # safe, gives http-title, ssl-cert, etc.
     if profile.ad_enrich:
         scripts += _AD_SCRIPTS            # smb-os-discovery, signing, ldap-rootdse
     scripts += profile.extra_nse
+    to_args, kill = _timeout_args(profile)
     cmd = [
         "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
-        "-sV", "--version-intensity", "7",
+        *_version_args(profile),          # thorough service ID (feeds vuln DB)
         "-p", ",".join(str(p) for p in sorted(set(ports))),
         "--script", ",".join(dict.fromkeys(scripts)),
-        "--script-timeout", "120s",
+        "--script-timeout", "120s", *to_args,
     ]
     cmd += _creds_args(creds)
     if profile.os_detect and _is_root():
         cmd.append("-O")
     cmd += [ip, "-oX", out_xml]
-    _run(cmd)
-    return out_xml
+    outcome = _run(cmd, timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "enum", profile.host_timeout)
 
 
 # --- phase 3b: vulnerability scan (targeted, safe-by-default) --------------------
@@ -291,7 +372,7 @@ def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     the `vulners` CVE lookup.
     """
     if not ports:
-        return _empty_xml(out_xml)
+        return _empty_xml(out_xml), None
     scan_type = "-sS" if _is_root() else "-sT"
 
     if aggressive:
@@ -304,47 +385,53 @@ def vuln_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     # Add the safe service weak-config scripts (TLS/FTP/HTTP/SNMP/DB checks).
     script_expr = f"({selection}) or ({','.join(_SERVICE_SCRIPTS)})"
 
+    # enum already did the heavy -sV; here we only need service names for NSE
+    # portrules, so a light version probe (not a full re-scan) is enough.
+    to_args, kill = _timeout_args(profile, profile.host_timeout * 2 if aggressive
+                                  else None)
     cmd = [
         "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
-        "-sV",
+        "-sV", "--version-light",
         "-p", ",".join(str(p) for p in sorted(set(ports))),
         "--script", script_expr,
-        "--script-timeout", "180s",
+        "--script-timeout", "180s", *to_args,
     ]
     cmd += _creds_args(creds)
     cmd += [ip, "-oX", out_xml]
-    _run(cmd)
-    return out_xml
+    outcome = _run(cmd, timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "vuln-scan", profile.host_timeout)
 
 
 def nse_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
-             scripts: list[str], creds: dict | None = None) -> str:
+             scripts: list[str], creds: dict | None = None) -> tuple[str, ScanIssue | None]:
     """Generic targeted NSE run on specific ports (used by db / privesc phases)."""
     if not ports or not scripts:
-        return _empty_xml(out_xml)
+        return _empty_xml(out_xml), None
     scan_type = "-sS" if _is_root() else "-sT"
+    to_args, kill = _timeout_args(profile)
     cmd = [
-        "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}", "-sV",
+        "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
+        "-sV", "--version-light",
         "-p", ",".join(str(p) for p in sorted(set(ports))),
         "--script", ",".join(dict.fromkeys(scripts)),
-        "--script-timeout", "180s",
+        "--script-timeout", "180s", *to_args,
     ]
     cmd += _creds_args(creds)
     cmd += [ip, "-oX", out_xml]
-    _run(cmd)
-    return out_xml
+    outcome = _run(cmd, timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "nse", profile.host_timeout)
 
 
-def udp_scan(ip: str, out_xml: str, profile: ScanProfile) -> str:
+def udp_scan(ip: str, out_xml: str, profile: ScanProfile) -> tuple[str, ScanIssue | None]:
     """Optional top-N UDP scan with service detection + SNMP/DNS/NTP enumeration."""
     if not _is_root():
-        # UDP scan requires raw sockets.
-        with open(out_xml, "w") as fh:
-            fh.write('<?xml version="1.0"?><nmaprun start="0"></nmaprun>')
-        return out_xml
-    _run(["nmap", "-sU", "-sV", "-Pn", "-n", "--top-ports", str(profile.udp_top),
-          "--open", f"-T{profile.timing}",
-          "--script", "snmp-info,snmp-interfaces,snmp-sysdescr,dns-nsid,"
-                      "ntp-info,nbstat,ike-version",
-          "--script-timeout", "90s", ip, "-oX", out_xml])
-    return out_xml
+        return _empty_xml(out_xml), ScanIssue(
+            "warning", "udp: skipped (needs root/CAP_NET_RAW for raw sockets)")
+    to_args, kill = _timeout_args(profile)
+    outcome = _run(["nmap", "-sU", "-sV", "-Pn", "-n", "--top-ports",
+                    str(profile.udp_top), "--open", f"-T{profile.timing}",
+                    "--script", "snmp-info,snmp-interfaces,snmp-sysdescr,dns-nsid,"
+                                "ntp-info,nbstat,ike-version",
+                    "--script-timeout", "90s", *to_args, ip, "-oX", out_xml],
+                   timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "udp", profile.host_timeout)

@@ -76,7 +76,31 @@ def _open_paths(out_dir: str) -> dict[str, str]:
         "xlsx": os.path.join(out_dir, "enumeration.xlsx"),
         "md": os.path.join(out_dir, "enumeration.md"),
         "csv": os.path.join(out_dir, "services.csv"),
+        "log": os.path.join(out_dir, "recce.log"),
     }
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _record_issues(store: Store, paths: dict, ip: str, issues: list) -> None:
+    """Persist scan issues (errors / incomplete scans) to the datastore + the
+    plain-text run log, and echo errors to the console so they're seen live."""
+    if not issues:
+        return
+    for iss in issues:
+        phase = iss.get("phase", "") if isinstance(iss, dict) else ""
+        level = iss.get("level", "warning") if isinstance(iss, dict) else "warning"
+        message = iss.get("message", "") if isinstance(iss, dict) else str(iss)
+        store.add_issue(ip, phase, level, message, ts=_now())
+        try:
+            with open(paths["log"], "a") as fh:
+                fh.write(f"{_now()} [{level.upper()}] {ip} {message}\n")
+        except OSError:
+            pass
+        marker = "[!]" if level == "error" else "[~]"
+        print(f"    {marker} {ip}: {message}")
 
 
 def _resolve_domains(store: Store, hosts: list) -> list:
@@ -165,13 +189,18 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     domains = _resolve_domains(store, hosts)
     update_workbook(paths["xlsx"], hosts, meta={"subtitle": title},
                     domains=domains, tracking=tracking, scope=store.get_scope(),
-                    statuses=store.get_statuses())
+                    statuses=store.get_statuses(), issues=store.get_issues())
     build_markdown(hosts, paths["md"], title=title, domains=domains)
     build_csv(hosts, paths["csv"])
     if not quiet:
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
               f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}")
+        counts = store.count_issues()
+        if counts.get("total"):
+            print(f"[!] {counts['total']} scan issue(s) logged "
+                  f"({counts.get('error', 0)} error, {counts.get('warning', 0)} "
+                  f"incomplete) - see the Overview tab or {paths['log']}")
 
 
 # --- scan command ----------------------------------------------------------------
@@ -195,6 +224,12 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.scanner = "masscan"
     if g("offline"):
         profile.offline = True
+    if g("host_timeout") is not None:
+        profile.host_timeout = args.host_timeout
+    if g("version_all"):
+        profile.version_all = True
+    if g("version_intensity") is not None:
+        profile.version_intensity = args.version_intensity
     profile.ping_discovery = not g("no_discovery", False)
 
 
@@ -243,23 +278,34 @@ def _final_report(store, paths, title) -> None:
 
 # --- phase 1+2a: discovery + light service enumeration --------------------------
 
-def _enum_worker(ip, profile, paths, creds, port_map, subnet_map) -> Host | None:
+def _mkissue(scan_issue, phase: str) -> dict:
+    return {"phase": phase, "level": scan_issue.level,
+            "message": scan_issue.message}
+
+
+def _enum_worker(ip, profile, paths, creds, port_map, subnet_map):
+    """Returns (host|None, issues)."""
+    issues: list[dict] = []
     if port_map is not None:
         open_ports = port_map.get(ip, [])
     else:
         fp_xml = os.path.join(paths["raw"], f"{ip}_ports.xml")
-        scanner.full_port_scan(ip, fp_xml, profile)
+        _, iss = scanner.full_port_scan(ip, fp_xml, profile)
+        if iss:
+            issues.append(_mkissue(iss, "port-sweep"))
         open_ports = _ports_for_host(fp_xml, ip)
 
     enum_xml = os.path.join(paths["raw"], f"{ip}_enum.xml")
-    scanner.enum_scan(ip, open_ports, enum_xml, profile, creds=creds)
+    _, iss = scanner.enum_scan(ip, open_ports, enum_xml, profile, creds=creds)
+    if iss:
+        issues.append(_mkissue(iss, "enum"))
     host = _fold_host(ip, np.parse_nmap_xml(enum_xml), subnet_map)
     host.enumerated = True
     ad.identify_roles(host)
     ad.parse_signing_and_ntlm(host)
     from . import vulndb
     vulndb.assess_host_inplace(host)   # offline version->CVE findings, immediately
-    return host
+    return host, issues
 
 
 def _discover(args, profile, store, paths):
@@ -296,7 +342,9 @@ def _discover(args, profile, store, paths):
                 targets_file = tf.name
             disc_xml = os.path.join(paths["raw"], "discovery.xml")
             print("[*] Discovery: host sweep ...")
-            scanner.discover_hosts(targets_file, disc_xml)
+            _, iss = scanner.discover_hosts(targets_file, disc_xml)
+            if iss:
+                _record_issues(store, paths, "(discovery)", [_mkissue(iss, "discovery")])
             live_ips = [h.ip for h in np.parse_nmap_xml(disc_xml)]
             os.unlink(targets_file)
             print(f"[+] {len(live_ips)} live host(s) found.")
@@ -324,10 +372,13 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map) -> 
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
-                host = fut.result()
+                host, issues = fut.result()
             except Exception as e:  # noqa: BLE001
-                print(f"[!] {ip}: enum error: {e}")
+                _record_issues(store, paths, ip,
+                               [{"phase": "enum", "level": "error",
+                                 "message": f"enum crashed: {e}"}])
                 continue
+            _record_issues(store, paths, ip, issues)
             if host is None:
                 continue
             store.upsert_host(host)   # durable immediately - crash-safe
@@ -365,15 +416,22 @@ def _merge_vuln_results(host: Host, parsed_list) -> None:
 
 
 def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
-                 use_probes=True) -> Host:
+                 use_probes=True):
+    """Returns (host, issues)."""
     ip = host.ip
+    issues: list[dict] = []
     if portids:
         vx = os.path.join(paths["raw"], f"{ip}_vuln.xml")
-        scanner.vuln_scan(ip, portids, vx, profile, creds=creds, aggressive=aggressive)
+        _, iss = scanner.vuln_scan(ip, portids, vx, profile, creds=creds,
+                                   aggressive=aggressive)
+        if iss:
+            issues.append(_mkissue(iss, "vuln-scan"))
         _merge_vuln_results(host, np.parse_nmap_xml(vx))
     if profile.udp_top:
         ux = os.path.join(paths["raw"], f"{ip}_udp.xml")
-        scanner.udp_scan(ip, ux, profile)
+        _, iss = scanner.udp_scan(ip, ux, profile)
+        if iss:
+            issues.append(_mkissue(iss, "udp"))
         _merge_vuln_results(host, np.parse_nmap_xml(ux))
     pset = set(portids)
     for p in host.ports:
@@ -388,7 +446,7 @@ def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
         probes.probe_host(host)        # stdlib HTTP-header + TLS analysis
     if use_ss:
         exploits.enrich_hosts([host])
-    return host
+    return host, issues
 
 
 def _selected_hosts(hosts, args):
@@ -450,10 +508,13 @@ def _phase_vulns(store, paths, args, profile) -> None:
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
-                host = fut.result()
+                host, issues = fut.result()
             except Exception as e:  # noqa: BLE001
-                print(f"[!] {ip}: vuln-scan error: {e}")
+                _record_issues(store, paths, ip,
+                               [{"phase": "vuln-scan", "level": "error",
+                                 "message": f"vuln-scan crashed: {e}"}])
                 continue
+            _record_issues(store, paths, ip, issues)
             store.upsert_host(host)   # durable immediately - crash-safe
             store.delete_tracking(tr.step_key("vuln", ip))  # re-run clears override
             completed += 1
@@ -469,11 +530,15 @@ def _phase_vulns(store, paths, args, profile) -> None:
 
 # --- phase: database enumeration / vuln scan ------------------------------------
 
-def _db_worker(host, portids, profile, paths, creds, aggressive, use_ss) -> Host:
+def _db_worker(host, portids, profile, paths, creds, aggressive, use_ss):
+    """Returns (host, issues)."""
     from . import db as dbmod
+    issues: list[dict] = []
     vx = os.path.join(paths["raw"], f"{host.ip}_db.xml")
-    scanner.nse_scan(host.ip, portids, vx, profile,
-                     dbmod.script_selection(aggressive), creds=creds)
+    _, iss = scanner.nse_scan(host.ip, portids, vx, profile,
+                              dbmod.script_selection(aggressive), creds=creds)
+    if iss:
+        issues.append(_mkissue(iss, "db"))
     _merge_vuln_results(host, np.parse_nmap_xml(vx))
     pset = set(portids)
     for p in host.ports:
@@ -482,7 +547,7 @@ def _db_worker(host, portids, profile, paths, creds, aggressive, use_ss) -> Host
     host.db_scanned = True
     if use_ss:
         exploits.enrich_hosts([host])
-    return host
+    return host, issues
 
 
 def _phase_db(store, paths, args, profile) -> None:
@@ -506,10 +571,13 @@ def _phase_db(store, paths, args, profile) -> None:
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
-                host = fut.result()
+                host, issues = fut.result()
             except Exception as e:  # noqa: BLE001
-                print(f"[!] {ip}: db-scan error: {e}")
+                _record_issues(store, paths, ip,
+                               [{"phase": "db", "level": "error",
+                                 "message": f"db-scan crashed: {e}"}])
                 continue
+            _record_issues(store, paths, ip, issues)
             store.upsert_host(host)
             store.delete_tracking(tr.step_key("db", ip))  # re-run clears override
             completed += 1
@@ -519,18 +587,22 @@ def _phase_db(store, paths, args, profile) -> None:
 
 # --- phase: privilege-escalation --------------------------------------------------
 
-def _privesc_worker(host, profile, paths, creds, aggressive) -> Host:
+def _privesc_worker(host, profile, paths, creds, aggressive):
+    """Returns (host, issues)."""
     from . import privesc as pe
+    issues: list[dict] = []
     ports = [p.portid for p in host.open_ports
              if p.portid in (139, 445, 3389, 135) or "http" in (p.service or "")]
     if ports:
         vx = os.path.join(paths["raw"], f"{host.ip}_privesc.xml")
-        scanner.nse_scan(host.ip, ports, vx, profile, pe.nse_scripts(aggressive),
-                         creds=creds)
+        _, iss = scanner.nse_scan(host.ip, ports, vx, profile,
+                                  pe.nse_scripts(aggressive), creds=creds)
+        if iss:
+            issues.append(_mkissue(iss, "privesc"))
         _merge_vuln_results(host, np.parse_nmap_xml(vx))
         ad.identify_roles(host)
         ad.parse_signing_and_ntlm(host)
-    return host
+    return host, issues
 
 
 def _phase_privesc(store, paths, args, profile) -> None:
@@ -550,10 +622,13 @@ def _phase_privesc(store, paths, args, profile) -> None:
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
-                host = fut.result()
+                host, issues = fut.result()
             except Exception as e:  # noqa: BLE001
-                print(f"[!] {ip}: privesc error: {e}")
+                _record_issues(store, paths, ip,
+                               [{"phase": "privesc", "level": "error",
+                                 "message": f"privesc crashed: {e}"}])
                 continue
+            _record_issues(store, paths, ip, issues)
             store.upsert_host(host)
             completed += 1
             refresher.tick(store, paths, args.title)
@@ -770,7 +845,7 @@ def _self_scan() -> bool:
             scanner.full_port_scan("127.0.0.1", fp, profile)
             ports = _ports_for_host(fp, "127.0.0.1")
             deep = os.path.join(d, "e.xml")
-            scanner.enum_scan("127.0.0.1", ports or [80], deep, profile)
+            scanner.enum_scan("127.0.0.1", ports or [80], deep, profile)  # (xml, issue)
             host = _fold_host("127.0.0.1", np.parse_nmap_xml(deep), {"127.0.0.1": "local"})
             host.enumerated = True
             from .report_excel import build_workbook, read_workbook_tracking
@@ -883,6 +958,19 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     title = store.get_meta("engagement") or "engagement"
     print(f"\n== Coverage: {title} ==\n")
+
+    # Scan issues first - the operator needs to know if anything failed/incomplete.
+    counts = store.count_issues()
+    if counts.get("total"):
+        print(f"  ⚠ {counts['total']} scan issue(s): {counts.get('error', 0)} error, "
+              f"{counts.get('warning', 0)} incomplete "
+              f"(Overview tab / {paths['log']})")
+        for i in store.get_issues()[:8]:
+            print(f"      [{i['level'].upper()}] {i['ip']} {i['message']}")
+        if counts["total"] > 8:
+            print(f"      ... and {counts['total'] - 8} more")
+        print()
+
     o = cov["overall"]
     print(f"  OVERALL      [{bar(o['pct'])}] {o['pct']:3d}%  {o['done']}/{o['total']}")
     print()
@@ -1059,6 +1147,9 @@ def _add_common(pp) -> None:
                     help="concurrent hosts to scan at once (default: 6)")
     pp.add_argument("--refresh-every", type=int, default=10, metavar="N",
                     help="regenerate reports every N hosts (0 to disable; default 10)")
+    pp.add_argument("--host-timeout", type=int, metavar="MIN",
+                    help="per-host time ceiling in minutes; nmap gives up on a "
+                         "host after this and moves on (0 = no limit)")
     pp.add_argument("-y", "--yes", action="store_true",
                     help="assume authorization is confirmed (non-interactive)")
 
@@ -1087,6 +1178,10 @@ def _add_discovery(pp) -> None:
                     help="skip ping sweep; treat all targets as up (-Pn)")
     pp.add_argument("--no-ad", action="store_true", help="skip SMB/LDAP AD scripts")
     pp.add_argument("--no-os", action="store_true", help="skip OS detection")
+    pp.add_argument("--version-all", action="store_true",
+                    help="max-effort service detection (--version-all: every probe)")
+    pp.add_argument("--version-intensity", type=int, metavar="0-9",
+                    help="nmap -sV probe intensity for service detection (default 8)")
     pp.add_argument("--resume", action="store_true", help="skip hosts already in datastore")
 
 
