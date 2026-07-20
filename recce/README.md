@@ -7,10 +7,11 @@ and subnets, normalizes everything into a resumable datastore, and produces an
 **Excel workbook** built for tracking your engagement — plus Markdown and CSV.
 
 It is designed for mixed **Linux + Windows / Active Directory** environments:
-full TCP port sweeps, service/version + OS detection, initial vulnerability
-identification (NSE `vuln` + `vulners`), and deep **Active Directory** analysis —
-DC identification, NTLM-relay target discovery, and credentialed LDAP
-enumeration of users, SPNs, roastable accounts, delegation, groups and trusts.
+full TCP port sweeps, service/version + OS detection, vulnerability
+identification (curated detection NSE + a built-in **offline** version→CVE/CWE
+database, so it works airgapped), and deep **Active Directory** analysis — DC
+identification, NTLM-relay target discovery, and credentialed LDAP enumeration of
+users, SPNs, roastable accounts, delegation, groups and trusts.
 
 > 🚀 **New here? Read [QUICKSTART.md](QUICKSTART.md)** — a one-page guide that
 > gets you from zero to a filled-in workbook in five commands. There is also a
@@ -27,7 +28,7 @@ adds the layer engagements actually need:
   columns so you can track what's been looked at.
 - **Persistent coverage tracking.** Your checkboxes live in the datastore, not
   just the spreadsheet — re-scanning and re-reporting **never wipe your
-  progress**. A **Coverage** sheet and a `status` command show exactly what's
+  progress**. An **Overview** sheet and a `status` command show exactly what's
   left, at any time (see [Coverage tracking](#coverage-tracking)).
 - **"Who else runs this?" pivot.** A *Services by Product/Version* sheet groups
   every endpoint by exact product+version — instantly see all systems running
@@ -53,14 +54,20 @@ folder over and run **`python3 -m recce ...`** or **`./bin/recce ...`**.
 > and use `./bin/recce`**. `pyproject.toml` is there for staging boxes / an
 > internal mirror and for `recce --version`.
 
-It orchestrates these **system tools** if present (all standard on Kali):
+It orchestrates these **system tools** if present (all standard on Kali). Only
+`nmap` is required; every other tool is optional and its phase degrades cleanly
+with a logged note when absent. `recce doctor` reports exactly what's available.
 
 | Tool | Needed for |
 |------|-----------|
 | `nmap` | **required** — scanning, service/version/OS detection, NSE vuln + AD scripts |
 | `masscan` | optional — `--fast` network-wide sweep |
 | `searchsploit` (exploitdb) | optional — offline exploit mapping (Exploits sheet) |
+| `netexec` / `crackmapexec` | optional — credentialed SMB/AD enum (`credenum`) |
+| `impacket` | optional — Kerberoast / AS-REP / secretsdump (`credenum`) |
 | `ldapsearch` (ldap-utils) | optional — credentialed AD LDAP enumeration |
+| `ssh` (+ `sshpass`) | optional — credentialed Linux local checks (`credenum`) |
+| `firefox` / `chromium` | optional — auto web screenshots in write-ups |
 
 Run scans as **root** (SYN scan + OS detection need raw sockets); it falls back
 to a TCP connect scan otherwise.
@@ -69,11 +76,13 @@ to a TCP connect scan otherwise.
 > have `openpyxl` on a connected box, the files are fully compatible — but it is
 > never required.
 
-## Workflow (two phases)
+## Workflow
 
-The tool is built around the way you actually work an engagement: **get the
-sheet populated fast, then scan for vulns per open port** — the two are separate,
-cheap, resumable commands.
+The core is **two cheap, resumable commands**: `enum` gets the sheet populated
+fast, then `vulns` scans for vulnerabilities per open port. Everything after
+that — `db`, `privesc`, `credenum`, `ingest`, `writeups` — is an **optional
+deeper phase** you run on whatever subset you like, whenever you like. Each phase
+is separate and re-runnable (re-running never duplicates anything).
 
 ```bash
 # FIRST, on any new box: verify it can run the tool (env + tools + a real
@@ -123,7 +132,7 @@ what's already in the datastore (plus `--only`, `--unscanned`).
 
 ### The Checklist tab
 
-The **Checklist** sheet (right after Coverage) is the at-a-glance answer to
+The **Checklist** sheet (right after Overview) is the at-a-glance answer to
 "which IPs are done and what's left." One row per IP, with a **checkbox for each
 workflow step**:
 
@@ -195,14 +204,6 @@ dropdown so you can mark exactly where you are on that specific port:
 > override only when your box differs from the tool's current state — so re-tick a
 > box to match the tool and it goes back to following the tool automatically.
 > Edit step boxes *between* scans (not while a scan of that host is running).
-
-Other targets syntax: CIDR, `10.0.0.10-40` ranges, single IPs/hostnames, or
-`@scope.txt`. Speed flags (`--fast`, `--workers`, `--resume`, `--all-ports`) live
-on `enum`/`scan`.
-
-### Target syntax
-CIDR (`10.0.0.0/24`), dash range (`10.0.0.10-40`), single IP, hostname, or
-`@file`. Mix as many as you like on one command line.
 
 ## What each phase runs
 
@@ -422,7 +423,7 @@ which you haven't — and never lose that as scans grow.
   auto-refresh during a scan) **preserves every check and note**. Each tracked
   sheet carries a hidden `Key` column that ties a row to its datastore item, so
   read-back is exact.
-- The **Coverage** sheet (data-bar progress per category + per subnet) and the
+- The **Overview** sheet (data-bar progress per category + per subnet) and the
   `status` command give a live picture.
 
 ```bash
