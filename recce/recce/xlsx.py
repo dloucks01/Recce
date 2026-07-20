@@ -33,6 +33,10 @@ STYLE = {
     "group": 18,
     # internal navigation hyperlink (blue underline).
     "link": 19,
+    # monospace data variants (IP/port/CVE/version...) + teal IP accent + mono
+    # wrap (raw evidence), so machine data reads like the HTML previews.
+    "cell_mono": 20, "cell_band_mono": 21, "ip": 22, "ip_band": 23,
+    "wrap_mono": 24, "wrap_band_mono": 25,
 }
 
 # Checkbox glyphs: an empty ballot box (off) and a checked one (on). These read
@@ -40,44 +44,48 @@ STYLE = {
 CHECK_ON = "☑"    # ballot box with check
 CHECK_OFF = "☐"   # ballot box
 
-# Palette (AARRGGBB). A calmer, higher-contrast set than raw Office defaults:
-#   header  = clean medium blue, white bold
-#   band    = very light blue-grey for alternating rows
-#   sev ramp: critical/high are solid with WHITE text (legible); medium/low/info
-#             are soft tints with black text; done = soft green.
-#   rule    = light-grey hairline under every data cell (row separator)
+# Palette (AARRGGBB) - the light adaptation of the HTML previews' design
+# language: a deep-teal accent (header band, titles, IP text), Consolas for
+# machine data (IP/port/CVE/version/evidence), and the same severity semantics.
+#   header  = deep teal, white bold
+#   band    = very light teal-grey for alternating rows
+#   sev ramp: critical/high solid with WHITE text; medium/low/info soft tints.
+#   rule    = light hairline under every data cell (row separator)
+_MONO = "Consolas"
 STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<fonts count="8">
+<fonts count="10">
 <font><sz val="11"/><color rgb="FF212121"/><name val="Calibri"/></font>
 <font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>
 <font><b/><sz val="11"/><color rgb="FF212121"/><name val="Calibri"/></font>
-<font><b/><sz val="15"/><color rgb="FF1F3864"/><name val="Calibri"/></font>
+<font><b/><sz val="15"/><color rgb="FF0E6E67"/><name val="Calibri"/></font>
 <font><i/><sz val="10"/><color rgb="FF595959"/><name val="Calibri"/></font>
 <font><b/><sz val="11"/><color rgb="FFC00000"/><name val="Calibri"/></font>
-<font><b/><sz val="11"/><color rgb="FF1F3864"/><name val="Calibri"/></font>
+<font><b/><sz val="11"/><color rgb="FF0E6E67"/><name val="Calibri"/></font>
 <font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/></font>
+<font><sz val="10"/><color rgb="FF212121"/><name val="Consolas"/></font>
+<font><b/><sz val="10"/><color rgb="FF0E6E67"/><name val="Consolas"/></font>
 </fonts>
 <fills count="11">
 <fill><patternFill patternType="none"/></fill>
 <fill><patternFill patternType="gray125"/></fill>
-<fill><patternFill patternType="solid"><fgColor rgb="FF2F5496"/></patternFill></fill>
-<fill><patternFill patternType="solid"><fgColor rgb="FFF2F6FC"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FF0E6E67"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFEDF6F4"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFC00000"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFED7D31"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFFFC000"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFFFE699"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFDDEBF7"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/></patternFill></fill>
-<fill><patternFill patternType="solid"><fgColor rgb="FFE2E9F3"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFD7ECEA"/></patternFill></fill>
 </fills>
 <borders count="3">
 <border><left/><right/><top/><bottom/><diagonal/></border>
-<border><left/><right/><top/><bottom style="thin"><color rgb="FFDCE1E8"/></bottom><diagonal/></border>
-<border><left/><right/><top/><bottom style="medium"><color rgb="FF1F3864"/></bottom><diagonal/></border>
+<border><left/><right/><top/><bottom style="thin"><color rgb="FFDCE6E4"/></bottom><diagonal/></border>
+<border><left/><right/><top/><bottom style="medium"><color rgb="FF0A4F4A"/></bottom><diagonal/></border>
 </borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="20">
+<cellXfs count="26">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="2" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
 <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
@@ -98,6 +106,12 @@ STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
 <xf numFmtId="0" fontId="6" fillId="10" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
 <xf numFmtId="0" fontId="7" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="0" fontId="8" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+<xf numFmtId="0" fontId="8" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+<xf numFmtId="0" fontId="9" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+<xf numFmtId="0" fontId="9" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+<xf numFmtId="0" fontId="8" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="8" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
 </cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 <dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFE699"/></patternFill></fill></dxf></dxfs>

@@ -45,6 +45,15 @@ _SEV_STYLE = {
     "low": "sev_low", "info": "sev_info",
 }
 
+# Columns holding machine data render in a monospace font (like the HTML
+# previews), so IPs, ports, versions, CVEs and IDs line up and read as data.
+# ("IP" is handled separately - it also gets the teal accent colour.)
+MONO_COLS = {
+    "Port", "Proto", "Version", "CVE / refs", "CWE", "Scope", "CPE",
+    "Extra info", "RID", "EDB-ID", "CVEs", "Hosts (ip:port)", "Open ports",
+    "# Vulns", "# Hosts", "Script", "Path", "SPN",
+}
+
 
 @dataclass
 class SheetSpec:
@@ -59,7 +68,7 @@ class SheetSpec:
 # Tab colours group the sheets into visual bands in Excel's tab bar, by role:
 #   guide/summary (grey-blue) · working (blue) · findings (red) · inventory
 #   (green) · raw evidence (grey). Titles not listed get no colour.
-_TAB_GUIDE, _TAB_WORK = "FF8497B0", "FF2E75B6"
+_TAB_GUIDE, _TAB_WORK = "FF8497B0", "FF0E7C75"
 _TAB_FIND, _TAB_INV, _TAB_RAW = "FFC00000", "FF548235", "FF7F7F7F"
 TAB_COLORS = {
     "Start Here": _TAB_GUIDE, "Overview": _TAB_GUIDE,
@@ -263,7 +272,7 @@ def _clip(text: str, limit: int = 2000) -> str:
 
 
 def _styler_raw(d: dict) -> dict:
-    return {"Output": "wrap"}
+    return {"Output": "wrap_mono"}       # raw evidence in monospace, wrapped
 
 
 def _spec_raw_nse(hosts: list[Host]) -> SheetSpec:
@@ -484,9 +493,18 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             else:
                 val = data.get(header, "")
                 st = styles.get(header)
-                if st == "wrap" and band:
-                    st = "wrap_band"          # keep wrapping but band the row
-                cells.append((val, st) if st else (val, data_style))
+                if st:                        # styler-assigned accent (severity/wrap)
+                    if st == "wrap":
+                        st = "wrap_band" if band else "wrap"
+                    elif st == "wrap_mono":
+                        st = "wrap_band_mono" if band else "wrap_mono"
+                    cells.append((val, st))
+                elif header == "IP":          # teal monospace accent
+                    cells.append((val, "ip_band" if band else "ip"))
+                elif header in MONO_COLS:      # machine data -> monospace
+                    cells.append((val, "cell_band_mono" if band else "cell_mono"))
+                else:
+                    cells.append((val, data_style))
         sheet.write(cells, outline=(1 if grouped else 0))
 
     ncols = len(spec.cols)
