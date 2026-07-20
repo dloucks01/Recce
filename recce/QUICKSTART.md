@@ -12,16 +12,25 @@ and your ticks are saved (re-scanning never wipes them).
 ## Setup (once)
 
 Nothing to install — it uses only Python 3.9+ and the tools already on Kali
-(`nmap` required; `masscan`, `searchsploit`, `ldapsearch` optional). Copy the
-folder to your box, then:
+(`nmap` required; `masscan`, `searchsploit`, `ldapsearch`, `netexec`, `impacket`,
+`chromium` optional). It runs entirely inside your **Kali VM**.
+
+**Getting it into the Kali VM** (Windows 11 host → Kali guest):
+- Best: `git clone` the repo *inside Kali* — that preserves LF line endings and
+  the executable bit automatically.
+- Or copy the folder in (shared folder / scp / USB). If it came through Windows
+  and `./bin/recce` says *"bad interpreter"* or *"Permission denied"*, either run
+  `python3 -m recce …` (identical, no wrapper needed) or `chmod +x bin/recce`.
 
 ```bash
 cd recce
-./bin/recce doctor          # confirms your box can run everything
+./bin/recce doctor          # first thing to run: confirms nmap + shows optional tools
 ```
 
-> `./bin/recce` is a shortcut for `python3 -m recce`. Use either.
+> `./bin/recce` is just a shortcut for `python3 -m recce` — use whichever works.
 > Run scans with `sudo` so nmap can do SYN/OS detection.
+> Auto web-screenshots need `chromium` (Kali defaults to Firefox); without it you
+> just paste screenshots into the Word write-ups yourself, which is the normal flow.
 
 ## The 5-step engagement
 
