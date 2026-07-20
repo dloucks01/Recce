@@ -1795,5 +1795,44 @@ class StoreTrackingTest(unittest.TestCase):
             store.close()
 
 
+class ExploitRefTest(unittest.TestCase):
+    def test_cve_exact_match(self):
+        from recce.exploitref import proven_exploit_ref
+        ref = proven_exploit_ref(["CVE-2017-0144"])
+        self.assertIsNotNone(ref)
+        self.assertIn("eternalblue", ref.lower())
+
+    def test_no_match_returns_none(self):
+        from recce.exploitref import proven_exploit_ref
+        self.assertIsNone(proven_exploit_ref(["CVE-1999-0001"]))
+        self.assertIsNone(proven_exploit_ref(None))
+        self.assertIsNone(proven_exploit_ref([], ""))
+
+    def test_cve_embedded_in_nse_id_text(self):
+        # A raw NSE finding carrying the CVE only in its id must resolve the same.
+        from recce.exploitref import proven_exploit_ref
+        ref = proven_exploit_ref([], "http-vuln-cve2021-41773")
+        self.assertIsNotNone(ref)
+        self.assertIn("apache", ref.lower())
+
+    def test_keyword_fallback_when_no_cve(self):
+        from recce.exploitref import proven_exploit_ref
+        self.assertIn("ms17_010",
+                      (proven_exploit_ref([], "SMB ms17-010 vulnerable") or "").lower())
+        self.assertIn("vsftpd",
+                      (proven_exploit_ref([], "vsftpd 2.3.4 backdoor") or "").lower())
+
+    def test_explicit_cve_beats_text(self):
+        from recce.exploitref import proven_exploit_ref
+        # A known CVE in the list wins even if the text mentions nothing.
+        self.assertEqual(proven_exploit_ref(["CVE-2014-0160"]),
+                         proven_exploit_ref([], "heartbleed"))
+
+    def test_keyword_table_values_are_real_exploit_entries(self):
+        # Integrity: every keyword ref must be one of the concrete CVE entries.
+        from recce.exploitref import PROVEN_EXPLOIT, PROVEN_KW
+        self.assertTrue(set(PROVEN_KW.values()) <= set(PROVEN_EXPLOIT.values()))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

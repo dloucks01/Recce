@@ -125,8 +125,8 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     step_cols = [(h, "check", _STEP_WIDTHS.get(h, 9)) for h in tr.STEP_COLUMNS]
     cols = [
         ("Reviewed", "checkbox", 9), ("Subnet", "data", 16), ("IP", "data", 15),
-        ("Hostname", "data", 22), ("OS", "data", 20), ("Roles", "data", 22),
-        ("Open ports", "data", 30), ("# Vulns", "data", 8),
+        ("Hostname", "data", 22), ("OS", "data", 20), ("Hops", "data", 6),
+        ("Roles", "data", 22), ("Open ports", "data", 30), ("# Vulns", "data", 8),
         *step_cols,
         ("Notes", "notes", 28), ("Key", "key", 4),
     ]
@@ -138,6 +138,7 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
         open_ports = ", ".join(str(p.portid) for p in sorted(h.open_ports, key=lambda p: p.portid))
         rows.append({"key": tr.host_key(h.ip), "checks": checks, "data": {
             "Subnet": h.subnet, "IP": h.ip, "Hostname": h.hostname, "OS": h.os_guess,
+            "Hops": (str(h.distance) if h.distance else ""),
             "Roles": ", ".join(h.roles), "Open ports": open_ports,
             "# Vulns": len(h.vulns)}})
     return SheetSpec(CHECKLIST_TITLE, cols, rows, _styler_checklist)

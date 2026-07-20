@@ -1261,6 +1261,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             have.add(key)
             added.append(r)
     host.local_findings.extend(added)
+    # Promote the high-signal findings to first-class Vulns so they count toward
+    # severity totals and get write-ups (deduped against existing vulns by key).
+    have_v = {v.key for v in host.vulns}
+    promoted = [v for v in ingest.promote_to_vulns(host.ip, host.local_findings)
+                if v.key not in have_v]
+    host.vulns.extend(promoted)
     host.privesc_checked = True
     store.upsert_host(host)
     where = "existing host" if existed else "new host entry"
@@ -1269,6 +1275,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
           f"{host.ip}{hn}"
           + (f"; {len(new_rows) - len(added)} already present" if added != new_rows else "")
           + ".")
+    if promoted:
+        print(f"    Promoted {len(promoted)} high-signal finding(s) to the "
+              "Vulnerabilities sheet.")
     print(f"    OS: {host.os_family or 'unknown'}. See the Priv-Esc tab "
           "(rows tagged 'on-target finding').")
     title = store.get_meta("engagement") or args.title

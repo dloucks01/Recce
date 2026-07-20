@@ -1135,6 +1135,29 @@ class IngestParserTest(unittest.TestCase):
         dupe = ("recce-enum host=h\n==== Sudo ====\n[!] same\n[!] same\n")
         self.assertEqual(len(ingest.parse_loot(dupe)["findings"]), 1)
 
+    def test_empty_and_garbage_input_no_crash(self):
+        from recce import ingest
+        for blob in ("", "\n\n\n", "not recce output at all\nrandom text\n",
+                     "\x00\x01\x02 binary-ish \xff\xfe", "=" * 5000,
+                     "[!] finding with no banner and no section\n"):
+            p = ingest.parse_loot(blob)          # must not raise
+            self.assertIn("findings", p)
+            self.assertIsInstance(p["findings"], list)
+
+    def test_findings_without_banner_still_parse(self):
+        from recce import ingest
+        p = ingest.parse_loot("==== Sudo ====\n[!] NOPASSWD present\n")
+        self.assertFalse(p["is_recce"])          # no banner
+        self.assertEqual(len(p["findings"]), 1)  # but [!] lines still harvested
+
+    def test_malformed_section_headers_tolerated(self):
+        from recce import ingest
+        # Ragged '=' fences and stray '=' in finding text must not break parsing.
+        blob = ("recce-enum host=h\n=== Weird ==\n[!] a = b = c finding\n"
+                "======\n[!] another\n")
+        p = ingest.parse_loot(blob)
+        self.assertEqual(len(p["findings"]), 2)
+
 
 class IngestCommandTest(unittest.TestCase):
     def _eng(self, d, host=None):
@@ -1208,6 +1231,31 @@ class IngestCommandTest(unittest.TestCase):
             self._ingest(d, loot, extra=["--host", "10.0.0.1"])
             h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.1")
             self.assertEqual(len(h.local_findings), 1)
+
+    def test_high_signal_findings_promoted_to_vulns(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
+            self._ingest(d, _LOOT_LINUX)
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.50")
+            local_vulns = [v for v in h.vulns if v.source == "local"]
+            titles = " ".join(v.title for v in local_vulns)
+            self.assertTrue(local_vulns)                    # some got promoted
+            self.assertIn("Sudo misconfiguration", titles)  # NOPASSWD / ALL
+            self.assertIn("Readable /etc/shadow", titles)
+            # Promoted vulns are confirmed local observations with a CWE.
+            self.assertTrue(all(v.confidence == "confirmed" and v.cwes
+                                for v in local_vulns))
+
+    def test_promotion_is_idempotent(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
+            self._ingest(d, _LOOT_LINUX)
+            self._ingest(d, _LOOT_LINUX)          # re-ingest
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.50")
+            local = [v for v in h.vulns if v.source == "local"]
+            self.assertEqual(len(local), len({v.title for v in local}))  # no dupes
 
     def test_ingested_findings_appear_on_privesc_sheet(self):
         with tempfile.TemporaryDirectory() as d:
