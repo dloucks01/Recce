@@ -1722,4 +1722,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        # A scan phase catches this internally to save partial results; this is the
+        # backstop for any command that doesn't, so Ctrl-C is never an ugly crash.
+        print("\n[!] Interrupted. Results collected so far were saved; re-run "
+              "(with --resume on a scan) to continue.")
+        return 130
+    except Exception as e:  # noqa: BLE001 - top-level safety net for field use
+        # Never dump a raw traceback at a tester mid-engagement. Per-host scan work
+        # is already persisted crash-safe, so their data survives; give a clean
+        # message and a way to get the details for a bug report.
+        print(f"\n[x] recce hit an unexpected error: {type(e).__name__}: {e}")
+        if os.environ.get("RECCE_DEBUG"):
+            import traceback
+            traceback.print_exc()
+        else:
+            print("    Any data collected so far is saved. Re-run to continue; "
+                  "set RECCE_DEBUG=1 to see the full traceback for a bug report.")
+        return 1

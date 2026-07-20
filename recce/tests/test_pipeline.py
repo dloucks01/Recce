@@ -1,5 +1,7 @@
 """Offline tests for the enumeration pipeline (no network / nmap needed)."""
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -1032,6 +1034,61 @@ class CredEnumTest(unittest.TestCase):
         self.assertTrue(h.cred_enumerated)
         self.assertIsInstance(issues, list)
         self.assertIsInstance(auth, dict)
+
+
+class RobustnessTest(unittest.TestCase):
+    """Field-crash guards: bad tool output / unexpected errors must not crash."""
+
+    def test_run_survives_non_utf8_tool_output(self):
+        # A service banner with raw non-UTF-8 bytes must not raise
+        # UnicodeDecodeError mid-scan (errors='replace' on the runner).
+        outcome = scanner._run(
+            ["python3", "-c",
+             "import sys; sys.stdout.buffer.write(b'open \\xff\\xfe port\\n')"])
+        self.assertEqual(outcome.returncode, 0)
+        self.assertIn("open", outcome.stdout)          # decoded, not crashed
+        self.assertFalse(outcome.missing)
+
+    def test_run_missing_tool_is_marked_not_raised(self):
+        outcome = scanner._run(["definitely-not-a-real-binary-xyz", "--x"])
+        self.assertTrue(outcome.missing)
+        self.assertEqual(outcome.returncode, 127)
+
+    def test_credenum_run_survives_non_utf8(self):
+        from recce import credenum
+        out, err = credenum._run(
+            ["python3", "-c",
+             "import sys; sys.stdout.buffer.write(b'\\xff\\xfe done')"])
+        self.assertIsNone(err)
+        self.assertIn("done", out)
+
+    def test_main_top_level_guard_returns_clean_on_crash(self):
+        # An unexpected error inside a command must become a clean exit 1, not a
+        # traceback dumped at the tester.
+        import argparse
+        from recce import cli
+
+        def boom(args):
+            raise RuntimeError("simulated deep crash")
+
+        class _P:
+            def parse_args(self, _a):
+                ns = argparse.Namespace()
+                ns.func = boom
+                return ns
+
+        orig = cli.build_arg_parser
+        cli.build_arg_parser = lambda: _P()
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.main([])
+        finally:
+            cli.build_arg_parser = orig
+        self.assertEqual(rc, 1)
+        out = buf.getvalue()
+        self.assertIn("unexpected error", out)
+        self.assertNotIn("Traceback", out)             # no raw traceback by default
 
 
 class ScanHardeningTest(unittest.TestCase):

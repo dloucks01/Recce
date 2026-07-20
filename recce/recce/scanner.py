@@ -179,16 +179,26 @@ def check_environment(profile: ScanProfile) -> list[str]:
 
 
 def _run(cmd: list[str], timeout: int | None = None) -> RunOutcome:
-    """Run a command, capturing output. Never raises for timeout/missing tool -
-    returns a RunOutcome the caller inspects, so one bad host can't stall a run."""
+    """Run a command, capturing output. Never raises - returns a RunOutcome the
+    caller inspects, so one bad host can't stall or crash a run. `errors=replace`
+    keeps a non-UTF-8 service banner from raising UnicodeDecodeError mid-scan."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", timeout=timeout)
         return RunOutcome(p.returncode, p.stdout or "", p.stderr or "")
     except subprocess.TimeoutExpired as e:
-        return RunOutcome(returncode=124, stdout=e.stdout or "", stderr=e.stderr or "",
+        so = e.stdout or ""
+        se = e.stderr or ""
+        return RunOutcome(returncode=124,
+                          stdout=so.decode("utf-8", "replace") if isinstance(so, bytes) else so,
+                          stderr=se.decode("utf-8", "replace") if isinstance(se, bytes) else se,
                           timed_out=True)
     except FileNotFoundError:
         return RunOutcome(returncode=127, missing=True)
+    except (OSError, ValueError) as e:
+        # PermissionError, E2BIG (arg list too long), decode error, etc. - treat
+        # as a failed run rather than crashing the whole phase.
+        return RunOutcome(returncode=126, stderr=str(e))
 
 
 def _timeout_args(profile: ScanProfile, minutes: int | None = None):
