@@ -1069,6 +1069,90 @@ class TargetingFormE2ETest(unittest.TestCase):
         self.assertEqual(self._run_vulns([]), self.ALL)
 
 
+class PhaseIdempotencyTest(unittest.TestCase):
+    """Re-running a phase must NOT duplicate rows. Guards the core store-merge
+    contract: hosts/vulns/accounts/exploits/issues dedupe on re-scan."""
+
+    def _counts(self, db):
+        s = Store(db)
+        try:
+            hosts = s.all_hosts()
+            return {
+                "hosts": len(hosts),
+                "vulns": sum(len(h.vulns) for h in hosts),
+                "accounts": sum(len(h.accounts) for h in hosts),
+                "exploits": sum(len(h.exploits) for h in hosts),
+                "issues": s.count_issues().get("total", 0),
+            }
+        finally:
+            s.close()
+
+    def test_rerunning_vulns_does_not_duplicate(self):
+        from recce import cli
+        import recce.scanner as s
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        paths = cli._open_paths(d)
+        seed = Store(paths["db"])
+        seed.set_meta("engagement", "idem")
+        for h in sample_hosts():
+            seed.upsert_host(h)
+        seed.close()
+
+        def fake_vuln(ip, portids, out, profile, creds=None, aggressive=False,
+                      fast=False):
+            # Emit a real NSE finding + an issue every run, so a broken dedup WOULD
+            # grow the counts.
+            return _fake_scan(out, ip, [{"port": 80, "service": "http", "scripts": [
+                ("http-vuln-x", "VULNERABLE: demo State: VULNERABLE")]}])
+
+        oc, ov, ou = s.check_environment, s.vuln_scan, s.udp_scan
+        s.check_environment = lambda profile: []
+        s.vuln_scan = fake_vuln
+        s.udp_scan = lambda ip, out, profile: _fake_scan(out, ip, [])
+        argv = ["vulns", "-o", d, "--no-searchsploit", "--no-probes", "--workers", "1"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(argv), 0)
+            first = self._counts(paths["db"])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(argv), 0)          # SAME phase again
+            second = self._counts(paths["db"])
+        finally:
+            s.check_environment, s.vuln_scan, s.udp_scan = oc, ov, ou
+        self.assertEqual(first, second, f"re-run changed counts: {first} -> {second}")
+        self.assertGreater(first["vulns"], 0)                # actually produced findings
+
+    def test_store_merge_is_idempotent_for_all_collections(self):
+        # Upserting the identical rich host twice must not grow any collection.
+        from recce.models import Account, Exploit, Script
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        s = Store(os.path.join(d, "r.sqlite"))
+        h = Host(
+            ip="10.0.0.5", os_family="Linux",
+            ports=[Port(portid=445, state="open", service="smb",
+                        scripts=[Script(id="smb-os", output="o")])],
+            vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="v",
+                        title="t", severity="high")],
+            accounts=[Account(ip="10.0.0.5", source="nxc", kind="user", name="a",
+                              domain="C", rid="500")],
+            exploits=[Exploit(ip="10.0.0.5", port=445, edb_id="1", title="e")],
+            host_scripts=[Script(id="hs", output="o")],
+            local_findings=[{"category": "sudo", "vector": "NOPASSWD"}])
+        s.upsert_host(h)
+        s.upsert_host(Host.from_json(h.to_json()))          # identical, again
+        got = s.get_host("10.0.0.5")
+        s.close()
+        self.assertEqual(len(got.vulns), 1)
+        self.assertEqual(len(got.accounts), 1)
+        self.assertEqual(len(got.exploits), 1)
+        self.assertEqual(len(got.host_scripts), 1)
+        self.assertEqual(len(got.local_findings), 1)
+        self.assertEqual(len(got.ports), 1)
+
+
 _LOOT_LINUX = """\
 recce-enum  host=web01  user=www-data  Mon Jul 20 12:00:00 UTC 2026
 
