@@ -26,6 +26,7 @@ from . import db as dbmod
 from . import privesc as pe
 from . import tracking as tr
 from . import xlsx
+from .exploitref import proven_exploit_ref
 from .models import Domain, Host
 
 CHECKBOX_HEADERS = {"Reviewed", "Checked", "Triaged"}
@@ -228,7 +229,8 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         ("Triaged", "checkbox", 9), ("Severity", "data", 10), ("IP", "data", 16),
         ("Hostname", "data", 20), ("Port", "data", 6), ("Finding", "data", 44),
         ("Source", "data", 11), ("Conf.", "data", 10), ("CVE / refs", "data", 22),
-        ("CWE", "data", 16), ("Remediation", "data", 44), ("Details", "data", 50),
+        ("CWE", "data", 16), ("Proven exploit", "data", 52),
+        ("Remediation", "data", 44), ("Details", "data", 50),
         ("Notes", "notes", 26), ("Key", "key", 4),
     ]
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -242,9 +244,21 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
             "Severity": v.severity.upper(), "IP": h.ip, "Hostname": h.hostname,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
             "Source": v.source, "Conf.": v.confidence, "CVE / refs": ", ".join(v.ids),
-            "CWE": ", ".join(v.cwes),
+            "CWE": ", ".join(v.cwes), "Proven exploit": _proven_exploit_for(h, v),
             "Remediation": v.remediation, "Details": out}})
     return SheetSpec("Vulnerabilities", cols, rows, _styler_vulns)
+
+
+def _proven_exploit_for(host: Host, v) -> str:
+    """The verifiable, proven exploit for a vuln - same rule as the Word write-ups:
+    a searchsploit/EDB match on this port, or a curated known exploit, and never
+    for an unconfirmed advisory (confidence 'potential'). Empty string otherwise."""
+    if v.confidence == "potential":
+        return ""
+    edb = [e for e in host.exploits if e.port == v.port and e.edb_id]
+    if edb:
+        return "searchsploit: " + ", ".join(f"EDB-{e.edb_id}" for e in edb[:4])
+    return proven_exploit_ref(v.ids, f"{v.title} {v.script_id}") or ""
 
 
 def _spec_exploits(hosts: list[Host]) -> SheetSpec:
