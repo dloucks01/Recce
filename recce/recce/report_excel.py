@@ -443,6 +443,9 @@ def _build_guide(wb, meta: dict) -> None:
         ("Overview", "Totals, review progress, and live-hosts-per-subnet coverage."),
         ("Checklist", "THE working tab: one row per IP (grouped by subnet) with a "
                       "checkbox for each phase + host detail + Reviewed + Notes."),
+        ("Services", "The other working tab: every open port with a per-port Status "
+                     "(not started / in progress / done) and Notes - track each "
+                     "port you work (incl. SMB, remote access, mail, SNMP)."),
         ("Vulnerabilities", "Findings by severity: CVE + remediation (offline engine)."),
         ("Exploits", "searchsploit matches (EDB-ID, type, CVEs, local path)."),
         ("Databases", "DB inventory: engine, version, auth, databases, users."),
@@ -450,8 +453,6 @@ def _build_guide(wb, meta: dict) -> None:
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
         ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
-        ("Services", "Every open port + a per-port Status (not started / in "
-                     "progress / done) and Notes - track each port you work."),
         ("Services by Product", "Who runs the same service+version (mass-patch view)."),
     ]:
         sh.write([tab, desc])
@@ -604,11 +605,14 @@ def _build_active_directory(wb, hosts: list[Host], domains: list[Domain]) -> Non
 
 def _ordered_specs(hosts: list[Host], scope: dict | None = None):
     """Specs in final left-to-right order. Active Directory (a computed sheet) is
-    inserted between Databases and AD Quick Wins by build_workbook."""
-    return [_spec_checklist(hosts), _spec_vulns(hosts), _spec_exploits(hosts),
-            _spec_databases(hosts)], \
+    inserted between Databases and AD Quick Wins by build_workbook.
+
+    Services sits right after the Checklist: the two are the primary working
+    pair - Checklist tracks hosts, Services tracks each open port."""
+    return [_spec_checklist(hosts), _spec_services(hosts), _spec_vulns(hosts),
+            _spec_exploits(hosts), _spec_databases(hosts)], \
            [_spec_quick_wins(hosts), _spec_privesc(hosts), _spec_accounts(hosts),
-            _spec_services(hosts), _spec_services_by_product(hosts)]
+            _spec_services_by_product(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
