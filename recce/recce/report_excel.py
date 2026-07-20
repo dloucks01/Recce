@@ -712,6 +712,31 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
             sh.write([(label, "bold"), val])
     sh.write([""])
 
+    # --- Credentialed access matrix (only when credenum has run) ---
+    cred_hosts = [h for h in hosts if getattr(h, "cred_enumerated", False)]
+    if cred_hosts:
+        def _has(h, needle):
+            return any(needle in v.title for v in h.vulns)
+        sh.write([("Credentialed access matrix (per account)", "header"),
+                  ("", "header"), ("", "header"), ("", "header"), ("", "header")])
+        sh.write([("Host", "bold"), ("User acct", "bold"),
+                  ("User = admin", "bold"), ("Priv acct = admin", "bold"),
+                  ("Hashes dumped", "bold")])
+        for h in sorted(cred_hosts, key=lambda x: _ip_sort_key(x.ip)):
+            user_admin = _has(h, "Local admin confirmed - user account")
+            priv_admin = _has(h, "Local admin confirmed - privileged account")
+            dumped = _has(h, "Credential hashes dumped")
+            yes, no = ("✓", "done"), "—"
+            name = f"{h.ip}" + (f" ({h.hostname})" if h.hostname else "")
+            sh.write([name, "✓",
+                      yes if user_admin else no,
+                      yes if priv_admin else no,
+                      yes if dumped else no])
+        sh.write([("✓ = access confirmed via netexec (Pwn3d!) / secretsdump; "
+                   "a User=admin tick means the low-priv account is over-privileged.",
+                   "sub")])
+        sh.write([""])
+
     # --- Review progress ---
     sh.write([("Review progress (what you've ticked off)", "header"),
               ("", "header"), ("", "header"), ("", "header")])

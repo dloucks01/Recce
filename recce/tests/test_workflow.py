@@ -521,6 +521,35 @@ class WorkbookStructureTest(unittest.TestCase):
         for loc in targets:
             self.assertTrue(loc.split("!")[0] in present, f"dangling link: {loc}")
 
+    def test_credentialed_access_matrix(self):
+        from recce.models import Host, Port, Vuln
+
+        def cv(t):
+            return Vuln(ip="x", port=445, protocol="tcp", script_id="c",
+                        title=t, severity="high", source="cred")
+        hosts = [
+            Host(ip="10.0.10.10", hostnames=["dc01"], os_family="Windows",
+                 cred_enumerated=True, ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[cv("Local admin confirmed - privileged account"),
+                        cv("Credential hashes dumped (5 accounts)")]),
+            Host(ip="10.0.10.25", hostnames=["ws01"], os_family="Windows",
+                 cred_enumerated=True, ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[cv("Local admin confirmed - user account")]),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, out)
+            rows = xlsx.read_sheets(out)["Overview"]
+        # Find the matrix header + the two host rows.
+        text = ["|".join(str(c) for c in r) for r in rows]
+        self.assertTrue(any("access matrix" in t for t in text))
+        dc = next(r for r in rows if r and str(r[0]).startswith("10.0.10.10"))
+        ws = next(r for r in rows if r and str(r[0]).startswith("10.0.10.25"))
+        # dc01: privileged account is admin + hashes dumped; user account is not admin.
+        self.assertEqual([dc[2], dc[3], dc[4]], ["—", "✓", "✓"])
+        # ws01: the LOW-PRIV user account is admin (over-privileged) -> flagged.
+        self.assertEqual([ws[2], ws[3], ws[4]], ["✓", "—", "—"])
+
     def test_overview_host_index_deep_links_hit_correct_checklist_rows(self):
         try:
             from openpyxl import load_workbook
