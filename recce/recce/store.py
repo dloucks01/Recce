@@ -13,6 +13,10 @@ from contextlib import closing
 
 from .models import Domain, Host
 
+
+class StoreError(RuntimeError):
+    """The datastore file is corrupt/unreadable (e.g. a partial transfer)."""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS hosts (
     ip       TEXT PRIMARY KEY,
@@ -53,10 +57,25 @@ CREATE TABLE IF NOT EXISTS issues (
 class Store:
     def __init__(self, path: str):
         self.path = path
-        self.conn = sqlite3.connect(path)
-        self.conn.executescript(_SCHEMA)
-        self._migrate()
-        self.conn.commit()
+        try:
+            self.conn = sqlite3.connect(path)
+            # Ride out a transient lock (operator opened the DB, or a second recce)
+            # instead of aborting a scan; WAL lets readers not block the writer.
+            self.conn.execute("PRAGMA busy_timeout=15000")
+            try:
+                self.conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.Error:
+                pass                       # non-fatal (e.g. read-only fs); keep going
+            self.conn.executescript(_SCHEMA)
+            self._migrate()
+            self.conn.commit()
+        except sqlite3.Error as e:
+            # A corrupt / partially-transferred results.sqlite must fail with a
+            # clear, actionable message - not a raw sqlite traceback on the very
+            # first command against a carried-over engagement dir.
+            raise StoreError(
+                f"datastore at {path} is corrupt or unreadable ({e}). Delete it "
+                "or point -o at a fresh directory, then re-run.") from e
 
     def _migrate(self) -> None:
         """Add columns introduced after a datastore was first created."""
@@ -108,6 +127,7 @@ class Store:
             merged.os_name, merged.os_accuracy, merged.os_family = (
                 new.os_name, new.os_accuracy, new.os_family)
         merged.state = new.state or old.state
+        merged.distance = new.distance or old.distance
         merged.enumerated = old.enumerated or new.enumerated
         merged.db_scanned = old.db_scanned or new.db_scanned
         merged.privesc_checked = old.privesc_checked or new.privesc_checked
@@ -297,6 +317,13 @@ class Store:
                 "INSERT INTO issues(ts, ip, phase, level, message) VALUES(?,?,?,?,?)",
                 (ts, ip, phase, level, message),
             )
+        self.conn.commit()
+
+    def clear_issues(self, ip: str, phase: str) -> None:
+        """Drop prior issues for one host+phase so re-running a phase replaces its
+        issues instead of appending duplicates (which inflate the Overview count)."""
+        with closing(self.conn.cursor()) as cur:
+            cur.execute("DELETE FROM issues WHERE ip=? AND phase=?", (ip, phase))
         self.conn.commit()
 
     def get_issues(self) -> list[dict]:

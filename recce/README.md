@@ -7,10 +7,11 @@ and subnets, normalizes everything into a resumable datastore, and produces an
 **Excel workbook** built for tracking your engagement — plus Markdown and CSV.
 
 It is designed for mixed **Linux + Windows / Active Directory** environments:
-full TCP port sweeps, service/version + OS detection, initial vulnerability
-identification (NSE `vuln` + `vulners`), and deep **Active Directory** analysis —
-DC identification, NTLM-relay target discovery, and credentialed LDAP
-enumeration of users, SPNs, roastable accounts, delegation, groups and trusts.
+full TCP port sweeps, service/version + OS detection, vulnerability
+identification (curated detection NSE + a built-in **offline** version→CVE/CWE
+database, so it works airgapped), and deep **Active Directory** analysis — DC
+identification, NTLM-relay target discovery, and credentialed LDAP enumeration of
+users, SPNs, roastable accounts, delegation, groups and trusts.
 
 > 🚀 **New here? Read [QUICKSTART.md](QUICKSTART.md)** — a one-page guide that
 > gets you from zero to a filled-in workbook in five commands. There is also a
@@ -27,7 +28,7 @@ adds the layer engagements actually need:
   columns so you can track what's been looked at.
 - **Persistent coverage tracking.** Your checkboxes live in the datastore, not
   just the spreadsheet — re-scanning and re-reporting **never wipe your
-  progress**. A **Coverage** sheet and a `status` command show exactly what's
+  progress**. An **Overview** sheet and a `status` command show exactly what's
   left, at any time (see [Coverage tracking](#coverage-tracking)).
 - **"Who else runs this?" pivot.** A *Services by Product/Version* sheet groups
   every endpoint by exact product+version — instantly see all systems running
@@ -44,16 +45,29 @@ adds the layer engagements actually need:
 **No pip install required.** The tool uses only the Python standard library
 (3.9+), so it runs on an **airgapped** box out of the box — including writing and
 reading `.xlsx` (a self-contained stdlib writer, no openpyxl). Just copy the
-folder over.
+folder over and run **`python3 -m recce ...`** or **`./bin/recce ...`**.
 
-It orchestrates these **system tools** if present (all standard on Kali):
+> `pip install .` is **optional** — it only creates a bare `recce` command on
+> PATH. recce has zero Python dependencies, so it never fetches anything, but
+> pip's default build step pulls `setuptools`/`wheel` from PyPI, so on an
+> airgapped box either use `--no-build-isolation` or (simpler) **just skip pip
+> and use `./bin/recce`**. `pyproject.toml` is there for staging boxes / an
+> internal mirror and for `recce --version`.
+
+It orchestrates these **system tools** if present (all standard on Kali). Only
+`nmap` is required; every other tool is optional and its phase degrades cleanly
+with a logged note when absent. `recce doctor` reports exactly what's available.
 
 | Tool | Needed for |
 |------|-----------|
 | `nmap` | **required** — scanning, service/version/OS detection, NSE vuln + AD scripts |
 | `masscan` | optional — `--fast` network-wide sweep |
 | `searchsploit` (exploitdb) | optional — offline exploit mapping (Exploits sheet) |
+| `netexec` / `crackmapexec` | optional — credentialed SMB/AD enum (`credenum`) |
+| `impacket` | optional — Kerberoast / AS-REP / secretsdump (`credenum`) |
 | `ldapsearch` (ldap-utils) | optional — credentialed AD LDAP enumeration |
+| `ssh` (+ `sshpass`) | optional — credentialed Linux local checks (`credenum`) |
+| `firefox` / `chromium` | optional — auto web screenshots in write-ups |
 
 Run scans as **root** (SYN scan + OS detection need raw sockets); it falls back
 to a TCP connect scan otherwise.
@@ -62,11 +76,13 @@ to a TCP connect scan otherwise.
 > have `openpyxl` on a connected box, the files are fully compatible — but it is
 > never required.
 
-## Workflow (two phases)
+## Workflow
 
-The tool is built around the way you actually work an engagement: **get the
-sheet populated fast, then scan for vulns per open port** — the two are separate,
-cheap, resumable commands.
+The core is **two cheap, resumable commands**: `enum` gets the sheet populated
+fast, then `vulns` scans for vulnerabilities per open port. Everything after
+that — `db`, `privesc`, `credenum`, `ingest`, `writeups` — is an **optional
+deeper phase** you run on whatever subset you like, whenever you like. Each phase
+is separate and re-runnable (re-running never duplicates anything).
 
 ```bash
 # FIRST, on any new box: verify it can run the tool (env + tools + a real
@@ -116,7 +132,7 @@ what's already in the datastore (plus `--only`, `--unscanned`).
 
 ### The Checklist tab
 
-The **Checklist** sheet (right after Coverage) is the at-a-glance answer to
+The **Checklist** sheet (right after Overview) is the at-a-glance answer to
 "which IPs are done and what's left." One row per IP, with a **checkbox for each
 workflow step**:
 
@@ -188,14 +204,6 @@ dropdown so you can mark exactly where you are on that specific port:
 > override only when your box differs from the tool's current state — so re-tick a
 > box to match the tool and it goes back to following the tool automatically.
 > Edit step boxes *between* scans (not while a scan of that host is running).
-
-Other targets syntax: CIDR, `10.0.0.10-40` ranges, single IPs/hostnames, or
-`@scope.txt`. Speed flags (`--fast`, `--workers`, `--resume`, `--all-ports`) live
-on `enum`/`scan`.
-
-### Target syntax
-CIDR (`10.0.0.0/24`), dash range (`10.0.0.10-40`), single IP, hostname, or
-`@file`. Mix as many as you like on one command line.
 
 ## What each phase runs
 
@@ -415,7 +423,7 @@ which you haven't — and never lose that as scans grow.
   auto-refresh during a scan) **preserves every check and note**. Each tracked
   sheet carries a hidden `Key` column that ties a row to its datastore item, so
   read-back is exact.
-- The **Coverage** sheet (data-bar progress per category + per subnet) and the
+- The **Overview** sheet (data-bar progress per category + per subnet) and the
   `status` command give a live picture.
 
 ```bash
@@ -584,31 +592,89 @@ scan never disappears silently. Service detection runs at higher intensity in
 the `enum` phase (it feeds the offline vuln DB); the `vulns` phase only does a
 light version probe since enum already has the versions.
 
+## Command & option reference
+
+Every command takes targets as a single IP, several IPs, a range
+(`10.0.0.10-40`), a CIDR, or `@file`. Common options (all scan phases):
+`-o DIR` (engagement folder), `--title`, `--profile quick|standard|thorough`,
+`--workers N`, `--refresh-every N`, `--host-timeout MIN`.
+
+| Command | What it does | Notable options |
+|---|---|---|
+| `doctor` | Verify the box (env + tools + real localhost self-scan) | `--no-self-scan` |
+| `demo` | Build reports from a bundled sample scan (no network) | — |
+| `enum <targets>` | Discover hosts, port sweep, service/OS/AD enum → sheet | `--fast` (masscan), `--all-ports`, `--top-ports N`, `--no-discovery`, `--no-ad`, `--no-os`, `--version-all`, `--version-intensity 0-9`, `--min-rate`, `--exclude`, `--resume` |
+| `vulns [targets]` | Vuln-scan open ports (safe detection + offline CVE/CWE DB + probes) | `--fast` (top-signal + progress/ETA), `--aggressive` (full NSE), `--only SVC`, `--unscanned`, `--offline`, `--no-searchsploit`, `--no-probes`, `--udp-top N` |
+| `scan <targets>` | `enum` then `vulns` in one shot | all of enum + vulns (`--fast` = fast sweep *and* fast vulns) |
+| `db [targets]` | Database enumeration + vuln scan | `--aggressive` (brute/xp_cmdshell/hash), `--no-searchsploit` |
+| `privesc [targets]` | Per-host priv-esc playbook | `--scan` (remote NSE checks), `--aggressive` |
+| `credenum [targets]` | Authenticated SMB/AD/SSH enum | `-u/-p/-d`, `--admin-user/--admin-pass/--admin-domain`, `--ssh-user/--ssh-pass/--ssh-key`, `--ldap-enum`, `--ldap-anon`, `--ldap-ssl`, `--dc-ip`, `--aggressive` |
+| `ingest <loot>` | Fold on-target `recce-enum.sh`/`.ps1` findings into Priv-Esc | `--host IP` |
+| `writeups [targets]` | One Word write-up per finding + combined report | `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
+| `report` | Rebuild the workbook/reports from the datastore | — |
+| `status` | Print live coverage + suggested next command | — |
+| `review` | Mark hosts/services/items reviewed from the CLI | `--host`, `--service IP:PORT`, `--key`, `--cascade`, `--note`, `--undo` |
+
+Credentials passed to `enum`/`vulns` (`-u/-p/-d`) also feed the SMB/LDAP NSE
+scripts during the scan. Run `recce <command> -h` for the full list.
+
+**Environment:** `RECCE_DEBUG=1` (full tracebacks), `RECCE_BROWSER=/path`
+(screenshot browser). **Exit codes:** `0` ok · `1` error · `2` bad args · `130`
+interrupted (partial results saved).
+
+## Troubleshooting
+
+Run **`recce doctor`** first — it reports what's missing and self-tests the
+pipeline. Most-common issues:
+
+- **`nmap ... not found`** — install nmap (the only hard requirement).
+- **weak scan / "Not running as root"** — run with `sudo`; under sudo use
+  `sudo ./bin/recce ...` so PATH/PYTHONPATH survive.
+- **discovery finds nothing** — a firewall is dropping pings; re-run with
+  `--no-discovery` (`-Pn`).
+- **too slow** — `--fast`, `--workers N`, `vulns --fast`, `--profile quick`,
+  `--top-ports`, `--host-timeout`.
+- **crashed / interrupted** — nothing is lost; re-run with `--resume`, or
+  `recce report -o DIR`. `RECCE_DEBUG=1` for the traceback.
+- **credenum auth table** — `FAIL` = credential rejected (check user/pass/**domain**);
+  `ERR` = unreachable/tool error; `-` = not attempted (missing tool never shows FAIL).
+- **workbook won't update** — close it in Excel first (an open file is locked).
+
+**Re-running any phase is always safe** — every phase is idempotent and never
+duplicates rows. Full guide: **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
+
 ## Layout
 
 ```
 bin/recce            convenience wrapper (run: ./bin/recce ...)
+pyproject.toml       packaging (pip install . -> `recce` command)
+README.md            this file
 QUICKSTART.md        one-page user guide
+TROUBLESHOOTING.md   symptom -> cause -> fix, per phase
+CHANGELOG.md         release notes
 recce/               the package (python -m recce)
+  cli.py             command-line interface (enum/vulns/db/privesc/... commands)
   targets.py         target parsing / subnet expansion / IP matcher
   scanner.py         nmap / masscan orchestration (discover / enum / vuln / nse)
   parser.py          nmap XML -> normalized model (+ vuln & AD harvesting)
   models.py          Host / Port / Vuln / Exploit / Account / Domain dataclasses
+  store.py           SQLite datastore: hosts + domains + tracking, merge-on-rescan
+  tracking.py        coverage + per-step keys, progress computation (shared)
   ad.py              AD analysis: roles, signing/relay, LDAP enumeration
   db.py              database detection + engine-specific NSE + inventory
+  vulndb.py          offline version->CVE/CWE vulnerability engine (+ remediation)
+  exploits.py        offline exploit mapping via searchsploit (Exploit-DB)
+  exploitref.py      curated proven-exploit references (walkthroughs + sheet)
+  probes.py          stdlib HTTP-header + TLS enrichment probes (airgapped)
   privesc.py         Windows/Linux priv-esc findings + playbook knowledge base
   credenum.py        credentialed enum via netexec / impacket / ssh (tool-gated)
-  docx.py            standard-library .docx writer (no python-docx) + image embed
-  report_docx.py     per-finding Word write-ups from the walkthrough template
+  ingest.py          on-target loot -> Priv-Esc rows + promoted Vulnerabilities
   screenshot.py      optional headless-browser web screenshots (tool-gated)
-  exploits.py        offline exploit mapping via searchsploit (Exploit-DB)
-  vulndb.py          offline version->CVE/CWE vulnerability engine (+ remediation)
-  probes.py          stdlib HTTP-header + TLS enrichment probes (airgapped)
-  tracking.py        coverage + per-step keys, progress computation (shared)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)
-  store.py           SQLite datastore: hosts + domains + tracking, merge-on-rescan
-  report_excel.py    the Excel workbook (Start Here, Overview, Checklist, ...)
+  docx.py            standard-library .docx writer (no python-docx) + image embed
+  report_excel.py    the Excel workbook (Start Here, Runbook, Overview, ...)
+  report_docx.py     per-finding Word write-ups from the walkthrough template
   report_markdown.py Markdown + CSV
-  cli.py             command-line interface (enum/vulns/db/privesc/... commands)
   sample_scan.xml    bundled sample for `demo`
+  local/             on-target read-only enum scripts (recce-enum.sh / .ps1)
 ```

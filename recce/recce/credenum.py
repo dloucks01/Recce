@@ -68,7 +68,8 @@ def available_tools() -> dict[str, str | None]:
 def _run(cmd: list[str], timeout: int = _TIMEOUT) -> tuple[str, str | None]:
     """Run a tool; return (combined output, error-or-None). Never raises."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", timeout=timeout)
         return (p.stdout or "") + (p.stderr or ""), None
     except subprocess.TimeoutExpired:
         return "", f"timed out after {timeout}s"
@@ -441,9 +442,11 @@ def _fold_ssh(host: Host, facts: dict) -> None:
 
 
 def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
-                aggressive: bool = False, admin_creds: dict | None = None) -> list[dict]:
+                aggressive: bool = False,
+                admin_creds: dict | None = None) -> tuple[list[dict], dict]:
     """Run every applicable credentialed check against one host, folding results
-    in place. Returns a list of issue dicts for tools that errored.
+    in place. Returns (issues, auth): a list of issue dicts for tools that
+    errored, plus a per-account authentication-outcome map for the summary table.
 
     Two credential sets are supported, matching a real engagement:
       * `creds`       - a normal/low-privilege account: does the broad enumeration
@@ -456,7 +459,12 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
     """
     issues: list[dict] = []
     # Per-account authentication outcome, so the phase can print a loud
-    # success/fail table: label -> {"auth": bool, "admin": bool, "tried": bool}.
+    # success/fail table: label -> {"tried", "auth", "admin", "error"}. We only
+    # record a cell when the tool actually ran and returned a verdict - a missing
+    # tool (data and err both None) leaves the cell blank, so the table never
+    # reports "FAIL" (and never tells the operator to check creds) for a tooling
+    # gap. `error` marks an attempt that errored out (unreachable/timeout) - a
+    # different thing from credentials being rejected.
     auth: dict[str, dict] = {}
 
     def note(phase, err):
@@ -464,12 +472,22 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
             issues.append({"phase": phase, "level": "warning",
                            "message": f"{phase}: {err}"})
 
+    def rec_smb(label, data, err):
+        if data is not None:
+            # Holding local admin necessarily means the bind authenticated, so
+            # admin implies auth even if the parser only flagged the Pwn3d! line.
+            authed = bool(data.get("auth") or data.get("admin"))
+            auth[label] = {"tried": True, "auth": authed,
+                           "admin": bool(data.get("admin")), "error": False}
+        elif err is not None:
+            auth[label] = {"tried": True, "auth": False, "admin": False,
+                           "error": True}
+        # else: tool absent - leave the cell unrecorded ("-").
+
     if _creds_ok(creds) and _smb_ports(host):
         data, err = run_nxc_smb(host.ip, creds)
         note("cred-smb", err)
-        auth["user"] = {"tried": True,
-                        "auth": bool(data and data.get("auth")),
-                        "admin": bool(data and data.get("admin"))}
+        rec_smb("user", data, err)
         if data:
             _fold_nxc(host, data, label="user account")
     if _creds_ok(creds) and _is_dc(host):
@@ -482,7 +500,12 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
     if ssh and ssh.get("username") and _ssh_port(host):
         facts, err = run_ssh_local(host.ip, ssh)
         note("ssh-local", err)
-        auth["ssh"] = {"tried": True, "auth": bool(facts), "admin": False}
+        if facts is not None:
+            auth["ssh"] = {"tried": True, "auth": True, "admin": False,
+                           "error": False}
+        elif err is not None:
+            auth["ssh"] = {"tried": True, "auth": False, "admin": False,
+                           "error": True}
         if facts:
             _fold_ssh(host, facts)
 
@@ -493,12 +516,15 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
     if _creds_ok(admin_creds) and _smb_ports(host):
         data, err = run_nxc_smb(host.ip, admin_creds)
         note("cred-smb-admin", err)
-        auth["admin"] = {"tried": True,
-                         "auth": bool(data and data.get("auth")),
-                         "admin": bool(data and data.get("admin"))}
+        rec_smb("admin", data, err)
         if data:
             _fold_nxc(host, data, label="privileged account", admin_only=True)
-    if _creds_ok(dump_creds) and _smb_ports(host):
+    # Only attempt the hash dump where the account we'd use actually authenticated
+    # over SMB - a doomed secretsdump on a rejected/erroring bind wastes a run and
+    # would misleadingly imply we had access.
+    dump_label = "admin" if dump_creds is admin_creds else "user"
+    dump_ok = auth.get(dump_label, {}).get("auth", False)
+    if _creds_ok(dump_creds) and _smb_ports(host) and dump_ok:
         dumped, err = run_secretsdump(host.ip, dump_creds)
         note("secretsdump", err)
         _fold_secrets(host, dumped, dump_creds.get("domain", ""))

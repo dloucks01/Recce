@@ -63,3 +63,16 @@ AMSI/Defender tampering. That transparency is precisely why a plain `Get-*` /
 built-in-command script does not match malware signatures. If an EDR still
 false-positives, coordinate an allow-list / exclusion rather than trying to
 evade it — evasion would defeat the point of a clean, auditable read-only tool.
+
+## Troubleshooting
+
+- **Always self-test first** — `-t` / `-SelfTest`. If the parse says `[ OK ]`, a
+  real run is safe; it runs no enumeration.
+- **Windows won't run the script** — use `-ep bypass`
+  (`powershell -ep bypass -File .\recce-enum.ps1`); the execution policy blocks
+  unsigned scripts by default.
+- **Sparse output** — many checks self-skip when a command/cmdlet is absent or
+  you're not elevated; that's expected (the self-test lists which will run).
+- **Bringing findings back** — save with `-o` / `-OutFile`, copy the file to your
+  box, then `recce ingest loot.txt -o eng` folds the `[!]` lines into the
+  **Priv-Esc** sheet (high-signal ones also become Vulnerabilities).
