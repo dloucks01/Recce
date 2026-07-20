@@ -12,13 +12,15 @@
 
   Usage:
     powershell -ep bypass -File .\recce-enum.ps1 [-Quiet] [-OutFile report.txt]
+      -SelfTest  pre-flight only: parse-check the script + report which sections
+                 will run on this host. Runs NO enumeration - safe first step.
       -Quiet     findings only (skip the raw dumps)
       -OutFile   also write everything to a file
 
   Authorized testing only. Lines marked [!] are worth a closer look.
 #>
 [CmdletBinding()]
-param([switch]$Quiet, [string]$OutFile)
+param([switch]$SelfTest, [switch]$Quiet, [string]$OutFile)
 
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference    = 'SilentlyContinue'
@@ -41,6 +43,44 @@ function TestWritable($path){
     }
   }catch{}
   return $false
+}
+
+# ============================================================ self-test (pre-flight)
+if($SelfTest){
+  Write-Host "recce-enum.ps1 self-test - verifies the script + host; runs NO enumeration"
+  Write-Host ""
+  # 1) Syntax: parse this very file with the PowerShell parser.
+  if($PSCommandPath -and (Test-Path $PSCommandPath)){
+    $perr = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$null, [ref]$perr) | Out-Null
+    if($perr -and $perr.Count){
+      Write-Host ("[FAIL] " + $perr.Count + " syntax error(s):")
+      $perr | ForEach-Object { Write-Host ("       L" + $_.Extent.StartLineNumber + ": " + $_.Message) }
+    } else { Write-Host "[ OK ] script parses cleanly (no syntax errors)" }
+  } else { Write-Host "[warn] cannot locate the script file to parse (run with -File)" }
+  # 2) Host environment.
+  Write-Host ("[info] PowerShell " + $PSVersionTable.PSVersion + " " + $PSVersionTable.PSEdition +
+              " | policy=" + (Get-ExecutionPolicy) + " | lang=" + $ExecutionContext.SessionState.LanguageMode)
+  $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  Write-Host ("[info] Elevated (admin): " + $admin + "   (elevated reads more; unelevated still works)")
+  # 3) Command availability -> which section families will produce data here.
+  $checks = [ordered]@{
+    'System & patches'      = @('Get-CimInstance','Get-HotFix')
+    'Users & groups'        = @('Get-LocalUser','Get-LocalGroupMember','net','quser')
+    'Services & tasks'      = @('Get-CimInstance','Get-ScheduledTask')
+    'Credentials'           = @('cmdkey','klist','netsh','reg')
+    'Hardening / Defender'  = @('Get-MpComputerStatus','Get-BitLockerVolume','Get-AppLockerPolicy')
+    'Network'               = @('ipconfig','netstat','Get-SmbShare','Get-NetFirewallProfile')
+    'Core (always needed)'  = @('whoami','Get-ItemProperty','Get-Process')
+  }
+  foreach($k in $checks.Keys){
+    $missing = @($checks[$k] | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+    if($missing.Count -eq 0){ Write-Host ("[ OK ] " + $k) }
+    else { Write-Host ("[skip] " + $k + "  - missing: " + ($missing -join ', ') + " (those checks self-skip)") }
+  }
+  Write-Host ""
+  Write-Host "Self-test complete. If the parse is OK, a real run is safe:  .\recce-enum.ps1"
+  return
 }
 
 if($OutFile){ "" | Out-File -FilePath $OutFile -Encoding utf8 }
