@@ -13,7 +13,10 @@ have a distinct fingerprint:
     10.0.20.6   web02            Linux 5.4            22,80,21,3306    ftp-anon
 """
 
+import contextlib
+import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -54,12 +57,18 @@ def sample_hosts():
 
 
 def rows_by_ip(sheets, title):
-    """Return (header, {ip: [row-as-dict, ...]}) for a sheet with an IP column."""
+    """Return (header, {ip: [row-as-dict, ...]}) for a sheet with an IP column.
+
+    Skips collapsible group-header band rows (they carry a label in the IP column
+    but no Key), so callers only see real data rows keyed by a bare IP."""
     rows = sheets[title]
     hdr = rows[0]
     ipc = hdr.index("IP")
+    kidx = hdr.index("Key") if "Key" in hdr else None
     out: dict = {}
     for r in rows[1:]:
+        if kidx is not None and (len(r) <= kidx or not r[kidx]):
+            continue                       # group-header band row - not data
         if len(r) > ipc and r[ipc]:
             out.setdefault(str(r[ipc]), []).append(dict(zip(hdr, r)))
     return hdr, out
@@ -153,6 +162,24 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
                              " ".join(r["Finding"] for r in by_ip.get(ip, [])))
         # ftp-anon is web02 only.
         self.assertIn("FTP", " ".join(r["Finding"] for r in by_ip.get("10.0.20.6", [])))
+
+    def test_proven_exploit_column(self):
+        _hdr, by_ip = rows_by_ip(self.sheets, "Vulnerabilities")
+        self.assertIn("Proven exploit", _hdr)
+        # The DC's ms17-010 finding carries the proven EternalBlue exploit...
+        dc = by_ip["10.0.10.10"]
+        ms17 = next(r for r in dc if "ms17-010" in r["Finding"])
+        self.assertIn("eternalblue", ms17["Proven exploit"].lower())
+        # ...while an advisory/potential finding (SMBGhost etc.) gets no exploit,
+        # and neither does any non-proven finding.
+        for r in dc:
+            if r["Conf."] == "potential":
+                self.assertEqual(r["Proven exploit"], "")
+        # The Overview total equals the number of proven-exploit rows on the sheet.
+        _h2, all_by_ip = rows_by_ip(self.sheets, "Vulnerabilities")
+        n_proven = sum(1 for rs in all_by_ip.values() for r in rs if r["Proven exploit"])
+        ov = ["|".join(str(c) for c in r) for r in self.sheets["Overview"]]
+        self.assertTrue(any(f"Findings with a proven exploit|{n_proven}" in t for t in ov))
         # ws01 has no findings at all.
         self.assertEqual(by_ip.get("10.0.10.25", []), [])
 
@@ -411,6 +438,185 @@ class WorkbookStructureTest(unittest.TestCase):
             wb = load_workbook(out)
             self.assertIn("Checklist", wb.sheetnames)
 
+    def test_styling_freeze_gridlines_and_severity_contrast(self):
+        """The polish pass: identity columns frozen, gridlines off, and critical
+        severity is solid with white text (openpyxl reads the applied styles)."""
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            wb = load_workbook(out)
+        self.assertEqual(wb["Checklist"].freeze_panes, "D2")   # header + 3 id cols
+        self.assertEqual(wb["Services"].freeze_panes, "C2")
+        self.assertFalse(wb["Checklist"].sheet_view.showGridLines)
+        vs = wb["Vulnerabilities"]
+        hdr = [c.value for c in vs[1]]
+        sev_i = hdr.index("Severity") + 1
+        crit = next(vs.cell(row=r, column=sev_i)
+                    for r in range(2, vs.max_row + 1)
+                    if vs.cell(row=r, column=sev_i).value == "CRITICAL")
+        self.assertEqual(crit.fill.fgColor.rgb, "FFC00000")     # solid red
+        self.assertEqual(crit.font.color.rgb, "FFFFFFFF")       # white text
+        self.assertTrue(crit.font.bold)
+
+    def test_raw_nse_sheet_scopes_host_and_port_scripts_per_host(self):
+        from recce.models import Host, Port, Script
+        hosts = [
+            Host(ip="10.0.0.5", hostnames=["a"], ports=[Port(portid=445,
+                 service="microsoft-ds", scripts=[Script(id="smb2-security-mode",
+                 output="Message signing enabled but not required")])],
+                 host_scripts=[Script(id="smb-os-discovery", output="OS: Windows")]),
+            Host(ip="10.0.0.6", ports=[Port(portid=21, service="ftp",
+                 scripts=[Script(id="ftp-anon", output="Anonymous FTP login allowed")])]),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, out)
+            sheets = xlsx.read_sheets(out)
+        self.assertIn("Raw NSE", sheets)
+        self.assertIn("Scope", sheets["Raw NSE"][0])          # unified Scope column
+
+        _h, by_ip = rows_by_ip(sheets, "Raw NSE")
+        rows5 = {r["Script"]: r for r in by_ip["10.0.0.5"]}
+        # Host-level script -> Scope "host"; port script -> Scope "445".
+        self.assertEqual(rows5["smb-os-discovery"]["Scope"], "host")
+        self.assertEqual(rows5["smb-os-discovery"]["Output"], "OS: Windows")
+        self.assertEqual(rows5["smb2-security-mode"]["Scope"], "445")
+        # web02's per-port script lands on its own IP, no cross-host bleed.
+        rows6 = {r["Script"]: r for r in by_ip["10.0.0.6"]}
+        self.assertEqual(rows6["ftp-anon"]["Scope"], "21")
+        self.assertNotIn("ftp-anon", rows5)
+
+    def test_design_language_fonts_and_accent(self):
+        """Machine data (IP/version) renders monospace with a teal IP accent;
+        prose (Product) stays sans - the light HTML-preview design language."""
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            wb = load_workbook(out)
+        sv = wb["Services"]
+        hdr = [c.value for c in sv[1]]
+        ki = hdr.index("Key") + 1                          # openpyxl cols are 1-based
+        drow = next(r for r in range(2, sv.max_row + 1)
+                    if sv.cell(row=r, column=ki).value)   # first real data row
+
+        def cell(name):
+            return sv.cell(row=drow, column=hdr.index(name) + 1)
+        ip = cell("IP")
+        self.assertEqual(ip.font.name, "Consolas")
+        self.assertEqual(ip.font.color.rgb, "FF0E6E67")       # teal accent
+        self.assertEqual(cell("Version").font.name, "Consolas")  # mono data
+        self.assertEqual(cell("Product").font.name, "Calibri")   # prose stays sans
+        self.assertEqual(sv.cell(row=1, column=1).fill.fgColor.rgb, "FF0E6E67")  # teal header
+
+    def test_tab_colors_and_overview_nav_links(self):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            wb = load_workbook(out)
+        # Tab colours group the tabs into role bands.
+        self.assertIsNotNone(wb["Checklist"].sheet_properties.tabColor)
+        self.assertIsNotNone(wb["Vulnerabilities"].sheet_properties.tabColor)
+        # Overview is a nav hub: a jump bar + clickable totals link to real sheets.
+        ov = wb["Overview"]
+        targets = {c.hyperlink.location for row in ov.iter_rows()
+                   for c in row if c.hyperlink}
+        self.assertTrue(any("Checklist" in t for t in targets))
+        self.assertTrue(any("Vulnerabilities" in t for t in targets))
+        # Every link points at a sheet that actually exists (no dangling jumps).
+        present = {f"'{n}'" for n in wb.sheetnames}
+        for loc in targets:
+            self.assertTrue(loc.split("!")[0] in present, f"dangling link: {loc}")
+
+    def test_credentialed_access_matrix(self):
+        from recce.models import Host, Port, Vuln
+
+        def cv(t):
+            return Vuln(ip="x", port=445, protocol="tcp", script_id="c",
+                        title=t, severity="high", source="cred")
+        hosts = [
+            Host(ip="10.0.10.10", hostnames=["dc01"], os_family="Windows",
+                 cred_enumerated=True, ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[cv("Local admin confirmed - privileged account"),
+                        cv("Credential hashes dumped (5 accounts)")]),
+            Host(ip="10.0.10.25", hostnames=["ws01"], os_family="Windows",
+                 cred_enumerated=True, ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[cv("Local admin confirmed - user account")]),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, out)
+            rows = xlsx.read_sheets(out)["Overview"]
+        # Find the matrix header + the two host rows.
+        text = ["|".join(str(c) for c in r) for r in rows]
+        self.assertTrue(any("access matrix" in t for t in text))
+        dc = next(r for r in rows if r and str(r[0]).startswith("10.0.10.10"))
+        ws = next(r for r in rows if r and str(r[0]).startswith("10.0.10.25"))
+        # dc01: privileged account is admin + hashes dumped; user account is not admin.
+        self.assertEqual([dc[2], dc[3], dc[4]], ["—", "✓", "✓"])
+        # ws01: the LOW-PRIV user account is admin (over-privileged) -> flagged.
+        self.assertEqual([ws[2], ws[3], ws[4]], ["✓", "—", "—"])
+
+    def test_overview_host_index_deep_links_hit_correct_checklist_rows(self):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        from recce.report_excel import read_key_order
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+
+            def _check(path):
+                wb = load_workbook(path)
+                ck = wb["Checklist"]
+                ipc = [c.value for c in ck[1]].index("IP") + 1
+                ip_row = {ck.cell(row=r, column=ipc).value: r
+                          for r in range(2, ck.max_row + 1)}
+                ov = wb["Overview"]
+                deep = {c.value: c.hyperlink.location
+                        for row in ov.iter_rows() for c in row
+                        if c.hyperlink and c.hyperlink.location.startswith(
+                            "'Checklist'!A") and c.value in ip_row}
+                # Every host is indexed, and each link targets its real row.
+                self.assertEqual(set(deep), set(ip_row))
+                for ip, loc in deep.items():
+                    self.assertEqual(loc, f"'Checklist'!A{ip_row[ip]}")
+
+            _check(out)
+            # Regenerate preserving row order -> links must still be correct.
+            build_workbook(sample_hosts(), out, order_map=read_key_order(out))
+            _check(out)
+
+    def test_grouped_sheet_has_collapsible_host_bands(self):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            wb = load_workbook(out)
+        sv = wb["Services"]
+        self.assertEqual(sv.sheet_format.outlineLevelRow, 1)
+        self.assertFalse(sv.sheet_properties.outlinePr.summaryBelow)  # header above
+        # Detail rows are grouped (outline level 1); host-header rows are level 0.
+        levels = {sv.row_dimensions[r].outlineLevel
+                  for r in range(2, sv.max_row + 1)}
+        self.assertIn(1, levels)                              # some grouped detail
+        self.assertIn(0, levels)                              # some header/summary
+
 
 class ScannerCommandTest(unittest.TestCase):
     """Verify the actual nmap command assembled for each phase (mock _run)."""
@@ -460,9 +666,27 @@ class ScannerCommandTest(unittest.TestCase):
             agg = self._capture(s.vuln_scan, "1.2.3.4", [80],
                                 os.path.join(d, "v.xml"), s.PROFILES["standard"],
                                 aggressive=True)
-        self.assertIn("vuln and safe", " ".join(safe[0][0]))
+        safe_j, agg_j = " ".join(safe[0][0]), " ".join(agg[0][0])
+        self.assertIn("vuln and safe", safe_j)
         self.assertIn("--version-light", safe[0][0])   # not a full re-scan
-        self.assertIn("vuln or vulners", " ".join(agg[0][0]))
+        self.assertIn("vuln or vulners", agg_j)
+        # KEY FIX: high-value detection scripts that nmap does NOT tag "safe"
+        # (ms17-010, heartbleed, vsftpd backdoor) still run in the default scan -
+        # no flag needed. --aggressive adds the full intrusive vuln category.
+        for script in ("smb-vuln-ms17-010", "ssl-heartbleed", "ftp-vsftpd-backdoor"):
+            self.assertIn(script, safe_j)
+            self.assertIn(script, agg_j)
+
+    def test_enum_deep_scripts_on_standard_not_quick(self):
+        import recce.scanner as s
+        with tempfile.TemporaryDirectory() as d:
+            std = self._capture(s.enum_scan, "1.2.3.4", [80],
+                                os.path.join(d, "e.xml"), s.PROFILES["standard"])
+            quick = self._capture(s.enum_scan, "1.2.3.4", [80],
+                                  os.path.join(d, "e2.xml"), s.PROFILES["quick"])
+        # Deep service-enum scripts run in enum on standard, dropped on quick.
+        self.assertIn("http-enum", " ".join(std[0][0]))
+        self.assertNotIn("http-enum", " ".join(quick[0][0]))
 
     def test_version_all_profile_uses_version_all(self):
         import recce.scanner as s
@@ -731,6 +955,102 @@ class EnvironmentAndTargetsTest(unittest.TestCase):
         from recce.targets import load_targets
         with self.assertRaises(FileNotFoundError):
             load_targets(["@/no/such/file.txt"])
+
+
+class TargetingFormE2ETest(unittest.TestCase):
+    """Drive the REAL `vulns` command end-to-end (parser -> selection -> workers ->
+    store) and prove each targeting form selects EXACTLY the right stored hosts.
+
+    This locks in the core promise that every phase works on a single IP, several
+    IPs, a dash range, a whole subnet, an @file, or 'everything' - using the same
+    CLI grammar, with no cross-host bleed. The scanner is mocked so no nmap runs;
+    the selection layer under test is entirely real.
+
+    Seeded scope (from the bundled sample): 10.0.10.10, 10.0.10.25 (10.0.10.0/24)
+    and 10.0.20.5, 10.0.20.6 (10.0.20.0/24).
+    """
+
+    ALL = {"10.0.10.10", "10.0.10.25", "10.0.20.5", "10.0.20.6"}
+
+    def _run_vulns(self, targets):
+        """Run `vulns <targets>` against a freshly seeded store; return the set of
+        IPs that actually got vuln-scanned (i.e. the hosts the phase selected)."""
+        from recce import cli
+        import recce.scanner as s
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        paths = cli._open_paths(d)
+        seed = Store(paths["db"])
+        seed.set_meta("engagement", "e2e")
+        for h in sample_hosts():
+            seed.upsert_host(h)
+        seed.close()
+
+        def fake_vuln(ip, portids, out, profile, creds=None, aggressive=False):
+            # Echo the requested ports back as an open-port XML the worker parses.
+            return _fake_scan(out, ip, [{"port": p, "service": "tcp"}
+                                        for p in portids])
+
+        oc, ov, ou = s.check_environment, s.vuln_scan, s.udp_scan
+        s.check_environment = lambda profile: []          # no nmap/root needed
+        s.vuln_scan = fake_vuln
+        s.udp_scan = lambda ip, out, profile: _fake_scan(out, ip, [])
+        argv = ["vulns", *targets, "-o", d, "--yes",
+                "--no-searchsploit", "--no-probes", "--workers", "1"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = cli.main(argv)
+        finally:
+            s.check_environment, s.vuln_scan, s.udp_scan = oc, ov, ou
+        self.assertEqual(rc, 0)
+
+        store = Store(paths["db"])
+        try:
+            scanned = {h.ip for h in store.all_hosts()
+                       if any(p.vuln_scanned for p in h.open_ports)}
+            # Every seeded host must still be present (selection never drops rows).
+            self.assertEqual({h.ip for h in store.all_hosts()}, self.ALL)
+        finally:
+            store.close()
+        return scanned
+
+    def test_single_ip(self):
+        self.assertEqual(self._run_vulns(["10.0.10.10"]), {"10.0.10.10"})
+
+    def test_several_ips(self):
+        self.assertEqual(self._run_vulns(["10.0.10.10", "10.0.20.6"]),
+                         {"10.0.10.10", "10.0.20.6"})
+
+    def test_dash_range(self):
+        # .10-.25 covers both 10.0.10.x hosts and nothing in 10.0.20.x.
+        self.assertEqual(self._run_vulns(["10.0.10.10-25"]),
+                         {"10.0.10.10", "10.0.10.25"})
+
+    def test_range_excludes_outside(self):
+        # A range that stops before .25 must NOT pick it up.
+        self.assertEqual(self._run_vulns(["10.0.10.1-15"]), {"10.0.10.10"})
+
+    def test_whole_subnet(self):
+        self.assertEqual(self._run_vulns(["10.0.20.0/24"]),
+                         {"10.0.20.5", "10.0.20.6"})
+
+    def test_mixed_single_and_subnet(self):
+        self.assertEqual(self._run_vulns(["10.0.10.25", "10.0.20.0/24"]),
+                         {"10.0.10.25", "10.0.20.5", "10.0.20.6"})
+
+    def test_at_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        f = os.path.join(d, "scope.txt")
+        with open(f, "w") as fh:
+            fh.write("10.0.10.10\n"
+                     "10.0.20.0/24   # the linux subnet\n")
+        self.assertEqual(self._run_vulns(["@" + f]),
+                         {"10.0.10.10", "10.0.20.5", "10.0.20.6"})
+
+    def test_empty_targets_selects_everything(self):
+        self.assertEqual(self._run_vulns([]), self.ALL)
 
 
 class EntryPointTest(unittest.TestCase):

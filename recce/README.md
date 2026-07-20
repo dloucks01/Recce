@@ -204,30 +204,40 @@ CIDR (`10.0.0.0/24`), dash range (`10.0.0.10-40`), single IP, hostname, or
 **`enum` (light, feeds the sheet):**
 1. **Discovery** — ping/ARP sweep (skip with `--no-discovery` for `-Pn`).
 2. **Port sweep** — full TCP (`-p-`) or `--top-ports N` (or `--fast` masscan).
-3. **Service ID** — `-sV -sC` (+ `-O`) and safe SMB/LDAP AD facts. No vuln
-   scanning — this stays cheap so the sheet is useful in minutes.
+3. **Service ID** — `-sV -sC` (+ `-O`), safe SMB/LDAP AD facts, and a **deep
+   service-aware enumeration NSE set** (see below). Still no vuln scanning, so it
+   stays quick (the `quick` profile skips the deep set).
 
 **`vulns` (targeted, per open port):** for the open ports already in the
 datastore, runs the vulnerability + weak-config scripts below, marks each port
-`vuln-scanned`, and maps exploits. **Safe by default** (`vuln and safe` — nmap's
-non-intrusive detection scripts); `--aggressive` runs the full intrusive `vuln`
-category (can hang printers/OT/old services). Optional top-N UDP with `--udp-top`.
+`vuln-scanned`, and maps exploits. **Safe by default — but deeper than the raw
+`vuln and safe` category:** many high-value detection scripts (`smb-vuln-ms17-010`,
+`ssl-heartbleed`, `http-shellshock`, `ftp-vsftpd-backdoor`…) are tagged `vuln` but
+*not* `safe`, so the bare category silently misses them — recce always layers in a
+curated non-destructive detection set so they run, with nothing extra to remember.
+`--aggressive` adds the full intrusive `vuln` category (XSS/SQLi/DoS probes — can
+hang printers/OT/old services). Optional top-N UDP with `--udp-top`.
 
 ## Enumeration & vulnerability identification
 
-The `vulns` phase runs a large, **service-aware** NSE set — nmap only executes
-the scripts whose portrule matches each detected service, so coverage is broad
-but cheap:
+Both `enum` (deep enumeration) and `vulns` run a large, **service-aware** NSE set —
+nmap only executes the scripts whose portrule matches each detected service, so
+coverage is broad but cheap. Highlights:
 
 - **Web**: `http-enum`, `http-title`, `http-headers`, `http-methods`,
-  `http-webdav-scan`, `http-git`, `http-auth`, `http-open-proxy`
-- **TLS**: `ssl-cert`, `ssl-enum-ciphers` (weak ciphers/protocols, expired/self-signed certs)
+  `http-webdav-scan`, `http-git`, `http-auth`, `http-open-proxy`, `http-ntlm-info`,
+  `http-wordpress-enum`, `http-devframework`, `http-config-backup`
+- **TLS**: `ssl-cert`, `ssl-enum-ciphers`, `ssl-heartbleed`, `ssl-poodle`,
+  `ssl-ccs-injection`, `ssl-dh-params` (weak ciphers/protocols, known TLS CVEs)
 - **SSH**: `ssh2-enum-algos`, `ssh-auth-methods`, `ssh-hostkey`
-- **FTP/mail**: `ftp-anon`, `smtp-open-relay`, `smtp-commands`, POP3/IMAP caps
-- **Databases**: `mysql-info`/`-empty-password`, `ms-sql-*`, `oracle-tns-version`,
-  `mongodb-info`, `redis-info`, `pgsql-info`
-- **SNMP/DNS/misc**: `snmp-info`, `dns-zone-transfer`, `nfs-showmount`, `rpcinfo`,
-  `vnc-info`, `telnet-encryption`, `rdp-enum-encryption`
+- **SMB/Windows**: `smb-vuln-ms17-010`, `smb-double-pulsar-backdoor`,
+  `smb-enum-services`, `smb-system-info`, `smb2-capabilities`
+- **FTP/mail**: `ftp-anon`, `ftp-vsftpd-backdoor`, `smtp-open-relay`,
+  `smtp-enum-users`, `smtp-vuln-*`, POP3/IMAP caps + NTLM info
+- **Databases**: `mysql-info`/`-databases`/`-users`/`-empty-password`, `ms-sql-*`,
+  `oracle-tns-version`, `mongodb-info`/`-databases`, `redis-info`, `cassandra-info`
+- **SNMP/DNS/misc**: `snmp-info`/`-win32-*`, `dns-zone-transfer`, `nfs-showmount`,
+  `rpcinfo`, `vnc-info`, `rdp-ntlm-info`, `ike-version`, `ipmi-version`, `upnp-info`
 
 **Four vulnerability channels feed the Vulnerabilities sheet** (all work
 airgapped, none need internet):
@@ -363,11 +373,14 @@ it always reflects the current data; skip it with `--no-combined`.
 The whole writer is **pure standard-library** (a `.docx` is a zip of XML, like
 the workbook) — no python-docx/Node needed, so it runs on the airgapped box.
 
-**Screenshots (web only).** If a headless browser is present (Chromium ships on
-Kali; or point `RECCE_BROWSER` at one), recce screenshots HTTP/HTTPS targets and
-embeds them under the walkthrough automatically. Non-web findings are evidenced
-by their captured tool output. Disable with `--no-screenshots`; filter with
-`--min-severity high`.
+**Screenshots (web only).** If a headless browser is present — **Firefox** (the
+Kali default) or **Chromium**, whichever is found, or point `RECCE_BROWSER` at a
+specific binary — recce screenshots HTTP/HTTPS targets and embeds them under the
+walkthrough automatically. Chrome is tried first because it can ignore
+self-signed cert warnings; headless Firefox will capture the browser's cert
+warning page for a bad-cert HTTPS target (still useful evidence). Non-web
+findings are evidenced by their captured tool output. Disable with
+`--no-screenshots`; filter with `--min-severity high`.
 
 ## Coverage tracking
 
