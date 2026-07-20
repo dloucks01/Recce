@@ -451,6 +451,26 @@ class DocxWriterTest(unittest.TestCase):
         self.assertIn("Severity: HIGH", text)
         self.assertIn("[TESTER: do this]", text)
 
+    def test_design_language_styling(self):
+        """Teal accent, coloured/mono field values, teal-tinted evidence block."""
+        import zipfile
+        from recce.docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "s.docx")
+            doc = Document()
+            doc.title("T")
+            doc.field("Severity", "CRITICAL", value_color="C00000")
+            doc.field("CVE / References", "CVE-2021-41773", mono=True)
+            doc.mono_block("raw evidence line")
+            doc.save(out)
+            with zipfile.ZipFile(out) as z:
+                body = z.read("word/document.xml").decode()
+                styles = z.read("word/styles.xml").decode()
+        self.assertIn('w:color w:val="0E6E67"', styles)      # teal accent in headings
+        self.assertIn('w:color w:val="C00000"', body)        # severity value coloured
+        self.assertIn('w:ascii="Consolas"', body)            # mono CVE + evidence
+        self.assertIn('w:fill="EDF6F4"', body)               # teal-tinted evidence
+
     def test_image_embed(self):
         import struct
         import binascii

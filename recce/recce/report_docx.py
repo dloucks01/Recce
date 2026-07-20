@@ -52,6 +52,10 @@ _SOURCE_TOOL = {
     "cred": "netexec / impacket / ssh (credentialed)",
 }
 
+# Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.
+_SEV_COLOR = {"critical": "C00000", "high": "C15A11", "medium": "9C7A00",
+              "low": "2E5AAC", "info": "5F6F6E"}
+
 
 @dataclass
 class Finding:
@@ -202,6 +206,11 @@ def _finding_body(doc: Document, f: Finding, fid: str,
                   shots: dict | None = None) -> None:
     """Render one finding's sections into `doc` (shared by per-finding + combined)."""
     vtype, cia = _vuln_type(f.cwes)
+    sev = f.severity.lower()
+
+    # Severity chip under the title, colour-coded like the workbook/preview.
+    doc.para(f"● {f.severity.upper()} SEVERITY   ·   {len(f.affected)} "
+             f"affected system(s)", bold=True, color=_SEV_COLOR.get(sev, "5F6F6E"))
 
     doc.heading("Narrative", 2)
     doc.placeholder("Refine the plain-language summary below for management.")
@@ -210,14 +219,15 @@ def _finding_body(doc: Document, f: Finding, fid: str,
              f"attacker to weaken the security of the affected service.")
 
     doc.heading("Finding Details", 2)
-    doc.field("Finding ID", fid)
-    doc.field("Severity", f.severity.upper())
+    doc.field("Finding ID", fid, mono=True)
+    doc.field("Severity", f.severity.upper(), value_color=_SEV_COLOR.get(sev))
     doc.field("Affected systems", ", ".join(
         f"{ip}:{port}" + (f" ({hn})" if hn else "")
-        for ip, port, hn in f.affected))
+        for ip, port, hn in f.affected), mono=True)
     doc.field("Vulnerability Type", vtype, placeholder="classify the vulnerability")
-    doc.field("CWE Associated", ", ".join(f.cwes), placeholder="add CWE reference(s)")
-    doc.field("CVE / References", ", ".join(f.cves) or "None mapped")
+    doc.field("CWE Associated", ", ".join(f.cwes), placeholder="add CWE reference(s)",
+              mono=True)
+    doc.field("CVE / References", ", ".join(f.cves) or "None mapped", mono=True)
     doc.field("Security Aspect Compromised", cia,
               placeholder="confirm Confidentiality / Integrity / Availability")
     doc.field("Tools/Techniques Used", _tools_line(f))

@@ -472,6 +472,32 @@ class WorkbookStructureTest(unittest.TestCase):
         self.assertEqual(rows6["ftp-anon"]["Scope"], "21")
         self.assertNotIn("ftp-anon", rows5)
 
+    def test_design_language_fonts_and_accent(self):
+        """Machine data (IP/version) renders monospace with a teal IP accent;
+        prose (Product) stays sans - the light HTML-preview design language."""
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            wb = load_workbook(out)
+        sv = wb["Services"]
+        hdr = [c.value for c in sv[1]]
+        ki = hdr.index("Key") + 1                          # openpyxl cols are 1-based
+        drow = next(r for r in range(2, sv.max_row + 1)
+                    if sv.cell(row=r, column=ki).value)   # first real data row
+
+        def cell(name):
+            return sv.cell(row=drow, column=hdr.index(name) + 1)
+        ip = cell("IP")
+        self.assertEqual(ip.font.name, "Consolas")
+        self.assertEqual(ip.font.color.rgb, "FF0E6E67")       # teal accent
+        self.assertEqual(cell("Version").font.name, "Consolas")  # mono data
+        self.assertEqual(cell("Product").font.name, "Calibri")   # prose stays sans
+        self.assertEqual(sv.cell(row=1, column=1).fill.fgColor.rgb, "FF0E6E67")  # teal header
+
     def test_tab_colors_and_overview_nav_links(self):
         try:
             from openpyxl import load_workbook

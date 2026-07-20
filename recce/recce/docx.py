@@ -16,9 +16,12 @@ from xml.sax.saxutils import escape
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
-# Colours (hex, no #).
+# Colours (hex, no #) - the light adaptation of the HTML previews' palette.
 _PLACEHOLDER = "B00020"   # dark red for [TESTER: ...] prompts
 _MUTED = "666666"
+_ACCENT = "0E6E67"        # deep teal accent (headings, title) - matches the workbook
+_LABEL = "5F6F6E"         # muted slate for field labels
+_EVIDENCE_FILL = "EDF6F4"  # faint teal tint behind monospace evidence
 
 _CONTENT_TYPES = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -74,19 +77,19 @@ _STYLES = (
     '<w:style w:type="paragraph" w:styleId="Title">'
     '<w:name w:val="Title"/><w:basedOn w:val="Normal"/>'
     '<w:pPr><w:spacing w:before="120" w:after="120"/></w:pPr>'
-    '<w:rPr><w:b/><w:color w:val="1F3864"/><w:sz w:val="36"/></w:rPr></w:style>'
+    '<w:rPr><w:b/><w:color w:val="0E6E67"/><w:sz w:val="36"/></w:rPr></w:style>'
     # NB: child order in <w:pPr> is schema-enforced (CT_PPrGeneral):
     # pBdr -> spacing -> outlineLvl.
     '<w:style w:type="paragraph" w:styleId="Heading1">'
     '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>'
     '<w:pPr>'
-    '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="1F3864"/></w:pBdr>'
+    '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="0E6E67"/></w:pBdr>'
     '<w:spacing w:before="200" w:after="80"/><w:outlineLvl w:val="0"/>'
-    '</w:pPr><w:rPr><w:b/><w:color w:val="1F3864"/><w:sz w:val="26"/></w:rPr></w:style>'
+    '</w:pPr><w:rPr><w:b/><w:color w:val="0E6E67"/><w:sz w:val="26"/></w:rPr></w:style>'
     '<w:style w:type="paragraph" w:styleId="Heading2">'
     '<w:name w:val="heading 2"/><w:basedOn w:val="Normal"/>'
     '<w:pPr><w:spacing w:before="120" w:after="40"/><w:outlineLvl w:val="1"/></w:pPr>'
-    '<w:rPr><w:b/><w:color w:val="2E4A7A"/><w:sz w:val="24"/></w:rPr></w:style>'
+    '<w:rPr><w:b/><w:color w:val="0A4F4A"/><w:sz w:val="24"/></w:rPr></w:style>'
     '</w:styles>'
 )
 
@@ -95,8 +98,11 @@ _SECTPR = ('<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
            'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>')
 
 
-def _run(text: str, bold=False, italic=False, color: str | None = None) -> str:
+def _run(text: str, bold=False, italic=False, color: str | None = None,
+         mono: bool = False) -> str:
     props = ""
+    if mono:                       # rFonts must lead the run properties
+        props += '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>'
     if bold:
         props += "<w:b/>"
     if italic:
@@ -131,8 +137,9 @@ class Document:
     def heading(self, text: str, level: int = 1) -> None:
         self._p(_run(text), f"Heading{level}")
 
-    def para(self, text: str = "", *, italic=False, color: str | None = None) -> None:
-        self._p(_run(text, italic=italic, color=color) if text else "")
+    def para(self, text: str = "", *, bold=False, italic=False,
+             color: str | None = None) -> None:
+        self._p(_run(text, bold=bold, italic=italic, color=color) if text else "")
 
     def guidance(self, text: str) -> None:
         """Italic muted instructional text carried over from the template."""
@@ -142,11 +149,14 @@ class Document:
         """A [TESTER: ...] prompt for the operator to fill in Word."""
         self._p(_run(f"[TESTER: {text}]", italic=True, color=_PLACEHOLDER))
 
-    def field(self, label: str, value: str = "", placeholder: str = "") -> None:
-        """A 'Label: value' line - label bold, value normal (or a placeholder)."""
-        body = _run(f"{label}: ", bold=True)
+    def field(self, label: str, value: str = "", placeholder: str = "",
+              value_color: str | None = None, mono: bool = False) -> None:
+        """A 'Label: value' line - muted-teal bold label, then the value (or a
+        placeholder). `value_color` tints the value (e.g. severity); `mono`
+        renders it in the evidence font (e.g. CVE/CWE ids)."""
+        body = _run(f"{label}: ", bold=True, color=_LABEL)
         if value:
-            body += _run(value)
+            body += _run(value, bold=bool(value_color), color=value_color, mono=mono)
         elif placeholder:
             body += _run(f"[TESTER: {placeholder}]", italic=True, color=_PLACEHOLDER)
         self._p(body)
@@ -162,7 +172,8 @@ class Document:
             body = (f'<w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>'
                     f'<w:sz w:val="18"/></w:rPr>'
                     f'<w:t xml:space="preserve">{escape(line)}</w:t></w:r>')
-            self._p(f'<w:pPr><w:shd w:val="clear" w:fill="F2F2F2"/></w:pPr>{body}')
+            self._p(f'<w:pPr><w:shd w:val="clear" w:fill="{_EVIDENCE_FILL}"/></w:pPr>'
+                    f'{body}')
 
     def image(self, data: bytes, caption: str | None = None) -> None:
         """Embed a PNG/JPEG image inline (scaled to fit the page width)."""
@@ -215,9 +226,9 @@ class Document:
         grid = "".join(f'<w:gridCol w:w="{w}"/>' for w in widths)
 
         def cell(text, w, *, is_header=False):
-            shd = ('<w:shd w:val="clear" w:color="auto" w:fill="D9E1F2"/>'
+            shd = ('<w:shd w:val="clear" w:color="auto" w:fill="D7ECEA"/>'
                    if is_header else "")
-            rpr = "<w:rPr><w:b/></w:rPr>" if is_header else ""
+            rpr = '<w:rPr><w:b/><w:color w:val="0A4F4A"/></w:rPr>' if is_header else ""
             run = (f'<w:r>{rpr}<w:t xml:space="preserve">{escape(str(text))}'
                    f'</w:t></w:r>') if str(text) else ""
             return (f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{shd}'
