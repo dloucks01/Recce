@@ -14,6 +14,12 @@ vectors and sensitive exposure — a linPEAS / winPEAS–style deep sweep.
 
 Lines marked **`[!]`** are worth a closer look.
 
+**First run on Windows — pre-flight it:** `./recce-enum.ps1 -SelfTest` parses the
+script with the PowerShell parser, reports the host's PowerShell version /
+execution policy / elevation, and lists which section families will produce data
+there — **without running any enumeration**. If the parse is `[ OK ]`, a real run
+is safe.
+
 ## What they check (deep dive)
 
 **Linux:** kernel + LPE hints (PwnKit CVE-2021-4034, Dirty Pipe CVE-2022-0847,
