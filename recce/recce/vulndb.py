@@ -634,6 +634,25 @@ SIGNATURES: list[dict] = [
      "desc": "Network-exposed SQL Server is a prime lateral-movement/data target. "
              "Pre-2016 builds are EOL (SSRS RCE CVE-2020-0618); check for weak/blank sa "
              "credentials and enabled xp_cmdshell."},
+    {"product": ["microsoft iis", "iis httpd"], "severity": "high", "advisory": True,
+     "title": "IIS AppPool - SeImpersonate -> Potato LPE to SYSTEM",
+     "cves": [], "cwe": ["CWE-269", "CWE-250"],
+     "remediation": "Run AppPools under least-privilege identities; remove "
+                    "SeImpersonatePrivilege where feasible; patch and monitor.",
+     "desc": "IIS worker (AppPool) identities normally hold SeImpersonatePrivilege. "
+             "Any code execution as the AppPool (webshell, upload, deserialization) "
+             "escalates to SYSTEM with a current Potato - GodPotato, PrintSpoofer, "
+             "SharpEfsPotato, JuicyPotatoNG - even on a fully-patched Windows 11 / "
+             "Server 2016-2022. See the Priv-Esc sheet for the tools/commands."},
+    {"product": ["microsoft sql server", "ms-sql"], "severity": "high", "advisory": True,
+     "title": "MSSQL service account - SeImpersonate -> Potato LPE to SYSTEM",
+     "cves": [], "cwe": ["CWE-269", "CWE-250"],
+     "remediation": "Run SQL Server under a least-privilege (g)MSA; remove "
+                    "SeImpersonate; disable xp_cmdshell.",
+     "desc": "The MSSQL service account normally holds SeImpersonatePrivilege, so "
+             "code execution through the database (xp_cmdshell, etc.) escalates to "
+             "SYSTEM with a current Potato (GodPotato, PrintSpoofer, SharpEfsPotato) "
+             "even on a fully-patched host."},
 
     # === Default-credential advisories =========================================
     {"product": ["grafana"], "severity": "medium", "advisory": True,

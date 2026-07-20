@@ -281,24 +281,30 @@ def run_nxc_smb(ip: str, creds: dict) -> tuple[dict | None, str | None]:
     return parse_nxc_smb(out), None
 
 
-def _fold_nxc(host: Host, data: dict) -> None:
+def _fold_nxc(host: Host, data: dict, label: str = "supplied credentials",
+              admin_only: bool = False) -> None:
     dom = (data.get("host_info") or "")
-    for sh in data.get("shares", []):
-        host.accounts.append(Account(ip=host.ip, source="netexec", kind="share",
-                                     name=sh["name"], detail=sh.get("perms", "")))
-    for u in data.get("users", []):
-        host.accounts.append(Account(ip=host.ip, source="netexec", kind="user",
-                                     name=u["name"], domain=u.get("domain", "")))
-    for s in data.get("loggedon", []):
-        host.accounts.append(Account(ip=host.ip, source="netexec", kind="session",
-                                     name=s, detail="logged-on"))
+    if not admin_only:            # the admin re-run only records reach, no re-fold
+        for sh in data.get("shares", []):
+            host.accounts.append(Account(ip=host.ip, source="netexec", kind="share",
+                                         name=sh["name"], detail=sh.get("perms", "")))
+        for u in data.get("users", []):
+            host.accounts.append(Account(ip=host.ip, source="netexec", kind="user",
+                                         name=u["name"], domain=u.get("domain", "")))
+        for s in data.get("loggedon", []):
+            host.accounts.append(Account(ip=host.ip, source="netexec", kind="session",
+                                         name=s, detail="logged-on"))
     if data.get("admin"):
+        # A low-priv "user account" holding admin is notable (over-privileged); the
+        # privileged account holding admin is expected reach - both worth recording.
         host.vulns.append(Vuln(
-            ip=host.ip, port=445, protocol="tcp", script_id="cred-smb",
-            state="VULNERABLE", title="Local admin via supplied credentials",
+            ip=host.ip, port=445, protocol="tcp",
+            script_id=f"cred-smb-admin-{label.split()[0]}",
+            state="VULNERABLE", title=f"Local admin confirmed - {label}",
             severity="high", source="cred", confidence="confirmed",
             cwes=["CWE-269"],
-            output=f"netexec reported admin (Pwn3d!) on {host.ip}. {dom}".strip(),
+            output=f"netexec reported admin (Pwn3d!) on {host.ip} with the "
+                   f"{label}. {dom}".strip(),
             remediation="Restrict local-admin rights; review credential exposure."))
     pol = data.get("passpol", {})
     thr = pol.get("account lockout threshold", "")
@@ -435,9 +441,19 @@ def _fold_ssh(host: Host, facts: dict) -> None:
 
 
 def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
-                aggressive: bool = False) -> list[dict]:
+                aggressive: bool = False, admin_creds: dict | None = None) -> list[dict]:
     """Run every applicable credentialed check against one host, folding results
-    in place. Returns a list of issue dicts for tools that errored."""
+    in place. Returns a list of issue dicts for tools that errored.
+
+    Two credential sets are supported, matching a real engagement:
+      * `creds`       - a normal/low-privilege account: does the broad enumeration
+                        (shares, users, sessions, password policy, roasting). If it
+                        turns out to grant local admin, that itself is a finding.
+      * `admin_creds` - a privileged account: does the admin-only power moves
+                        (confirm local-admin reach, dump hashes with secretsdump),
+                        labelled so the report shows what the privileged account
+                        reached that the user account did not.
+    """
     issues: list[dict] = []
 
     def note(phase, err):
@@ -449,11 +465,7 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
         data, err = run_nxc_smb(host.ip, creds)
         note("cred-smb", err)
         if data:
-            _fold_nxc(host, data)
-        if aggressive:
-            dumped, err = run_secretsdump(host.ip, creds)
-            note("secretsdump", err)
-            _fold_secrets(host, dumped, creds.get("domain", ""))
+            _fold_nxc(host, data, label="user account")
     if _creds_ok(creds) and _is_dc(host):
         spns, err1 = run_kerberoast(host.ip, creds)
         note("kerberoast", err1)
@@ -466,5 +478,20 @@ def enrich_host(host: Host, creds: dict | None, ssh: dict | None,
         note("ssh-local", err)
         if facts:
             _fold_ssh(host, facts)
+
+    # Privileged account: confirm admin reach + the hash-dump power move. Providing
+    # admin_creds signals intent, so secretsdump runs with them even without
+    # --aggressive; without admin_creds, secretsdump only runs when aggressive.
+    dump_creds = admin_creds if _creds_ok(admin_creds) else (creds if aggressive else None)
+    if _creds_ok(admin_creds) and _smb_ports(host):
+        data, err = run_nxc_smb(host.ip, admin_creds)
+        note("cred-smb-admin", err)
+        if data:
+            _fold_nxc(host, data, label="privileged account", admin_only=True)
+    if _creds_ok(dump_creds) and _smb_ports(host):
+        dumped, err = run_secretsdump(host.ip, dump_creds)
+        note("secretsdump", err)
+        _fold_secrets(host, dumped, dump_creds.get("domain", ""))
+
     host.cred_enumerated = True
     return issues
