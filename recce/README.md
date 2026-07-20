@@ -1,8 +1,8 @@
-# pentest_enum
+# recce
 
 Multi-subnet enumeration and reporting for penetration-testing engagements.
 
-`pentest_enum` orchestrates **nmap** (optionally **masscan**) across many hosts
+`recce` orchestrates **nmap** (optionally **masscan**) across many hosts
 and subnets, normalizes everything into a resumable datastore, and produces an
 **Excel workbook** built for tracking your engagement — plus Markdown and CSV.
 
@@ -17,12 +17,12 @@ enumeration of users, SPNs, roastable accounts, delegation, groups and trusts.
 
 > 🚀 **New here? Read [QUICKSTART.md](QUICKSTART.md)** — a one-page guide that
 > gets you from zero to a filled-in workbook in five commands. There is also a
-> `./pentest-enum` wrapper so you can skip typing `python3 -m pentest_enum`, and a
+> `./bin/recce` wrapper so you can skip typing `python3 -m recce`, and a
 > **Start Here** tab inside every workbook that explains each sheet.
 
 ## Why this over raw nmap / AutoRecon?
 
-Existing tools scan well but leave you with per-host output files. `pentest_enum`
+Existing tools scan well but leave you with per-host output files. `recce`
 adds the layer engagements actually need:
 
 - **Cross-host, checkable deliverable.** Every host, service, vuln and account
@@ -74,41 +74,41 @@ cheap, resumable commands.
 ```bash
 # FIRST, on any new box: verify it can run the tool (env + tools + a real
 # localhost self-scan). Do this before every engagement.
-python -m pentest_enum doctor
+python -m recce doctor
 
 # See the whole thing with no network (bundled sample):
-python -m pentest_enum demo -o demo_out
+python -m recce demo -o demo_out
 
 # ── Phase 1: fast enumeration across subnets → populates the sheet ──
 #   discovery → port scan → service/version ID only. No vuln scanning yet.
-sudo python -m pentest_enum enum 10.0.10.0/24 10.0.20.0/24 -o acme \
+sudo python -m recce enum 10.0.10.0/24 10.0.20.0/24 -o acme \
      --title "ACME internal"
 
 #   ...now open acme/enumeration.xlsx: hosts, ports, services, apps are there.
 #   Work the sheet, tick Reviewed as you go. Check where you stand any time:
-python -m pentest_enum status -o acme
+python -m recce status -o acme
 
 # ── Phase 2: vuln-scan the open ports it found (safe by default) ──
-sudo python -m pentest_enum vulns -o acme                 # all open ports
-sudo python -m pentest_enum vulns 10.0.20.0/24 -o acme    # just one subnet
-sudo python -m pentest_enum vulns 10.0.10.5 -o acme       # just one host
-sudo python -m pentest_enum vulns -o acme --only http smb # just web + SMB
-sudo python -m pentest_enum vulns -o acme --unscanned     # only what's left
-sudo python -m pentest_enum vulns -o acme --aggressive    # intrusive vuln NSE
+sudo python -m recce vulns -o acme                 # all open ports
+sudo python -m recce vulns 10.0.20.0/24 -o acme    # just one subnet
+sudo python -m recce vulns 10.0.10.5 -o acme       # just one host
+sudo python -m recce vulns -o acme --only http smb # just web + SMB
+sudo python -m recce vulns -o acme --unscanned     # only what's left
+sudo python -m recce vulns -o acme --aggressive    # intrusive vuln NSE
 
 # ── Databases (per host / subnet / range, safe by default) ──
-sudo python -m pentest_enum db -o acme                    # all DB services
-sudo python -m pentest_enum db 10.0.20.6 -o acme --aggressive  # brute/xp_cmdshell
+sudo python -m recce db -o acme                    # all DB services
+sudo python -m recce db 10.0.20.6 -o acme --aggressive  # brute/xp_cmdshell
 
 # ── Priv-esc playbook + optional remote checks ──
-python -m pentest_enum privesc -o acme                    # playbook from data (no scan)
-sudo python -m pentest_enum privesc 10.0.10.0/24 -o acme --scan  # + smb-vuln-* checks
+python -m recce privesc -o acme                    # playbook from data (no scan)
+sudo python -m recce privesc 10.0.10.0/24 -o acme --scan  # + smb-vuln-* checks
 
 # One-shot (enum then vulns):
-sudo python -m pentest_enum scan 10.0.10.0/24 -o acme
+sudo python -m recce scan 10.0.10.0/24 -o acme
 
 # Regenerate reports from the datastore (no re-scan; preserves your ticks):
-python -m pentest_enum report -o acme
+python -m recce report -o acme
 ```
 
 **Every phase takes targets** — a single IP, several IPs, ranges
@@ -260,18 +260,18 @@ which you haven't — and never lose that as scans grow.
 
 ```bash
 # Live coverage in the terminal (also flags unreviewed DCs / high-risk hosts):
-python -m pentest_enum status -o engagement
+python -m recce status -o engagement
 
 # Mark from the CLI: a host and all its services, with a note:
-python -m pentest_enum review -o engagement --host 10.0.10.10 --cascade \
+python -m recce review -o engagement --host 10.0.10.10 --cascade \
        --note "DC enumerated, NTDS dump pending"
 
 # Mark specific services / undo:
-python -m pentest_enum review -o engagement --service 10.0.20.5:80 10.0.20.5:443
-python -m pentest_enum review -o engagement --host 10.0.10.25 --undo
+python -m recce review -o engagement --service 10.0.20.5:80 10.0.20.5:443
+python -m recce review -o engagement --host 10.0.10.25 --undo
 
 # Edit checkboxes in Excel, then pull them into the datastore + refresh:
-python -m pentest_enum report -o engagement
+python -m recce report -o engagement
 ```
 
 `status` output:
@@ -342,10 +342,10 @@ For a time-boxed engagement, three levers cut wall-clock dramatically:
 
 ```bash
 # Fast full-scope sweep, 12 hosts at a time, report refresh every 20 hosts:
-sudo python -m pentest_enum scan 10.0.0.0/22 --fast --workers 12 --refresh-every 20 -o eng
+sudo python -m recce scan 10.0.0.0/22 --fast --workers 12 --refresh-every 20 -o eng
 
 # Resume where you left off after a break (skips already-scanned hosts):
-sudo python -m pentest_enum scan 10.0.0.0/22 --fast --workers 12 --resume -o eng
+sudo python -m recce scan 10.0.0.0/22 --fast --workers 12 --resume -o eng
 ```
 
 ## Active Directory
@@ -373,15 +373,15 @@ discovered DC and enumerates:
 
 ```bash
 # Credentialed LDAP enumeration of every discovered DC:
-sudo python -m pentest_enum scan 10.0.10.0/24 --ldap-enum \
+sudo python -m recce scan 10.0.10.0/24 --ldap-enum \
      --username jsmith --password 'P@ss' --domain corp.local
 
 # Point LDAP at a specific DC (skip auto-detect); try anonymous bind:
-python -m pentest_enum scan 10.0.10.0/24 --ldap-enum --ldap-anon --dc-ip 10.0.10.10
+python -m recce scan 10.0.10.0/24 --ldap-enum --ldap-anon --dc-ip 10.0.10.10
 
 # Credentials are also passed to the SMB/LDAP NSE scripts during the scan so
 # authenticated user/share/group enumeration succeeds:
-sudo python -m pentest_enum scan 10.0.10.0/24 --username jsmith --password 'P@ss' --domain corp.local
+sudo python -m recce scan 10.0.10.0/24 --username jsmith --password 'P@ss' --domain corp.local
 ```
 
 Everything lands in the **Active Directory** and **AD Quick Wins** sheets (see
@@ -412,9 +412,9 @@ Override with `--all-ports`, `--top-ports`, `--no-ad`, `--no-os`, `--min-rate`,
 ## Layout
 
 ```
-pentest-enum          convenience wrapper (./pentest-enum ...)
-QUICKSTART.md         one-page user guide
-pentest_enum/
+bin/recce            convenience wrapper (run: ./bin/recce ...)
+QUICKSTART.md        one-page user guide
+recce/               the package (python -m recce)
   targets.py         target parsing / subnet expansion / IP matcher
   scanner.py         nmap / masscan orchestration (discover / enum / vuln / nse)
   parser.py          nmap XML -> normalized model (+ vuln & AD harvesting)
@@ -423,10 +423,11 @@ pentest_enum/
   db.py              database detection + engine-specific NSE + inventory
   privesc.py         Windows/Linux priv-esc findings + playbook knowledge base
   exploits.py        offline exploit mapping via searchsploit (Exploit-DB)
+  vulndb.py          offline version->CVE vulnerability engine (+ remediation)
   tracking.py        coverage + per-step keys, progress computation (shared)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)
   store.py           SQLite datastore: hosts + domains + tracking, merge-on-rescan
-  report_excel.py    the Excel workbook (Start Here, Checklist, ...)
+  report_excel.py    the Excel workbook (Start Here, Overview, Checklist, ...)
   report_markdown.py Markdown + CSV
   cli.py             command-line interface (enum/vulns/db/privesc/... commands)
   sample_scan.xml    bundled sample for `demo`

@@ -8,14 +8,14 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pentest_enum import ad, exploits, parser, scanner
-from pentest_enum import tracking as tr
-from pentest_enum import xlsx
-from pentest_enum.models import Account, Host, Port, Script
-from pentest_enum.report_excel import (build_workbook, read_key_order,
+from recce import ad, exploits, parser, scanner
+from recce import tracking as tr
+from recce import xlsx
+from recce.models import Account, Host, Port, Script
+from recce.report_excel import (build_workbook, read_key_order,
                                        read_workbook_tracking, update_workbook)
-from pentest_enum.store import Store
-from pentest_enum.targets import apply_exclusions, load_targets
+from recce.store import Store
+from recce.targets import apply_exclusions, load_targets
 
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
@@ -181,7 +181,7 @@ class ADTargetListTest(unittest.TestCase):
 
 class ReportTest(unittest.TestCase):
     def test_workbook_builds(self):
-        from pentest_enum.report_excel import build_workbook
+        from recce.report_excel import build_workbook
         hosts = parser.parse_nmap_xml(SAMPLE)
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "x.xlsx")
@@ -195,7 +195,7 @@ class ReportTest(unittest.TestCase):
 
 class CoverageTest(unittest.TestCase):
     def setUp(self):
-        from pentest_enum.targets import _subnet_of
+        from recce.targets import _subnet_of
         self.hosts = parser.parse_nmap_xml(SAMPLE)
         for h in self.hosts:
             h.subnet = _subnet_of(h.ip)
@@ -367,7 +367,7 @@ class ExploitsTest(unittest.TestCase):
 
     def test_exploit_tracking_key_and_coverage(self):
         h = Host(ip="10.0.0.9", subnet="10.0.0.0/24")
-        from pentest_enum.models import Exploit
+        from recce.models import Exploit
         h.exploits = [Exploit(ip="10.0.0.9", port=21, edb_id="17491")]
         keys = tr.item_keys([h])
         self.assertIn(tr.exploit_key("10.0.0.9", 21, "17491"), keys["exploits"])
@@ -376,8 +376,8 @@ class ExploitsTest(unittest.TestCase):
 
 class SubnetCoverageTest(unittest.TestCase):
     def test_overview_includes_empty_scope_subnet(self):
-        from pentest_enum.report_excel import build_workbook
-        from pentest_enum import xlsx
+        from recce.report_excel import build_workbook
+        from recce import xlsx
         hosts = [Host(ip="10.0.10.5", subnet="10.0.10.0/24", enumerated=True)]
         scope = {"10.0.10.0/24": 254, "10.0.99.0/24": 254}  # 2nd has no live hosts
         with tempfile.TemporaryDirectory() as d:
@@ -389,7 +389,7 @@ class SubnetCoverageTest(unittest.TestCase):
         self.assertIn("10.0.10.0/24", subnets)
 
     def test_checklist_grouped_by_subnet(self):
-        from pentest_enum.report_excel import _spec_checklist
+        from recce.report_excel import _spec_checklist
         hosts = [Host(ip="10.0.20.9", subnet="10.0.20.0/24"),
                  Host(ip="10.0.10.5", subnet="10.0.10.0/24")]
         rows = _spec_checklist(hosts).rows
@@ -408,7 +408,7 @@ class SubnetCoverageTest(unittest.TestCase):
 
 class VulnDbTest(unittest.TestCase):
     def test_version_comparator(self):
-        from pentest_enum import vulndb
+        from recce import vulndb
         self.assertLess(vulndb._cmp("2.4.41", "2.4.53"), 0)
         self.assertGreater(vulndb._cmp("2.4.50", "2.4.49"), 0)
         self.assertLess(vulndb._cmp("8.2p1", "8.5"), 0)
@@ -416,7 +416,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertEqual(vulndb._cmp("2.3.4", "2.3.4"), 0)
 
     def test_exact_and_range_matches(self):
-        from pentest_enum import vulndb
+        from recce import vulndb
         h = Host(ip="10.0.0.9", os_name="Linux", ports=[
             Port(portid=21, service="ftp", product="vsftpd", version="2.3.4"),
             Port(portid=80, service="http", product="Apache httpd", version="2.4.41"),
@@ -430,7 +430,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertFalse(any("End-of-life MySQL" in t for t in titles))
 
     def test_findings_carry_remediation_and_source(self):
-        from pentest_enum import vulndb
+        from recce import vulndb
         h = Host(ip="10.0.0.9", ports=[Port(portid=21, service="ftp",
                  product="vsftpd", version="2.3.4")])
         vulndb.assess_host_inplace(h)
@@ -441,7 +441,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertTrue(v.remediation)
 
     def test_multiple_findings_per_port_have_distinct_keys(self):
-        from pentest_enum.models import Vuln
+        from recce.models import Vuln
         a = Vuln(ip="1.1.1.1", port=80, protocol="tcp", script_id="version-db",
                  title="Finding A")
         b = Vuln(ip="1.1.1.1", port=80, protocol="tcp", script_id="version-db",
@@ -449,7 +449,7 @@ class VulnDbTest(unittest.TestCase):
         self.assertNotEqual(a.key, b.key)
 
     def test_no_version_no_false_positive(self):
-        from pentest_enum import vulndb
+        from recce import vulndb
         # product matches but no version -> a version-gated sig must not fire.
         h = Host(ip="10.0.0.9", ports=[Port(portid=80, service="http",
                  product="Apache httpd", version="")])
@@ -478,7 +478,7 @@ class PhaseModelTest(unittest.TestCase):
         self.assertEqual(h.status, "vuln-scanned")
 
     def test_vuln_targets_only_and_unscanned(self):
-        from pentest_enum import cli
+        from recce import cli
         h = self._host(scanned={80})
         h.enumerated = True
         # --only http -> just port 80
@@ -493,7 +493,7 @@ class PhaseModelTest(unittest.TestCase):
         self.assertEqual(cli._vuln_targets([h], ns), [(h, [445])])
 
     def test_vuln_targets_subnet_and_host_filter(self):
-        from pentest_enum import cli
+        from recce import cli
         a = self._host("10.0.0.5"); b = self._host("10.0.1.9")
         b.subnet = "10.0.1.0/24"
         ns = SimpleNamespace(only=None, subnet=["10.0.0.0/24"], host=None, unscanned=False)
@@ -501,8 +501,8 @@ class PhaseModelTest(unittest.TestCase):
         self.assertEqual([h.ip for h, _ in got], ["10.0.0.5"])
 
     def test_merge_vuln_results(self):
-        from pentest_enum import cli
-        from pentest_enum.models import Vuln
+        from recce import cli
+        from recce.models import Vuln
         h = self._host()
         parsed = Host(ip="10.0.0.5", ports=[Port(portid=80, service="http",
                       scripts=[Script(id="http-git", output="x")])],
@@ -515,7 +515,7 @@ class PhaseModelTest(unittest.TestCase):
 
 class TargetingTest(unittest.TestCase):
     def test_ip_matcher(self):
-        from pentest_enum.targets import ip_matcher
+        from recce.targets import ip_matcher
         m = ip_matcher(["10.0.0.5", "10.0.1.0/24", "192.168.1.10-12"])
         self.assertTrue(m("10.0.0.5"))       # exact ip
         self.assertTrue(m("10.0.1.99"))      # in cidr
@@ -524,12 +524,12 @@ class TargetingTest(unittest.TestCase):
         self.assertFalse(m("172.16.0.1"))
 
     def test_empty_matches_all(self):
-        from pentest_enum.targets import ip_matcher
+        from recce.targets import ip_matcher
         m = ip_matcher([])
         self.assertTrue(m("1.2.3.4"))
 
     def test_selected_hosts(self):
-        from pentest_enum import cli
+        from recce import cli
         a = Host(ip="10.0.0.5", subnet="10.0.0.0/24")
         b = Host(ip="10.0.9.9", subnet="10.0.9.0/24")
         ns = SimpleNamespace(targets=["10.0.0.0/24"], host=None, subnet=None)
@@ -538,15 +538,15 @@ class TargetingTest(unittest.TestCase):
 
 class DatabaseModuleTest(unittest.TestCase):
     def test_engine_detection(self):
-        from pentest_enum import db
+        from recce import db
         self.assertEqual(db.engine_for(Port(portid=3306)), "mysql")
         self.assertEqual(db.engine_for(Port(portid=1433)), "mssql")
         self.assertEqual(db.engine_for(Port(portid=9999, service="postgresql")), "postgresql")
         self.assertIsNone(db.engine_for(Port(portid=80, service="http")))
 
     def test_db_instances(self):
-        from pentest_enum import db
-        from pentest_enum.models import Vuln
+        from recce import db
+        from recce.models import Vuln
         h = Host(ip="10.0.0.9", ports=[Port(portid=3306, service="mysql",
                  product="MySQL", version="5.7.38")])
         h.vulns = [Vuln(ip="10.0.0.9", port=3306, protocol="tcp",
@@ -558,7 +558,7 @@ class DatabaseModuleTest(unittest.TestCase):
         self.assertEqual(inst[0]["auth"], "EMPTY PASSWORD")
 
     def test_script_selection_aggressive(self):
-        from pentest_enum import db
+        from recce import db
         safe = db.script_selection(False)
         aggr = db.script_selection(True)
         self.assertIn("mysql-info", safe)
@@ -568,7 +568,7 @@ class DatabaseModuleTest(unittest.TestCase):
 
 class PrivescModuleTest(unittest.TestCase):
     def test_windows_playbook(self):
-        from pentest_enum import privesc
+        from recce import privesc
         h = Host(ip="10.0.0.5", os_family="Windows",
                  ports=[Port(portid=445, service="microsoft-ds")])
         cats = {r["category"] for r in privesc.plan(h)}
@@ -576,7 +576,7 @@ class PrivescModuleTest(unittest.TestCase):
         self.assertNotIn("linux", cats)
 
     def test_linux_playbook(self):
-        from pentest_enum import privesc
+        from recce import privesc
         h = Host(ip="10.0.0.6", os_family="Linux",
                  ports=[Port(portid=22, service="ssh")])
         cats = {r["category"] for r in privesc.plan(h)}
@@ -584,8 +584,8 @@ class PrivescModuleTest(unittest.TestCase):
         self.assertNotIn("windows", cats)
 
     def test_remote_finding_from_vuln(self):
-        from pentest_enum import privesc
-        from pentest_enum.models import Vuln
+        from recce import privesc
+        from recce.models import Vuln
         h = Host(ip="10.0.0.5", os_family="Windows")
         h.vulns = [Vuln(ip="10.0.0.5", port=445, protocol="tcp",
                         script_id="smb-vuln-ms17-010", title="ms17-010",
@@ -646,7 +646,7 @@ class StepCheckboxTest(unittest.TestCase):
         self.assertIn(tr.step_key("vuln", "10.0.0.5"), back)
 
     def test_reconcile_records_and_clears_override(self):
-        from pentest_enum import cli
+        from recce import cli
         with tempfile.TemporaryDirectory() as d:
             store = Store(os.path.join(d, "t.sqlite"))
             h = self._host(enumerated=True)
@@ -665,7 +665,7 @@ class StepCheckboxTest(unittest.TestCase):
 
 class CliSmokeTest(unittest.TestCase):
     def test_arg_parser_has_all_commands(self):
-        from pentest_enum import cli
+        from recce import cli
         p = cli.build_arg_parser()
         # Parse a representative invocation of each command without executing.
         for argv in (["enum", "10.0.0.1", "-y"], ["vulns", "10.0.0.0/24"],
@@ -676,7 +676,7 @@ class CliSmokeTest(unittest.TestCase):
             self.assertTrue(callable(ns.func))
 
     def test_doctor_runs_without_crashing(self):
-        from pentest_enum import cli
+        from recce import cli
         rc = cli.cmd_doctor(SimpleNamespace(no_self_scan=True))
         self.assertIn(rc, (0, 1))  # 0 if nmap present, 1 if not - never raises
 
