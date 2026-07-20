@@ -204,13 +204,22 @@ def _accounts_from_host_scripts(host_ip: str, script: Script) -> list[Account]:
 
 
 def parse_nmap_xml(path: str) -> list[Host]:
-    """Parse one nmap XML file into a list of Host objects (up hosts only)."""
+    """Parse one nmap XML file into a list of Host objects (up hosts only).
+
+    Never raises: a missing/unreadable/empty/truncated XML (nmap failed to start,
+    was killed by a timeout, or wrote a partial file) yields [] rather than
+    crashing the phase - the caller treats it as "nothing found here"."""
     try:
         tree = ET.parse(path)
+    except (FileNotFoundError, OSError):
+        return []
     except ET.ParseError:
         # nmap may leave a truncated file if interrupted; try lenient recovery.
-        with open(path, "r", errors="replace") as fh:
-            data = fh.read()
+        try:
+            with open(path, "r", errors="replace") as fh:
+                data = fh.read()
+        except OSError:
+            return []
         end = data.rfind("</nmaprun>")
         if end == -1:
             # Close the last complete <host> block and the run so we salvage partials.
@@ -218,7 +227,10 @@ def parse_nmap_xml(path: str) -> list[Host]:
             if last_host_end == -1:
                 return []
             data = data[: last_host_end + len("</host>")] + "\n</nmaprun>"
-        tree = ET.ElementTree(ET.fromstring(data))
+        try:
+            tree = ET.ElementTree(ET.fromstring(data))
+        except ET.ParseError:
+            return []
 
     root = tree.getroot()
     start = root.get("start", "")

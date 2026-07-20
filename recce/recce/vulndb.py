@@ -842,10 +842,5 @@ def assess_host_inplace(host: Host) -> int:
     return len(new)
 
 
-def assess(hosts: list[Host]) -> int:
-    """Run the engine over hosts, appending findings in place. Returns count added."""
-    return sum(assess_host_inplace(h) for h in hosts)
-
-
 def signature_count() -> int:
     return len(SIGNATURES)
