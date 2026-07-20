@@ -253,7 +253,15 @@ def discover_hosts(targets_file: str, out_xml: str) -> tuple[str, ScanIssue | No
         "-PA80,443,3389", "-n", "--max-retries", "1", "--host-timeout", "3m",
         "-iL", targets_file, "-oX", out_xml,
     ]
-    outcome = _run(cmd)
+    # nmap's --host-timeout bounds each host, but add a wall-clock backstop scaled
+    # by scope size so a wedged sweep can't hang the first phase forever.
+    try:
+        with open(targets_file) as fh:
+            ntargets = sum(1 for ln in fh if ln.strip())
+    except OSError:
+        ntargets = 256
+    kill = int(min(7200, max(600, ntargets * 0.5 + 300)))
+    outcome = _run(cmd, timeout=kill)
     if outcome.missing:
         return out_xml, ScanIssue("error", "discovery: nmap not found on PATH")
     if outcome.returncode not in (0, None) and not os.path.exists(out_xml):
@@ -318,8 +326,13 @@ def masscan_sweep(ips: list[str], out_xml: str, profile: ScanProfile) -> dict[st
     port_range = "0-65535" if profile.all_ports else f"0-{profile.top_ports}"
     # masscan rate is packets/sec across the whole sweep; scale up from min_rate.
     rate = max(profile.min_rate * 10, 5000)
+    # Hard backstop so a wedged masscan (bad rate, no raw-socket perms, odd iface)
+    # can't hang the whole run: estimate the work and give it 2x + slack, capped 1h.
+    nports = 65536 if profile.all_ports else (profile.top_ports + 1)
+    est = nports * max(1, len(ips)) / max(rate, 1)
+    kill = int(min(3600, max(600, est * 2 + 120)))
     _run(["masscan", "-iL", list_file, "-p", port_range,
-          "--rate", str(rate), "-oX", out_xml])
+          "--rate", str(rate), "-oX", out_xml], timeout=kill)
     try:
         os.unlink(list_file)
     except OSError:

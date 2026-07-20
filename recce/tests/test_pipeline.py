@@ -1062,6 +1062,79 @@ class RobustnessTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertIn("done", out)
 
+    def test_parse_nmap_xml_never_raises_on_bad_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing = os.path.join(d, "nope.xml")
+            self.assertEqual(parser.parse_nmap_xml(missing), [])   # absent file
+            for name, content in [
+                ("empty.xml", ""),
+                ("garbage.xml", "\x00\x01 not xml at all \xff"),
+                ("trunc.xml", '<?xml version="1.0"?><nmaprun start="1"><host>'),
+                ("partial.xml",
+                 '<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                 '<address addr="10.0.0.1" addrtype="ipv4"/></host>'),  # no close
+            ]:
+                p = os.path.join(d, name)
+                with open(p, "w") as fh:
+                    fh.write(content)
+                out = parser.parse_nmap_xml(p)      # must not raise
+                self.assertIsInstance(out, list)
+
+    def test_xlsx_survives_control_chars_in_cells(self):
+        # NSE/banner output with XML-illegal control bytes must not corrupt the
+        # workbook - it must strip them and still read back.
+        wb = xlsx.Workbook()
+        sh = wb.add_sheet("S")
+        sh.write([("banner \x00\x01\x08 with \x1f control bytes", "default")])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "w.xlsx")
+            wb.save(out)
+            sheets = xlsx.read_sheets(out)          # must NOT raise ParseError
+            flat = " ".join(str(c) for row in sheets["S"] for c in row)
+            self.assertIn("banner", flat)
+            self.assertNotIn("\x00", flat)          # control bytes stripped
+
+    def test_docx_survives_control_chars(self):
+        import xml.etree.ElementTree as ET
+        import zipfile
+        from recce.docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.docx")
+            doc = Document()
+            doc.title("title \x00\x08")
+            doc.mono_block("evidence \x00\x01\x1f bytes")
+            doc.save(p)
+            self.assertIsNone(zipfile.ZipFile(p).testzip())
+            with zipfile.ZipFile(p) as z:            # Word-openable = well-formed XML
+                ET.fromstring(z.read("word/document.xml"))
+
+    def test_store_raises_clean_error_on_corrupt_db(self):
+        from recce.store import Store, StoreError
+        with tempfile.TemporaryDirectory() as d:
+            bad = os.path.join(d, "results.sqlite")
+            with open(bad, "wb") as fh:
+                fh.write(b"this is not a sqlite database at all\x00\x01")
+            with self.assertRaises(StoreError):
+                Store(bad)
+
+    def test_invalid_targets_exit_clean(self):
+        # A bad CIDR/range must yield a clean "Invalid targets" message + a None
+        # result (caller exits 1), not a traceback. Exercised via _discover so the
+        # test doesn't depend on nmap being installed.
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            paths = cli._open_paths(d)
+            store = Store(paths["db"])
+            args = SimpleNamespace(targets=["10.0.0.0/99"], exclude=[], fast=False)
+            profile = scanner.PROFILES["standard"]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                result = cli._discover(args, profile, store, paths)
+            store.close()
+            self.assertEqual(result, (None, [], None))
+            self.assertIn("Invalid targets", buf.getvalue())
+
     def test_main_top_level_guard_returns_clean_on_crash(self):
         # An unexpected error inside a command must become a clean exit 1, not a
         # traceback dumped at the tester.

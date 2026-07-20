@@ -25,7 +25,7 @@ from . import tracking as tr
 from .models import Host
 from .report_excel import read_workbook_edits, update_workbook
 from .report_markdown import build_csv, build_markdown
-from .store import Store
+from .store import Store, StoreError
 from .targets import apply_exclusions, ip_matcher, load_targets
 
 BANNER = r"""
@@ -199,7 +199,10 @@ def _safe_refresh(store: Store, paths: dict[str, str], title: str) -> bool:
     try:
         _generate_reports(store, paths, title, quiet=True)
         return True
-    except (PermissionError, OSError):
+    except Exception:  # noqa: BLE001
+        # A locked workbook (OSError) OR any report-builder bug must NOT abort the
+        # scan phase mid-run - the data is safe in the datastore, and the final
+        # report (or a later `report` command) will regenerate it.
         return False
 
 
@@ -301,8 +304,11 @@ def _final_report(store, paths, title) -> None:
     try:
         _import_excel_tracking(store, paths, reconcile_steps=False)
         _generate_reports(store, paths, title)
-    except (PermissionError, OSError):
-        print("[!] Could not write the workbook (open/locked). Your data is saved "
+    except Exception as e:  # noqa: BLE001
+        # Runs in every command's `finally`, so a locked workbook OR any
+        # report-builder bug must not turn completed scan work into a crash.
+        detail = "open/locked" if isinstance(e, OSError) else f"{type(e).__name__}: {e}"
+        print(f"[!] Could not write the workbook ({detail}). Your data is saved "
               "in the datastore - close the file and run `report` to rebuild it.")
 
 
@@ -339,9 +345,17 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map):
 
 
 def _discover(args, profile, store, paths):
-    hosts, subnet_map = load_targets(args.targets)
+    try:
+        hosts, subnet_map = load_targets(args.targets)
+    except (ValueError, OSError) as e:
+        # Bad CIDR/range (ValueError) or a missing/unreadable @file (OSError) - the
+        # literal first thing a tester types. Fail with a clear message, not a crash.
+        print(f"[x] Invalid targets: {e}\n    Fix the IP / range / CIDR / @file "
+              "and re-run.")
+        return None, [], None
     hosts = apply_exclusions(hosts, args.exclude or [])
     if not hosts:
+        print("[x] No targets after expansion/exclusion.")
         return None, [], None
     # Record the full scope so the report accounts for every subnet, even those
     # that turn out to have no live hosts.
@@ -826,8 +840,16 @@ def _setup_scan(args, need_targets=True):
     except scanner.ScannerError as e:
         print(f"[x] {e}")
         return None, None, None
-    paths = _open_paths(args.output_dir)
-    store = Store(paths["db"])
+    try:
+        paths = _open_paths(args.output_dir)
+    except OSError as e:
+        print(f"[x] Cannot use output dir '{args.output_dir}': {e}")
+        return None, None, None
+    try:
+        store = Store(paths["db"])
+    except StoreError as e:
+        print(f"[x] {e}")
+        return None, None, None
     _import_excel_tracking(store, paths)
     return profile, paths, store
 
@@ -839,8 +861,7 @@ def cmd_enum(args: argparse.Namespace) -> int:
         return 1
     store.set_meta("engagement", args.title)
     subnet_map, live_ips, port_map = _discover(args, profile, store, paths)
-    if subnet_map is None:
-        print("[x] No targets after expansion/exclusion.")
+    if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
     try:
@@ -886,8 +907,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 1
     store.set_meta("engagement", args.title)
     subnet_map, live_ips, port_map = _discover(args, profile, store, paths)
-    if subnet_map is None:
-        print("[x] No targets after expansion/exclusion.")
+    if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
     try:

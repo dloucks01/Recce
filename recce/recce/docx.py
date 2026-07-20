@@ -12,9 +12,18 @@ from __future__ import annotations
 import os
 import tempfile
 import zipfile
+import re
 from xml.sax.saxutils import escape
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+# XML-1.0-illegal control chars: nmap NSE / banner evidence can carry these, and
+# they would make Word refuse to open the .docx. Strip before escaping.
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _esc(text) -> str:
+    return escape(_XML_ILLEGAL.sub("�", str(text)))
 
 # Colours (hex, no #) - the light adaptation of the HTML previews' palette.
 _PLACEHOLDER = "B00020"   # dark red for [TESTER: ...] prompts
@@ -110,7 +119,7 @@ def _run(text: str, bold=False, italic=False, color: str | None = None,
         props += f'<w:color w:val="{color}"/>'
     rpr = f"<w:rPr>{props}</w:rPr>" if props else ""
     return (f"<w:r>{rpr}<w:t xml:space=\"preserve\">"
-            f"{escape(text)}</w:t></w:r>")
+            f"{_esc(text)}</w:t></w:r>")
 
 
 class Document:
@@ -165,7 +174,7 @@ class Document:
         for line in (text or "").splitlines() or [""]:
             body = (f'<w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>'
                     f'<w:sz w:val="18"/></w:rPr>'
-                    f'<w:t xml:space="preserve">{escape(line)}</w:t></w:r>')
+                    f'<w:t xml:space="preserve">{_esc(line)}</w:t></w:r>')
             self._p(f'<w:pPr><w:shd w:val="clear" w:fill="{_EVIDENCE_FILL}"/></w:pPr>'
                     f'{body}')
 
@@ -223,7 +232,7 @@ class Document:
             shd = ('<w:shd w:val="clear" w:color="auto" w:fill="D7ECEA"/>'
                    if is_header else "")
             rpr = '<w:rPr><w:b/><w:color w:val="0A4F4A"/></w:rPr>' if is_header else ""
-            run = (f'<w:r>{rpr}<w:t xml:space="preserve">{escape(str(text))}'
+            run = (f'<w:r>{rpr}<w:t xml:space="preserve">{_esc(text)}'
                    f'</w:t></w:r>') if str(text) else ""
             return (f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{shd}'
                     f'<w:vAlign w:val="center"/></w:tcPr><w:p>{run}</w:p></w:tc>')
