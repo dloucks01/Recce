@@ -30,6 +30,9 @@ All notable changes to recce are documented here. Dates are UTC.
   a version; still stdlib-only at runtime.
 - **Real-nmap integration tests** — the pipeline is now validated against actual
   nmap on localhost (discover → full/enum/vuln incl. `--fast`), not only mocks.
+- **Documentation** — a full **TROUBLESHOOTING.md** (symptom → cause → fix per
+  phase), a consolidated command/option reference in the README, and an
+  in-workbook troubleshooting section on the **Runbook** tab.
 
 ### Changed
 - Deeper scanning by default: a curated `_VULN_DETECT` set (ms17-010, heartbleed,

@@ -584,31 +584,89 @@ scan never disappears silently. Service detection runs at higher intensity in
 the `enum` phase (it feeds the offline vuln DB); the `vulns` phase only does a
 light version probe since enum already has the versions.
 
+## Command & option reference
+
+Every command takes targets as a single IP, several IPs, a range
+(`10.0.0.10-40`), a CIDR, or `@file`. Common options (all scan phases):
+`-o DIR` (engagement folder), `--title`, `--profile quick|standard|thorough`,
+`--workers N`, `--refresh-every N`, `--host-timeout MIN`.
+
+| Command | What it does | Notable options |
+|---|---|---|
+| `doctor` | Verify the box (env + tools + real localhost self-scan) | `--no-self-scan` |
+| `demo` | Build reports from a bundled sample scan (no network) | — |
+| `enum <targets>` | Discover hosts, port sweep, service/OS/AD enum → sheet | `--fast` (masscan), `--all-ports`, `--top-ports N`, `--no-discovery`, `--no-ad`, `--no-os`, `--version-all`, `--version-intensity 0-9`, `--min-rate`, `--exclude`, `--resume` |
+| `vulns [targets]` | Vuln-scan open ports (safe detection + offline CVE/CWE DB + probes) | `--fast` (top-signal + progress/ETA), `--aggressive` (full NSE), `--only SVC`, `--unscanned`, `--offline`, `--no-searchsploit`, `--no-probes`, `--udp-top N` |
+| `scan <targets>` | `enum` then `vulns` in one shot | all of enum + vulns (`--fast` = fast sweep *and* fast vulns) |
+| `db [targets]` | Database enumeration + vuln scan | `--aggressive` (brute/xp_cmdshell/hash), `--no-searchsploit` |
+| `privesc [targets]` | Per-host priv-esc playbook | `--scan` (remote NSE checks), `--aggressive` |
+| `credenum [targets]` | Authenticated SMB/AD/SSH enum | `-u/-p/-d`, `--admin-user/--admin-pass/--admin-domain`, `--ssh-user/--ssh-pass/--ssh-key`, `--ldap-enum`, `--ldap-anon`, `--ldap-ssl`, `--dc-ip`, `--aggressive` |
+| `ingest <loot>` | Fold on-target `recce-enum.sh`/`.ps1` findings into Priv-Esc | `--host IP` |
+| `writeups [targets]` | One Word write-up per finding + combined report | `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
+| `report` | Rebuild the workbook/reports from the datastore | — |
+| `status` | Print live coverage + suggested next command | — |
+| `review` | Mark hosts/services/items reviewed from the CLI | `--host`, `--service IP:PORT`, `--key`, `--cascade`, `--note`, `--undo` |
+
+Credentials passed to `enum`/`vulns` (`-u/-p/-d`) also feed the SMB/LDAP NSE
+scripts during the scan. Run `recce <command> -h` for the full list.
+
+**Environment:** `RECCE_DEBUG=1` (full tracebacks), `RECCE_BROWSER=/path`
+(screenshot browser). **Exit codes:** `0` ok · `1` error · `2` bad args · `130`
+interrupted (partial results saved).
+
+## Troubleshooting
+
+Run **`recce doctor`** first — it reports what's missing and self-tests the
+pipeline. Most-common issues:
+
+- **`nmap ... not found`** — install nmap (the only hard requirement).
+- **weak scan / "Not running as root"** — run with `sudo`; under sudo use
+  `sudo ./bin/recce ...` so PATH/PYTHONPATH survive.
+- **discovery finds nothing** — a firewall is dropping pings; re-run with
+  `--no-discovery` (`-Pn`).
+- **too slow** — `--fast`, `--workers N`, `vulns --fast`, `--profile quick`,
+  `--top-ports`, `--host-timeout`.
+- **crashed / interrupted** — nothing is lost; re-run with `--resume`, or
+  `recce report -o DIR`. `RECCE_DEBUG=1` for the traceback.
+- **credenum auth table** — `FAIL` = credential rejected (check user/pass/**domain**);
+  `ERR` = unreachable/tool error; `-` = not attempted (missing tool never shows FAIL).
+- **workbook won't update** — close it in Excel first (an open file is locked).
+
+**Re-running any phase is always safe** — every phase is idempotent and never
+duplicates rows. Full guide: **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
+
 ## Layout
 
 ```
 bin/recce            convenience wrapper (run: ./bin/recce ...)
+pyproject.toml       packaging (pip install . -> `recce` command)
+README.md            this file
 QUICKSTART.md        one-page user guide
+TROUBLESHOOTING.md   symptom -> cause -> fix, per phase
+CHANGELOG.md         release notes
 recce/               the package (python -m recce)
+  cli.py             command-line interface (enum/vulns/db/privesc/... commands)
   targets.py         target parsing / subnet expansion / IP matcher
   scanner.py         nmap / masscan orchestration (discover / enum / vuln / nse)
   parser.py          nmap XML -> normalized model (+ vuln & AD harvesting)
   models.py          Host / Port / Vuln / Exploit / Account / Domain dataclasses
+  store.py           SQLite datastore: hosts + domains + tracking, merge-on-rescan
+  tracking.py        coverage + per-step keys, progress computation (shared)
   ad.py              AD analysis: roles, signing/relay, LDAP enumeration
   db.py              database detection + engine-specific NSE + inventory
+  vulndb.py          offline version->CVE/CWE vulnerability engine (+ remediation)
+  exploits.py        offline exploit mapping via searchsploit (Exploit-DB)
+  exploitref.py      curated proven-exploit references (walkthroughs + sheet)
+  probes.py          stdlib HTTP-header + TLS enrichment probes (airgapped)
   privesc.py         Windows/Linux priv-esc findings + playbook knowledge base
   credenum.py        credentialed enum via netexec / impacket / ssh (tool-gated)
-  docx.py            standard-library .docx writer (no python-docx) + image embed
-  report_docx.py     per-finding Word write-ups from the walkthrough template
+  ingest.py          on-target loot -> Priv-Esc rows + promoted Vulnerabilities
   screenshot.py      optional headless-browser web screenshots (tool-gated)
-  exploits.py        offline exploit mapping via searchsploit (Exploit-DB)
-  vulndb.py          offline version->CVE/CWE vulnerability engine (+ remediation)
-  probes.py          stdlib HTTP-header + TLS enrichment probes (airgapped)
-  tracking.py        coverage + per-step keys, progress computation (shared)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)
-  store.py           SQLite datastore: hosts + domains + tracking, merge-on-rescan
-  report_excel.py    the Excel workbook (Start Here, Overview, Checklist, ...)
+  docx.py            standard-library .docx writer (no python-docx) + image embed
+  report_excel.py    the Excel workbook (Start Here, Runbook, Overview, ...)
+  report_docx.py     per-finding Word write-ups from the walkthrough template
   report_markdown.py Markdown + CSV
-  cli.py             command-line interface (enum/vulns/db/privesc/... commands)
   sample_scan.xml    bundled sample for `demo`
+  local/             on-target read-only enum scripts (recce-enum.sh / .ps1)
 ```

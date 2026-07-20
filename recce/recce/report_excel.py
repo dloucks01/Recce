@@ -601,7 +601,8 @@ def _build_guide(wb, meta: dict) -> None:
     sh.write([("Tab", "header"), ("What it shows", "header")])
     for tab, desc in [
         ("Runbook", "Step-by-step: exactly what to type for each phase + the options "
-                    "that matter. Start here if you just want the commands."),
+                    "that matter, plus a troubleshooting table. Start here if you "
+                    "just want the commands."),
         ("Overview", "Totals, review progress, and live-hosts-per-subnet coverage."),
         ("Checklist", "THE working tab: one row per IP (grouped by subnet) with a "
                       "checkbox for each phase + host detail + Reviewed + Notes."),
@@ -738,6 +739,51 @@ def _build_runbook(wb, meta: dict) -> None:
         "Windows: self-test only (no enumeration).")
     cmd("powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt",
         "Windows: full read-only sweep, saved to loot.txt.")
+
+    # --- troubleshooting ---------------------------------------------------------
+    sh.write([""])
+    sh.write([("If something goes wrong", "title")])
+    sh.write([("Run `doctor` first - it reports what's missing and self-tests the "
+               "pipeline. Re-running any phase is safe (idempotent - never "
+               "duplicates rows).", "sub")])
+    sh.write([("Symptom", "header"), ("Fix", "header")])
+
+    def fix(symptom, action):
+        sh.write([(symptom, "wrap"), (action, "wrap")])
+
+    fix("nmap not found", "Install nmap - the only hard requirement. Everything "
+                          "else is optional and degrades cleanly.")
+    fix("'Not running as root' / weak scan",
+        "Run with sudo. Under sudo use `sudo ./bin/recce ...` so PATH/PYTHONPATH "
+        "survive (SYN scan, OS detection and UDP need root).")
+    fix("Discovery finds no hosts",
+        "A firewall is dropping pings. Re-run `enum` with --no-discovery (-Pn: "
+        "treat every target as up).")
+    fix("Scans too slow",
+        "--fast (masscan), --workers N, `vulns --fast` (top-signal + progress/ETA), "
+        "--profile quick, --top-ports N, --host-timeout MIN.")
+    fix("Crashed or interrupted",
+        "Nothing is lost. Re-run with --resume, or `report -o eng` to rebuild from "
+        "saved data. Set RECCE_DEBUG=1 for the full traceback.")
+    fix("'No open ports match' on vulns",
+        "Run `enum` first; --unscanned finds nothing once everything is scanned; "
+        "widen or drop --only.")
+    fix("No findings (but you expected some)",
+        "Improve service ID on enum (--version-all / --version-intensity 9), then "
+        "try `vulns --aggressive` for the full intrusive NSE category.")
+    fix("credenum: no tools / auth table",
+        "Install netexec + impacket (or ssh). In the table: FAIL = credential "
+        "rejected (check user/pass/DOMAIN); ERR = unreachable/tool error; '-' = "
+        "not attempted (a missing tool is never shown as FAIL).")
+    fix("Workbook won't update / locked",
+        "Close it in Excel/LibreOffice before a scan or `report` - an open file is "
+        "locked. Your ticks and notes are read back on the next run.")
+    fix("Web screenshots missing in write-ups",
+        "Install firefox/chromium, or point RECCE_BROWSER at a browser; or use "
+        "`writeups --no-screenshots` and add them in Word.")
+    fix("Full guide",
+        "See TROUBLESHOOTING.md in the project, or run `recce <command> -h` for "
+        "every option.")
 
     sh.set_col(1, 46)
     sh.set_col(2, 82)
