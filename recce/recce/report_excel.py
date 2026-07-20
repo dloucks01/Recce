@@ -248,14 +248,16 @@ def _styler_raw(d: dict) -> dict:
     return {"Output": "wrap"}
 
 
-def _spec_raw_output(hosts: list[Host]) -> SheetSpec:
-    """Raw NSE script output, verbatim - one row per script run (host- or
-    port-level). The unparsed evidence behind the parsed sheets: whatever nmap's
-    scripts printed, kept as-is so a tester can read the source, cite it in a
-    write-up, or catch something the parsers didn't surface."""
+def _spec_host_scripts(hosts: list[Host]) -> SheetSpec:
+    """Host-level NSE script output, verbatim (one row per host script run).
+
+    These are the scripts nmap runs against the host as a whole rather than a
+    single port - smb-os-discovery, smb2-time, ldap-rootdse, nbstat, and the
+    like. Kept separate from the per-port Scan Output so host-wide facts read on
+    their own."""
     cols = [
-        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 20),
-        ("Port", "data", 7), ("Script", "data", 26), ("Output", "data", 90),
+        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 22),
+        ("Script", "data", 26), ("Output", "data", 96),
         ("Notes", "notes", 26), ("Key", "key", 4),
     ]
     rows = []
@@ -264,8 +266,24 @@ def _spec_raw_output(hosts: list[Host]) -> SheetSpec:
             if not (s.output or "").strip():
                 continue
             rows.append({"key": f"raw:{h.ip}:host:{s.id}", "data": {
-                "IP": h.ip, "Hostname": h.hostname, "Port": "host",
+                "IP": h.ip, "Hostname": h.hostname,
                 "Script": s.id, "Output": _clip(s.output)}})
+    return SheetSpec("Host Scripts", cols, rows, _styler_raw, skip_if_empty=True)
+
+
+def _spec_scan_output(hosts: list[Host]) -> SheetSpec:
+    """Port-level NSE script output, verbatim - one row per port script run. The
+    unparsed evidence behind the parsed sheets: whatever nmap's per-port scripts
+    printed, kept as-is so a tester can read the source, cite it in a write-up,
+    or catch something the parsers didn't surface. (Host-wide scripts live on the
+    separate Host Scripts sheet.)"""
+    cols = [
+        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 20),
+        ("Port", "data", 7), ("Script", "data", 26), ("Output", "data", 90),
+        ("Notes", "notes", 26), ("Key", "key", 4),
+    ]
+    rows = []
+    for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
         for p in sorted(h.open_ports, key=lambda p: p.portid):
             for s in p.scripts:
                 if not (s.output or "").strip():
@@ -505,7 +523,9 @@ def _build_guide(wb, meta: dict) -> None:
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
         ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
-        ("Scan Output", "Raw NSE script output, verbatim - the evidence behind "
+        ("Host Scripts", "Raw host-level NSE output (smb-os-discovery, ldap-rootdse, "
+                         "nbstat...) - host-wide evidence, verbatim."),
+        ("Scan Output", "Raw per-port NSE output, verbatim - the evidence behind "
                         "the parsed sheets (cite it in write-ups)."),
     ]:
         sh.write([tab, desc])
@@ -690,7 +710,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
 
         Start Here, Overview, Checklist, Services, Vulnerabilities, Exploits,
         Services by Product, Databases, Active Directory, AD Quick Wins,
-        Users & Accounts, Priv-Esc, Scan Output.
+        Users & Accounts, Priv-Esc, Host Scripts, Scan Output.
 
     Rationale for the pairings you flip between:
       * Checklist <-> Services  - host <-> its open ports (the working pair).
@@ -703,7 +723,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
             _spec_exploits(hosts), _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
            [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts),
-            _spec_raw_output(hosts)]
+            _spec_host_scripts(hosts), _spec_scan_output(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
