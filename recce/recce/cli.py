@@ -1436,9 +1436,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wu.add_argument("-o", "--output-dir", default="engagement")
     wu.add_argument("--title", default="Recce Engagement",
                     help="engagement title shown on the combined report")
-    wu.add_argument("--min-severity", default="info",
+    wu.add_argument("--min-severity", default="low",
                     choices=["critical", "high", "medium", "low", "info"],
-                    help="only findings at or above this severity")
+                    help="only findings at or above this severity (default: low - "
+                         "excludes informational items; use 'info' to include them)")
     wu.add_argument("--no-screenshots", action="store_true",
                     help="don't auto-capture web screenshots (add them in Word)")
     wu.add_argument("--no-combined", action="store_true",

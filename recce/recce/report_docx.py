@@ -22,27 +22,99 @@ from .models import Host, Vuln
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
-# First matching CWE -> (vulnerability type, CIA aspects) for auto-draft.
+# First matching CWE -> (vulnerability type, CIA aspects) for auto-draft. Ordered
+# most-specific first; every CWE recce can emit is covered (see the coverage test).
+_CIA = "Confidentiality, Integrity, Availability"
 _CWE_TYPE = [
-    (("CWE-78", "CWE-77", "CWE-88", "CWE-94", "CWE-95", "CWE-134"),
-     "Injection / Remote Code Execution", "Confidentiality, Integrity, Availability"),
+    (("CWE-78", "CWE-77", "CWE-88", "CWE-94", "CWE-95", "CWE-134", "CWE-74", "CWE-917"),
+     "Injection / Remote Code Execution", _CIA),
     (("CWE-89",), "SQL Injection", "Confidentiality, Integrity"),
     (("CWE-79",), "Cross-Site Scripting", "Integrity"),
+    (("CWE-502",), "Insecure Deserialization", _CIA),
+    (("CWE-918",), "Server-Side Request Forgery (SSRF)", "Confidentiality, Integrity"),
+    (("CWE-611",), "XML External Entity (XXE) Injection", "Confidentiality, Integrity"),
+    (("CWE-434",), "Unrestricted File Upload", _CIA),
+    (("CWE-444",), "HTTP Request Smuggling / Desync", "Integrity"),
     (("CWE-22", "CWE-98"), "Path Traversal / File Inclusion", "Confidentiality, Integrity"),
-    (("CWE-287", "CWE-306", "CWE-288", "CWE-1188", "CWE-521", "CWE-307", "CWE-798"),
+    (("CWE-119", "CWE-120", "CWE-125", "CWE-787", "CWE-415", "CWE-416", "CWE-190",
+      "CWE-193"), "Memory Corruption / Buffer Error", _CIA),
+    (("CWE-287", "CWE-306", "CWE-288", "CWE-1188", "CWE-521", "CWE-307", "CWE-798",
+      "CWE-290", "CWE-640", "CWE-863"),
      "Authentication / Access Control Weakness", "Confidentiality, Integrity"),
     (("CWE-269", "CWE-250", "CWE-264"), "Privilege Escalation", "Confidentiality, Integrity"),
     (("CWE-319",), "Cleartext Transmission of Sensitive Data", "Confidentiality"),
-    (("CWE-327", "CWE-326", "CWE-295", "CWE-297", "CWE-298"),
+    (("CWE-327", "CWE-326", "CWE-295", "CWE-297", "CWE-298", "CWE-330"),
      "Cryptographic / TLS Weakness", "Confidentiality, Integrity"),
-    (("CWE-522", "CWE-312", "CWE-256", "CWE-200", "CWE-538", "CWE-527", "CWE-532"),
-     "Information / Credential Disclosure", "Confidentiality"),
+    (("CWE-522", "CWE-312", "CWE-256", "CWE-200", "CWE-538", "CWE-527", "CWE-532",
+      "CWE-203"), "Information / Credential Disclosure", "Confidentiality"),
     (("CWE-693", "CWE-1021", "CWE-16", "CWE-650", "CWE-441", "CWE-284"),
      "Security Misconfiguration", "Integrity"),
+    (("CWE-364",), "Race Condition", "Integrity, Availability"),
     (("CWE-406", "CWE-400"), "Resource Exhaustion / Denial of Service", "Availability"),
-    (("CWE-1104", "CWE-1392"), "Unmaintained / Default Components", "Confidentiality, Integrity, Availability"),
-    (("CWE-506",), "Embedded Malicious Code / Backdoor", "Confidentiality, Integrity, Availability"),
+    (("CWE-1104", "CWE-1392"), "Unmaintained / Default Components", _CIA),
+    (("CWE-506",), "Embedded Malicious Code / Backdoor", _CIA),
+    (("CWE-20",), "Improper Input Validation", "Integrity"),  # generic - keep last
 ]
+
+# CWE id -> short official name, so a finding references each CWE by name.
+_CWE_NAME = {
+    "CWE-16": "Configuration", "CWE-20": "Improper Input Validation",
+    "CWE-22": "Path Traversal", "CWE-74": "Injection", "CWE-77": "Command Injection",
+    "CWE-78": "OS Command Injection", "CWE-79": "Cross-site Scripting",
+    "CWE-88": "Argument Injection", "CWE-89": "SQL Injection", "CWE-94": "Code Injection",
+    "CWE-95": "Eval Injection", "CWE-98": "PHP Remote File Inclusion",
+    "CWE-119": "Improper Restriction of Memory Bounds", "CWE-120": "Buffer Overflow",
+    "CWE-125": "Out-of-bounds Read", "CWE-134": "Uncontrolled Format String",
+    "CWE-190": "Integer Overflow", "CWE-193": "Off-by-one Error",
+    "CWE-200": "Exposure of Sensitive Information", "CWE-203": "Observable Discrepancy",
+    "CWE-250": "Execution with Unnecessary Privileges",
+    "CWE-256": "Plaintext Storage of a Password",
+    "CWE-264": "Permissions, Privileges, and Access Controls",
+    "CWE-269": "Improper Privilege Management", "CWE-284": "Improper Access Control",
+    "CWE-287": "Improper Authentication",
+    "CWE-288": "Authentication Bypass Using an Alternate Path",
+    "CWE-290": "Authentication Bypass by Spoofing",
+    "CWE-295": "Improper Certificate Validation",
+    "CWE-297": "Improper Validation of Certificate with Host Mismatch",
+    "CWE-298": "Improper Validation of Certificate Expiration",
+    "CWE-306": "Missing Authentication for Critical Function",
+    "CWE-307": "Improper Restriction of Excessive Authentication Attempts",
+    "CWE-312": "Cleartext Storage of Sensitive Information",
+    "CWE-319": "Cleartext Transmission of Sensitive Information",
+    "CWE-326": "Inadequate Encryption Strength",
+    "CWE-327": "Broken or Risky Cryptographic Algorithm",
+    "CWE-330": "Use of Insufficiently Random Values",
+    "CWE-364": "Signal Handler Race Condition",
+    "CWE-400": "Uncontrolled Resource Consumption",
+    "CWE-406": "Insufficient Control of Network Message Volume",
+    "CWE-415": "Double Free", "CWE-416": "Use After Free",
+    "CWE-434": "Unrestricted Upload of File with Dangerous Type",
+    "CWE-441": "Unintended Proxy or Intermediary (Confused Deputy)",
+    "CWE-444": "Inconsistent Interpretation of HTTP Requests (Request Smuggling)",
+    "CWE-502": "Deserialization of Untrusted Data", "CWE-506": "Embedded Malicious Code",
+    "CWE-521": "Weak Password Requirements",
+    "CWE-522": "Insufficiently Protected Credentials",
+    "CWE-527": "Exposure of Version-Control Repository",
+    "CWE-532": "Insertion of Sensitive Information into Log File",
+    "CWE-538": "Insertion of Sensitive Information into Externally-Accessible File",
+    "CWE-611": "Improper Restriction of XML External Entity Reference",
+    "CWE-640": "Weak Password Recovery Mechanism",
+    "CWE-650": "Trusting HTTP Permission Methods on the Server Side",
+    "CWE-693": "Protection Mechanism Failure", "CWE-787": "Out-of-bounds Write",
+    "CWE-798": "Use of Hard-coded Credentials", "CWE-863": "Incorrect Authorization",
+    "CWE-917": "Expression Language Injection",
+    "CWE-918": "Server-Side Request Forgery (SSRF)",
+    "CWE-1021": "Improper Restriction of Rendered UI Layers (Clickjacking)",
+    "CWE-1104": "Use of Unmaintained Third Party Components",
+    "CWE-1188": "Insecure Default Initialization of Resource",
+    "CWE-1392": "Use of Default Credentials",
+}
+
+
+def cwe_label(cwe: str) -> str:
+    """'CWE-22 (Path Traversal)' - the id plus its short name for reference."""
+    name = _CWE_NAME.get(cwe)
+    return f"{cwe} ({name})" if name else cwe
 
 _SOURCE_TOOL = {
     "nse": "nmap NSE scripts",
@@ -120,9 +192,97 @@ _TYPE_IMPACT = {
         "longer receive security fixes",
     "Embedded Malicious Code / Backdoor":
         "use a built-in backdoor to gain direct, unauthenticated access to the system",
+    "Insecure Deserialization":
+        "abuse unsafe deserialization of untrusted data to run their own code on the "
+        "server, typically taking full control",
+    "Server-Side Request Forgery (SSRF)":
+        "make the server send requests on their behalf to internal systems it can "
+        "reach, exposing internal services or cloud metadata and credentials",
+    "XML External Entity (XXE) Injection":
+        "abuse XML parsing to read local files or reach internal systems, exposing "
+        "sensitive data",
+    "Unrestricted File Upload":
+        "upload an executable file and run it on the server, typically gaining full "
+        "control of the host",
+    "HTTP Request Smuggling / Desync":
+        "desynchronise how front-end and back-end servers interpret requests - "
+        "poisoning other users' traffic or slipping past security controls",
+    "Memory Corruption / Buffer Error":
+        "corrupt the service's memory to crash it or, in the worst case, run their "
+        "own code on the host",
+    "Race Condition":
+        "exploit a timing window to reach an unintended state, potentially "
+        "escalating access or disrupting the service",
+    "Improper Input Validation":
+        "supply crafted input the service fails to validate, leading to unexpected "
+        "and potentially exploitable behaviour",
 }
 _FALLBACK_IMPACT = ("weaken the security of the affected service, potentially "
                     "exposing data or functionality to unauthorized access")
+
+# Hand-tuned, specific impact wording for marquee named vulnerabilities. Matched
+# by CVE first, then by a name keyword in the title/script (so NSE-only hits like
+# ms17-010, which carry no CVE, are still recognised). Each phrase follows
+# "an attacker could ...".
+_ETERNALBLUE = ("run code remotely and without any credentials over SMBv1 to take "
+                "full control of the host - the EternalBlue flaw behind the WannaCry "
+                "and NotPetya outbreaks")
+_ZEROLOGON = ("reset a domain controller's machine-account password with no "
+              "credentials at all and then seize control of the entire Active "
+              "Directory domain (ZeroLogon)")
+_PRINTNIGHTMARE = ("run code as SYSTEM through the Windows Print Spooler and, on a "
+                   "domain controller, take over the whole domain (PrintNightmare)")
+_SMBGHOST = ("run code remotely and without credentials against the SMBv3 "
+             "compression flaw to take full control of the host (SMBGhost)")
+_BLUEKEEP = ("run code remotely and without a login over Remote Desktop to take "
+             "full control of the host - a wormable flaw (BlueKeep)")
+_LOG4SHELL = ("make the application load and run attacker-supplied code simply by "
+              "getting it to log a crafted string, usually leading to full remote "
+              "control of the host (Log4Shell)")
+_HEARTBLEED = ("read chunks of the server's live memory over TLS, exposing "
+               "credentials, session tokens, and even the server's private key "
+               "(Heartbleed)")
+_SHELLSHOCK = ("run arbitrary commands by smuggling them through a crafted "
+               "environment variable, taking control of the host (Shellshock)")
+_PROXYLOGON = ("authenticate as the Exchange server itself and, chained with "
+               "related flaws, run code as SYSTEM and read every mailbox (ProxyLogon)")
+_PROXYSHELL = ("chain Exchange flaws to run code as SYSTEM and reach all mailboxes "
+               "without authentication (ProxyShell)")
+_SPRING4SHELL = ("achieve remote code execution against the Spring framework and "
+                 "take control of the application server (Spring4Shell)")
+
+_MARQUEE_CVE = {
+    "CVE-2020-1472": _ZEROLOGON,
+    "CVE-2021-34527": _PRINTNIGHTMARE, "CVE-2021-1675": _PRINTNIGHTMARE,
+    "CVE-2017-0143": _ETERNALBLUE, "CVE-2017-0144": _ETERNALBLUE,
+    "CVE-2017-0145": _ETERNALBLUE, "CVE-2017-0146": _ETERNALBLUE,
+    "CVE-2017-0147": _ETERNALBLUE, "CVE-2017-0148": _ETERNALBLUE,
+    "CVE-2020-0796": _SMBGHOST, "CVE-2019-0708": _BLUEKEEP,
+    "CVE-2021-44228": _LOG4SHELL, "CVE-2021-45046": _LOG4SHELL,
+    "CVE-2014-0160": _HEARTBLEED,
+    "CVE-2014-6271": _SHELLSHOCK, "CVE-2014-7169": _SHELLSHOCK,
+    "CVE-2021-26855": _PROXYLOGON, "CVE-2021-34473": _PROXYSHELL,
+    "CVE-2022-22965": _SPRING4SHELL,
+}
+_MARQUEE_KW = {
+    "ms17-010": _ETERNALBLUE, "eternalblue": _ETERNALBLUE, "zerologon": _ZEROLOGON,
+    "printnightmare": _PRINTNIGHTMARE, "smbghost": _SMBGHOST, "bluekeep": _BLUEKEEP,
+    "log4shell": _LOG4SHELL, "log4j": _LOG4SHELL, "heartbleed": _HEARTBLEED,
+    "shellshock": _SHELLSHOCK, "proxylogon": _PROXYLOGON, "proxyshell": _PROXYSHELL,
+    "spring4shell": _SPRING4SHELL,
+}
+
+
+def _marquee_impact(f: Finding) -> str | None:
+    """Specific impact wording for a well-known named vuln, or None."""
+    for cve in f.cves:
+        if cve in _MARQUEE_CVE:
+            return _MARQUEE_CVE[cve]
+    hay = (f.title + " " + " ".join(f.scripts)).lower()
+    for kw, impact in _MARQUEE_KW.items():
+        if kw in hay:
+            return impact
+    return None
 _SEV_FRAME = {
     "critical": "This is considered a critical-risk exposure",
     "high": "This is considered a high-risk exposure",
@@ -201,9 +361,10 @@ def _narrative(f: Finding) -> list[str]:
     elif f.confidence == "likely":
         found += " The detected version falls within a range known to be affected."
 
-    # 3) Plain-language impact, framed by severity.
+    # 3) Plain-language impact, framed by severity. A marquee named vuln gets its
+    # own hand-tuned wording; otherwise fall back to the vulnerability-type impact.
     vtype, _cia = _vuln_type(f.cwes)
-    impact = _TYPE_IMPACT.get(vtype, _FALLBACK_IMPACT)
+    impact = _marquee_impact(f) or _TYPE_IMPACT.get(vtype, _FALLBACK_IMPACT)
     frame = _SEV_FRAME.get(f.severity.lower(), "This is an issue")
     consequence = (f"{frame}: if exploited, an attacker could {impact}.")
     return [ctx, found, consequence]
@@ -376,8 +537,8 @@ def _finding_body(doc: Document, f: Finding, fid: str,
         f"{ip}:{port}" + (f" ({hn})" if hn else "")
         for ip, port, hn in f.affected), mono=True)
     doc.field("Vulnerability Type", vtype, placeholder="classify the vulnerability")
-    doc.field("CWE Associated", ", ".join(f.cwes), placeholder="add CWE reference(s)",
-              mono=True)
+    doc.field("CWE Associated", "; ".join(cwe_label(c) for c in f.cwes),
+              placeholder="add CWE reference(s)")
     doc.field("CVE / References", ", ".join(f.cves) or "None mapped", mono=True)
     doc.field("Security Aspect Compromised", cia,
               placeholder="confirm Confidentiality / Integrity / Availability")
@@ -424,13 +585,15 @@ def _write_one(f: Finding, fid: str, path: str,
     doc.save(path)
 
 
-def build_writeups(hosts: list[Host], out_dir: str, *, min_severity: str = "info",
+def build_writeups(hosts: list[Host], out_dir: str, *, min_severity: str = "low",
                    screenshots: dict | None = None,
                    overwrite: bool = False) -> dict:
     """Generate one .docx per finding into out_dir. Returns a summary dict.
 
-    Never overwrites an existing write-up unless overwrite=True, so tester edits
-    (narrative, steps, pasted screenshots) survive a regenerate.
+    Reports cover findings only: informational observations (info severity - e.g.
+    a disclosed server banner or TLS-cert detail) are excluded by default. Pass
+    min_severity='info' to include them. Never overwrites an existing write-up
+    unless overwrite=True, so tester edits survive a regenerate.
     """
     os.makedirs(out_dir, exist_ok=True)
     cutoff = _SEV_ORDER.get(min_severity, 4)
@@ -450,10 +613,12 @@ def build_writeups(hosts: list[Host], out_dir: str, *, min_severity: str = "info
 
 
 def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
-                   min_severity: str = "info",
+                   min_severity: str = "low",
                    screenshots: dict | None = None) -> dict:
     """One document: title, severity summary, findings-summary table, then every
-    finding as a section. Regenerated each run (it's a rollup, not hand-edited)."""
+    finding as a section. Regenerated each run (it's a rollup, not hand-edited).
+    Findings only - informational (info) items are excluded unless min_severity
+    is lowered to 'info'."""
     cutoff = _SEV_ORDER.get(min_severity, 4)
     findings = [f for f in group_findings(hosts)
                 if _SEV_ORDER.get(f.severity, 9) <= cutoff]

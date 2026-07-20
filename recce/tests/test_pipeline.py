@@ -605,6 +605,66 @@ class WriteupTest(unittest.TestCase):
         self.assertIn("smb", pa)                              # SMB service context
         self.assertIn("confirmed through hands-on", pa)       # potential caveat
 
+    def test_every_cwe_is_classified_named_and_has_an_impact(self):
+        """Guarantee: every CWE recce can emit maps to a type + a name, and every
+        type has a plain-language impact - so no finding drops to a blank type."""
+        import glob
+        import re
+        from recce.report_docx import _CWE_TYPE, _CWE_NAME, _TYPE_IMPACT
+        used = set()
+        for fn in glob.glob(os.path.join(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))), "recce", "*.py")):
+            if fn.endswith("report_docx.py"):
+                continue
+            with open(fn) as fh:
+                used |= set(re.findall(r"CWE-\d+", fh.read()))
+        self.assertTrue(used)
+        typed = set()
+        for keys, _label, _cia in _CWE_TYPE:
+            typed |= set(keys)
+        self.assertEqual(used - typed, set(), "CWEs with no vulnerability type")
+        self.assertEqual(used - set(_CWE_NAME), set(), "CWEs with no reference name")
+        for _keys, label, _cia in _CWE_TYPE:
+            self.assertIn(label, _TYPE_IMPACT, f"type '{label}' has no impact wording")
+
+    def test_marquee_vulns_get_specific_impact(self):
+        from recce.models import Vuln
+        from recce.report_docx import group_findings, _narrative
+        cases = [
+            (["CVE-2020-1472"], "verify zerologon", "ZeroLogon"),
+            (["CVE-2021-34527"], "printnightmare", "Print Spooler"),
+            ([], "smb-vuln-ms17-010", "EternalBlue"),        # NSE hit, no CVE
+            (["CVE-2020-0796"], "smbghost", "SMBv3"),
+        ]
+        for cves, title, needle in cases:
+            h = Host(ip="10.0.0.9", os_family="Windows",
+                     ports=[Port(portid=445, service="microsoft-ds")],
+                     vulns=[Vuln(ip="10.0.0.9", port=445, protocol="tcp",
+                                 script_id=title, title=title, severity="critical",
+                                 source="nse", ids=cves)])
+            blob = " ".join(_narrative(group_findings([h])[0]))
+            self.assertIn(needle, blob, f"{title} missing marquee wording")
+
+    def test_reports_exclude_informational_by_default(self):
+        from recce.models import Vuln
+        from recce.report_docx import build_writeups
+        h = Host(ip="10.0.0.9", ports=[Port(portid=25, service="smtp")],
+                 vulns=[
+                     Vuln(ip="10.0.0.9", port=25, protocol="tcp", script_id="a",
+                          title="SMTP server exposed", severity="info", source="version-db"),
+                     Vuln(ip="10.0.0.9", port=25, protocol="tcp", script_id="b",
+                          title="Weak TLS on SMTP", severity="medium", source="probe"),
+                 ])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "w")
+            summary = build_writeups([h], out)               # default = findings only
+            self.assertEqual(summary["total"], 1)            # the medium, not the info
+            names = os.listdir(out)
+            self.assertFalse(any("_info_" in n for n in names))
+            # Opting in re-includes informational items.
+            summary2 = build_writeups([h], os.path.join(d, "w2"), min_severity="info")
+            self.assertEqual(summary2["total"], 2)
+
     def test_walkthrough_uses_searchsploit_exploit(self):
         from recce.models import Vuln, Exploit
         from recce.report_docx import group_findings, _walkthrough_steps
