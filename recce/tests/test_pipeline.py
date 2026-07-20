@@ -569,6 +569,42 @@ class WriteupTest(unittest.TestCase):
         self.assertIn("nmap -sV", joined)         # discovery step
         self.assertIn("ssl-enum-ciphers", joined)  # tailored confirmation step
 
+    def test_narrative_is_multi_paragraph_and_context_aware(self):
+        from recce.models import Vuln
+        from recce.report_docx import group_findings, _narrative
+        # A likely (version-matched) web finding.
+        web = Host(ip="10.0.20.5", hostnames=["web01"],
+                   ports=[Port(portid=80, service="http", product="Apache httpd",
+                               version="2.4.49")],
+                   vulns=[Vuln(ip="10.0.20.5", port=80, protocol="tcp",
+                               script_id="version-db", title="Apache path traversal",
+                               severity="critical", source="version-db",
+                               confidence="likely", cwes=["CWE-22"],
+                               ids=["CVE-2021-41773"])])
+        f = group_findings([web])[0]
+        paras = _narrative(f)
+        self.assertEqual(len(paras), 3)                       # context / finding / impact
+        blob = " ".join(paras).lower()
+        self.assertIn("web service", blob)                    # service context
+        self.assertIn("apache httpd 2.4.49", blob)            # detected product
+        self.assertIn("10.0.20.5", blob)                      # affected host named
+        self.assertIn("cve-2021-41773", blob)                 # CVE woven in
+        self.assertIn("critical-risk", blob)                  # severity framing
+        self.assertIn("read files outside", blob)             # CWE-22 plain impact
+        self.assertIn("range known to be affected", blob)     # likely-confidence note
+
+        # A potential (advisory) finding gets the "confirm by hand" caveat instead.
+        adv = Host(ip="10.0.10.10", hostnames=["dc01"], os_family="Windows",
+                   ports=[Port(portid=445, service="microsoft-ds",
+                               product="Windows Server 2019")],
+                   vulns=[Vuln(ip="10.0.10.10", port=445, protocol="tcp",
+                               script_id="version-db", title="verify ZeroLogon",
+                               severity="critical", source="version-db",
+                               confidence="potential", cwes=["CWE-330"])])
+        pa = " ".join(_narrative(group_findings([adv])[0])).lower()
+        self.assertIn("smb", pa)                              # SMB service context
+        self.assertIn("confirmed through hands-on", pa)       # potential caveat
+
     def test_walkthrough_uses_searchsploit_exploit(self):
         from recce.models import Vuln, Exploit
         from recce.report_docx import group_findings, _walkthrough_steps
