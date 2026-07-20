@@ -1022,13 +1022,16 @@ class VulnDbTest(unittest.TestCase):
 
     def test_windows_advisories_are_os_gated(self):
         from recce import vulndb
+        # A non-DC Windows host gets the Windows SMB advisories, but NOT ZeroLogon
+        # (which attacks a domain controller's Netlogon only).
         win = Host(ip="1.1.1.1", os_family="Windows", os_name="Windows Server 2019",
                    ports=[Port(portid=445, service="microsoft-ds",
                                product="Microsoft Windows Server 2019", state="open")])
         vulndb.assess_host_inplace(win)
         titles = " ".join(v.title for v in win.vulns)
-        for expect in ("SMBGhost", "PrintNightmare", "ZeroLogon"):
+        for expect in ("SMBGhost", "PrintNightmare"):
             self.assertIn(expect, titles)
+        self.assertNotIn("ZeroLogon", titles)          # DC-only -> not on a member
         # A Linux/Samba SMB host must NOT get the Windows-only advisories.
         lin = Host(ip="1.1.1.2", os_family="Linux", os_name="Linux",
                    ports=[Port(portid=445, service="microsoft-ds",
@@ -1036,6 +1039,23 @@ class VulnDbTest(unittest.TestCase):
         vulndb.assess_host_inplace(lin)
         self.assertFalse(any(w in " ".join(v.title for v in lin.vulns)
                              for w in ("SMBGhost", "PrintNightmare", "ZeroLogon")))
+
+    def test_zerologon_is_dc_only(self):
+        from recce import vulndb
+        # A real DC (Kerberos 88 + LDAP 389 + SMB 445) DOES get ZeroLogon.
+        dc = Host(ip="10.0.10.10", os_family="Windows", os_name="Windows Server 2019",
+                  ports=[Port(portid=88, service="kerberos-sec", state="open"),
+                         Port(portid=389, service="ldap", state="open"),
+                         Port(portid=445, service="microsoft-ds",
+                              product="Windows Server 2019", state="open")])
+        vulndb.assess_host_inplace(dc)
+        self.assertIn("ZeroLogon", " ".join(v.title for v in dc.vulns))
+        # Role-tagged DC with only SMB visible still matches via the role.
+        dc2 = Host(ip="10.0.10.11", os_family="Windows", roles=["Domain Controller"],
+                   ports=[Port(portid=445, service="microsoft-ds",
+                               product="Windows Server", state="open")])
+        vulndb.assess_host_inplace(dc2)
+        self.assertIn("ZeroLogon", " ".join(v.title for v in dc2.vulns))
 
     def test_jetty_version_gate(self):
         from recce import vulndb
