@@ -72,23 +72,30 @@ def _subnet_sort_key(subnet: str):
         return (1, subnet)
 
 
+# Per-step column widths on the Checklist (headers come from tr.STEP_COLUMNS).
+_STEP_WIDTHS = {"Enumerated": 11, "Vuln-scan": 11, "Web": 7, "AD": 6, "DB": 6,
+                "Access": 8, "Priv-esc": 10, "Creds": 8, "Lateral": 8}
+
+
 def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     """One row per IP, grouped by subnet, with a checkbox for each workflow step.
 
     Rows are sorted by subnet then IP, so every subnet's hosts sit together (and
-    you can filter to one subnet). Each step checkbox auto-checks (green) when the
-    tool completes that step; you can also tick/untick it by hand and your choice
-    persists until you re-run that phase. Steps that don't apply to a host show
-    "—" instead of a box (no Web box without a web server, no SMB/AD box on a
-    plain Linux host, no DB box without a database), so a checked box always means
-    real work was done. The Reviewed checkbox is your per-host sign-off.
+    you can filter to one subnet). Auto steps (Enumerated/Vuln-scan/Web/DB) turn
+    green when the tool finishes them; manual steps (AD review, Access/Priv-esc/
+    Creds/Lateral) are operator sign-offs you tick as you go. Steps that don't
+    apply to a host show "—" instead of a box (no Web box without a web server,
+    no AD box off a DC, no DB box without a database), so a checked box always
+    means real work was done. The Reviewed checkbox is your per-host sign-off.
+    The long tail of services (SMB, remote access, mail, SNMP...) is tracked
+    per-port on the Services tab rather than as columns here.
     """
+    step_cols = [(h, "check", _STEP_WIDTHS.get(h, 9)) for h in tr.STEP_COLUMNS]
     cols = [
         ("Reviewed", "checkbox", 9), ("Subnet", "data", 16), ("IP", "data", 15),
         ("Hostname", "data", 22), ("OS", "data", 20), ("Roles", "data", 22),
         ("Open ports", "data", 30), ("# Vulns", "data", 8),
-        ("Enumerated", "check", 11), ("Vuln-scan", "check", 11), ("Web", "check", 7),
-        ("SMB/AD", "check", 8), ("DB", "check", 6), ("Priv-esc", "check", 10),
+        *step_cols,
         ("Notes", "notes", 28), ("Key", "key", 4),
     ]
     rows = []
@@ -413,17 +420,19 @@ def _build_guide(wb, meta: dict) -> None:
     sh.write([("How to use it", "title")])
     for line in [
         "1. Go to the CHECKLIST tab - one row per IP, a checkbox for each step.",
-        "2. Step boxes (Enumerated / Vuln-scan / Web / SMB/AD / DB / Priv-esc) turn "
-        "green automatically when the tool finishes that step. Steps that don't "
-        "apply to a host show '—' instead of a box; SMB/AD is a manual sign-off.",
-        "3. You can tick/untick any box by hand - your choice sticks (untick to "
+        "2. Auto steps (Enumerated / Vuln-scan / Web / DB) turn green when the tool "
+        "finishes them. Manual sign-offs (AD, and the kill-chain Access / Priv-esc "
+        "/ Creds / Lateral) start unchecked - you tick them as you go.",
+        "3. Steps that don't apply to a host show '—' instead of a box (e.g. no AD "
+        "box off a non-DC). SMB/remote/mail/SNMP are tracked on the SERVICES tab.",
+        "4. You can tick/untick any box by hand - your choice sticks (untick to "
         "flag 'redo'). Tick 'Reviewed' when you're personally done with a host.",
-        "4. The boxes are ☑ / ☐ dropdowns: click the cell and pick ☑ to check it.",
-        "5. Use the SERVICES tab to track each open PORT: set its Status dropdown "
+        "5. The boxes are ☑ / ☐ dropdowns: click the cell and pick ☑ to check it.",
+        "6. Use the SERVICES tab to track each open PORT: set its Status dropdown "
         "to Not started / In progress / Done and jot findings in Notes.",
-        "6. Filter a step column to ☐ (or Services Status to 'Not started') to see "
+        "7. Filter a step column to ☐ (or Services Status to 'Not started') to see "
         "exactly what still needs work.",
-        "7. The OVERVIEW tab and the `status` command show overall progress.",
+        "8. The OVERVIEW tab and the `status` command show overall progress.",
     ]:
         sh.write([line])
     sh.write([""])
@@ -519,13 +528,15 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
                   f"{c['pct']}%", _bar(c["pct"])])
     sh.write([""])
 
-    # --- Coverage by subnet (live hosts + phase completion) ---
+    # --- Coverage by subnet (live hosts + auto phase completion) ---
+    # Only the tool-completed surfaces belong here; AD review and the kill-chain
+    # markers are manual sign-offs, tracked per host on the Checklist.
     sh.write([("Coverage by subnet - live hosts and phase completion", "header"),
               ("", "header"), ("", "header"), ("", "header"), ("", "header"),
-              ("", "header"), ("", "header"), ("", "header"), ("", "header")])
+              ("", "header"), ("", "header"), ("", "header")])
     sh.write([("Subnet", "bold"), ("In range", "bold"), ("Live hosts", "bold"),
               ("Enumerated", "bold"), ("Vuln-scanned", "bold"), ("Web", "bold"),
-              ("SMB/AD", "bold"), ("DB", "bold"), ("# Vulns", "bold")])
+              ("DB", "bold"), ("# Vulns", "bold")])
     agg: dict[str, list] = defaultdict(list)
     for h in hosts:
         agg[h.subnet or "unknown"].append(h)
@@ -546,9 +557,8 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         hs = agg.get(sn, [])
         sh.write([sn, (scope or {}).get(sn, ""), len(hs),
                   phase(hs, "enum"), phase(hs, "vuln"), phase(hs, "web"),
-                  phase(hs, "smbad"), phase(hs, "db"),
-                  sum(len(h.vulns) for h in hs)])
-    for col, w in {1: 26, 2: 10, 3: 11, 4: 12, 5: 13, 6: 8, 7: 9, 8: 8, 9: 8}.items():
+                  phase(hs, "db"), sum(len(h.vulns) for h in hs)])
+    for col, w in {1: 26, 2: 10, 3: 11, 4: 12, 5: 13, 6: 8, 7: 8, 8: 8}.items():
         sh.set_col(col, w)
 
 

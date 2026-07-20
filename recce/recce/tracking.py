@@ -19,20 +19,35 @@ from typing import Any
 COVERAGE_CATEGORIES = ["hosts", "services", "vulns", "exploits", "quick_wins", "accounts"]
 
 # Per-host workflow steps shown as checkboxes on the Checklist: header -> step id.
-# Order is the natural workflow: identify -> broad vuln pass -> per-surface
-# deep-dives (only shown where that surface exists) -> post-exploitation.
+# Two kinds of step:
+#   * auto surfaces  - the tool fills them in (enum/vuln/web/db), shown only where
+#     that surface exists on the host (else N/A). The long tail of services
+#     (SMB, remote access, mail, SNMP, ...) is tracked per-port on the Services
+#     tab instead of adding a column here.
+#   * manual markers - operator sign-offs the tool can't detect: AD review and
+#     the kill-chain (access -> priv-esc -> creds -> lateral). These start
+#     unchecked and you tick them as you go.
+# Order follows the natural engagement flow.
 STEP_COLUMNS = {"Enumerated": "enum", "Vuln-scan": "vuln", "Web": "web",
-                "SMB/AD": "smbad", "DB": "db", "Priv-esc": "privesc"}
+                "AD": "ad", "DB": "db", "Access": "access", "Priv-esc": "privesc",
+                "Creds": "creds", "Lateral": "lateral"}
+
+# Steps whose value is a pure manual operator sign-off (never auto-completed).
+MANUAL_STEPS = {"ad", "access", "creds", "lateral"}
 
 # What a step cell shows when the step does not apply to a host (e.g. no web
-# server -> no Web box; a Linux box with no SMB -> no SMB/AD box). This is
-# rendered instead of a checkbox and is never counted as done or outstanding.
+# server -> no Web box; a non-DC host -> no AD box). Rendered instead of a
+# checkbox and never counted as done or outstanding.
 STEP_NA = "—"   # em dash
 
 # Ports/service hints used to decide which per-surface steps apply to a host.
 _WEB_PORTS = {80, 443, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9443, 3000, 5000}
 _WEB_SVC_HINTS = ("http", "https", "www")
-_SMB_AD_PORTS = {88, 135, 139, 389, 445, 464, 636, 3268, 3269}
+# Directory / AD endpoints (a DC, not merely an SMB file server): LDAP, Kerberos,
+# Global Catalog, kpasswd. SMB (139/445) is deliberately NOT here - a standalone
+# SMB server is tracked per-port on Services, not as an AD host.
+_AD_PORTS = {88, 389, 636, 3268, 3269, 464}
+_AD_SVC_HINTS = ("ldap", "kerberos", "globalcat", "msft-gc")
 
 
 def step_key(step: str, ip: str) -> str:
@@ -48,30 +63,35 @@ def _web_ports(host) -> list:
     return out
 
 
-def _is_windows_or_domain(host) -> bool:
-    fam = (host.os_family or host.os_name or "").lower()
-    if "windows" in fam:
+def _has_ad_surface(host) -> bool:
+    """True for domain/directory hosts (DCs) - where AD attack-path review applies."""
+    if any("domain controller" in r.lower() or "directory" in r.lower()
+           for r in host.roles):
         return True
-    if host.roles or host.accounts:      # DC / SMB / LDAP enrichment landed
-        return True
-    return any(p.portid in _SMB_AD_PORTS for p in host.open_ports)
+    for p in host.open_ports:
+        svc = (p.service or "").lower()
+        if p.portid in _AD_PORTS or any(k in svc for k in _AD_SVC_HINTS):
+            return True
+    return False
 
 
 def step_applies(host, step: str) -> bool:
     """Whether a step is relevant to this host at all.
 
     Non-applicable steps render as N/A on the Checklist rather than a checkbox,
-    so a checked box always means real work happened (a Linux box gets no AD box,
-    a host with no database gets no DB box, etc.).
+    so a checked box always means real work happened (a non-DC host gets no AD
+    box, a host with no database gets no DB box, etc.).
     """
     if step == "enum":
         return True
-    if step == "vuln":
+    if step in ("vuln", "access", "creds", "lateral"):
+        # Anything with an open port can be vuln-scanned / attacked / looted /
+        # pivoted from; a live host with nothing open has no such surface.
         return bool(host.open_ports)
     if step == "web":
         return bool(_web_ports(host))
-    if step == "smbad":
-        return _is_windows_or_domain(host)
+    if step == "ad":
+        return _has_ad_surface(host)
     if step == "db":
         from . import db as dbmod
         return bool(dbmod.db_ports(host))
@@ -86,7 +106,9 @@ def step_auto(host, step: str) -> bool:
     """Tool-completion (done) state for an APPLICABLE step - the checkbox default.
 
     Only meaningful when step_applies(host, step) is true; callers render N/A for
-    steps that don't apply. The operator can still override any box on the sheet.
+    steps that don't apply. Manual steps (AD review, access/creds/lateral) always
+    return False - they're operator sign-offs the tool can't complete for you.
+    The operator can override any box on the sheet.
     """
     if step == "enum":
         return host.enumerated
@@ -96,15 +118,12 @@ def step_auto(host, step: str) -> bool:
     if step == "web":
         wp = _web_ports(host)
         return host.enumerated and bool(wp) and all(p.vuln_scanned for p in wp)
-    if step == "smbad":
-        # Manual sign-off: the tool runs SMB/LDAP/AD scripts during enum, but
-        # reviewing users/shares/roasting/relay is operator work, so this box
-        # starts unchecked and is ticked by hand when you've actually reviewed it.
-        return False
     if step == "db":
         return host.db_scanned
     if step == "privesc":
         return host.privesc_checked
+    if step in MANUAL_STEPS:
+        return False
     return False
 
 
