@@ -124,11 +124,19 @@ class Store:
         if new.smb_signing and new.smb_signing != "unknown":
             merged.smb_signing = new.smb_signing
 
-        # Vulns and accounts: dedup by natural key.
+        # Vulns / exploits / accounts: dedup by natural key, accumulating the
+        # seen-set so duplicates WITHIN one scan are collapsed too, not just
+        # old-vs-new.
         vseen = {v.key for v in old.vulns}
-        merged.vulns.extend(v for v in new.vulns if v.key not in vseen)
+        for nv in new.vulns:
+            if nv.key not in vseen:
+                vseen.add(nv.key)
+                merged.vulns.append(nv)
         eseen = {e.key for e in old.exploits}
-        merged.exploits.extend(e for e in new.exploits if e.key not in eseen)
+        for ne in new.exploits:
+            if ne.key not in eseen:
+                eseen.add(ne.key)
+                merged.exploits.append(ne)
         aseen = {(a.source, a.kind, a.name, a.domain, a.rid) for a in old.accounts}
         for a in new.accounts:
             k = (a.source, a.kind, a.name, a.domain, a.rid)
