@@ -30,6 +30,7 @@ _CWE_TYPE = [
      "Injection / Remote Code Execution", _CIA),
     (("CWE-89",), "SQL Injection", "Confidentiality, Integrity"),
     (("CWE-79",), "Cross-Site Scripting", "Integrity"),
+    (("CWE-352",), "Cross-Site Request Forgery (CSRF)", "Integrity"),
     (("CWE-502",), "Insecure Deserialization", _CIA),
     (("CWE-918",), "Server-Side Request Forgery (SSRF)", "Confidentiality, Integrity"),
     (("CWE-611",), "XML External Entity (XXE) Injection", "Confidentiality, Integrity"),
@@ -84,6 +85,7 @@ _CWE_NAME = {
     "CWE-326": "Inadequate Encryption Strength",
     "CWE-327": "Broken or Risky Cryptographic Algorithm",
     "CWE-330": "Use of Insufficiently Random Values",
+    "CWE-352": "Cross-Site Request Forgery",
     "CWE-364": "Signal Handler Race Condition",
     "CWE-400": "Uncontrolled Resource Consumption",
     "CWE-406": "Insufficient Control of Network Message Volume",
@@ -164,6 +166,9 @@ _TYPE_IMPACT = {
     "Cross-Site Scripting":
         "run malicious content in the browser of a legitimate user, which can be "
         "used to steal their session or trick them into unwanted actions",
+    "Cross-Site Request Forgery (CSRF)":
+        "trick a logged-in user's browser into performing unwanted actions on the "
+        "application without their knowledge or consent",
     "Path Traversal / File Inclusion":
         "read files outside the intended area of the application - and in some cases "
         "run code - exposing configuration, credentials, or source",
@@ -386,6 +391,76 @@ class Finding:
     exploits: list[tuple] = field(default_factory=list)    # (edb_id, title)
 
 
+# Common nmap NSE vuln/enum scripts -> CWE(s). Matched as a substring of the
+# script id (or title), so variants and the "http-vuln-cveYYYY-N" family resolve.
+# Every CWE here is already named + typed (enforced by the coverage test).
+_NSE_CWE = {
+    # SMB / Windows
+    "ms17-010": ["CWE-787"], "ms08-067": ["CWE-119"], "ms06-025": ["CWE-119"],
+    "ms07-029": ["CWE-119"], "ms10-054": ["CWE-119"], "ms10-061": ["CWE-119"],
+    "cve2009-3103": ["CWE-119"], "cve-2017-7494": ["CWE-94"], "cve2017-7494": ["CWE-94"],
+    "regsvc-dos": ["CWE-400"], "webexec": ["CWE-78"], "double-pulsar": ["CWE-506"],
+    "rdp-vuln-ms12-020": ["CWE-119"],
+    # HTTP (CVE-named + generic)
+    "shellshock": ["CWE-78"], "cve2012-1823": ["CWE-78"], "cve2017-5638": ["CWE-94"],
+    "cve2014-3704": ["CWE-89"], "cve2010-2861": ["CWE-22"], "cve2015-1635": ["CWE-119"],
+    "cve2011-3192": ["CWE-400"], "cve2017-1001000": ["CWE-306"],
+    "cve2021-41773": ["CWE-22"], "cve2021-42013": ["CWE-22"], "misfortune-cookie": ["CWE-119"],
+    "sql-injection": ["CWE-89"], "phpself-xss": ["CWE-79"], "stored-xss": ["CWE-79"],
+    "dombased-xss": ["CWE-79"], "-xss": ["CWE-79"], "csrf": ["CWE-352"],
+    "slowloris": ["CWE-400"], "http-passwd": ["CWE-22"],
+    "fileupload-exploiter": ["CWE-434"], "internal-ip-disclosure": ["CWE-200"],
+    "http-git": ["CWE-527"], "config-backup": ["CWE-538"], "http-webdav-scan": ["CWE-16"],
+    # TLS / crypto
+    "ssl-heartbleed": ["CWE-125"], "ssl-poodle": ["CWE-327"],
+    "ssl-ccs-injection": ["CWE-326"], "ssl-dh-params": ["CWE-326"],
+    "sslv2": ["CWE-327"], "ssl-known-key": ["CWE-798"],
+    # Services
+    "vsftpd-backdoor": ["CWE-506"], "proftpd-backdoor": ["CWE-506"],
+    "distcc-cve2004-2687": ["CWE-78"], "smtp-vuln-cve2010-4344": ["CWE-119"],
+    "smtp-vuln-cve2011-1720": ["CWE-119"], "ms-sql-empty-password": ["CWE-521"],
+    "mysql-empty-password": ["CWE-521"], "rmi-vuln-classloader": ["CWE-502"],
+    "rmi-dumpregistry": ["CWE-502"], "snmp-info": ["CWE-200"],
+}
+
+# Famous scripts whose id carries no CVE token - map to the CVE(s) directly.
+_NSE_CVE = {
+    "ms17-010": ["CVE-2017-0144"], "ms08-067": ["CVE-2008-4250"],
+    "ms12-020": ["CVE-2012-0002"], "vsftpd-backdoor": ["CVE-2011-2523"],
+    "shellshock": ["CVE-2014-6271"], "ssl-heartbleed": ["CVE-2014-0160"],
+    "ssl-poodle": ["CVE-2014-3566"], "ssl-ccs-injection": ["CVE-2014-0224"],
+}
+
+_CVE_IN_ID = re.compile(r"cve[-_]?(\d{4})[-_](\d{3,7})", re.I)
+
+
+def _enrich_from_nse(f: "Finding") -> None:
+    """Fill CVE/CWE for NSE-only findings (which carry neither) by mapping the
+    script id/title: extract any embedded CVE, add well-known script->CVE, and
+    map common script ids to CWEs. Never overrides data the finding already has."""
+    text = " ".join([f.title] + sorted(f.scripts)).lower()
+    if not f.cves:
+        cves: list[str] = []
+        for m in _CVE_IN_ID.finditer(text):
+            cve = f"CVE-{m.group(1)}-{m.group(2)}"
+            if cve not in cves:
+                cves.append(cve)
+        for key, mapped in _NSE_CVE.items():
+            if key in text:
+                for c in mapped:
+                    if c not in cves:
+                        cves.append(c)
+        f.cves = cves
+    if not f.cwes:
+        cwes: list[str] = []
+        for key, mapped in _NSE_CWE.items():
+            if key in text:
+                for c in mapped:
+                    if c not in cwes:
+                        cwes.append(c)
+        f.cwes = cwes
+
+
 def _norm_key(v: Vuln) -> str:
     return re.sub(r"\s+", " ", (v.title or v.script_id or "finding").strip().lower())
 
@@ -427,6 +502,8 @@ def group_findings(hosts: list[Host]) -> list[Finding]:
             for e in h.exploits:
                 if e.port == v.port and (e.edb_id, e.title) not in f.exploits:
                     f.exploits.append((e.edb_id, e.title))
+    for f in groups.values():
+        _enrich_from_nse(f)          # NSE-only findings get CVE/CWE from the script id
     ordered = sorted(groups.values(),
                      key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.title.lower()))
     return ordered
