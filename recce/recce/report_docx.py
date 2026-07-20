@@ -204,10 +204,6 @@ def _finding_body(doc: Document, f: Finding, fid: str,
     vtype, cia = _vuln_type(f.cwes)
 
     doc.heading("Narrative", 2)
-    doc.guidance("Write this for non-technical management as a concise overview "
-                 "with minimal technical detail. Lead with a brief description of "
-                 "the purpose of the affected service for context. No pronouns or "
-                 "mission impact; maintain verb tense in context of test actions.")
     doc.placeholder("Refine the plain-language summary below for management.")
     doc.para(f"During testing, {f.title.lower()} was identified on "
              f"{len(f.affected)} system(s). This condition could allow an "
@@ -233,21 +229,17 @@ def _finding_body(doc: Document, f: Finding, fid: str,
                     "exploited (engagement/mission specific).")
 
     doc.heading("Recommendations", 2)
-    doc.guidance("Recommended fixes and mitigations. Do not include specific "
-                 "brands or models.")
     if f.remediation:
         doc.para(f.remediation)
     else:
         doc.placeholder("Provide remediation and mitigation guidance.")
 
     doc.heading("Evidence", 2)
-    doc.guidance("Raw tool output captured during testing (proof of the finding).")
     for ip, port, out in f.evidence[:6]:
         doc.para(f"{ip}:{port}", italic=True)
         doc.mono_block(out if len(out) < 1500 else out[:1500] + " ...")
 
     doc.heading("Technical Walkthrough with screenshots", 2)
-    doc.guidance("List every step used to accomplish objectives, with screenshots.")
     # recce drafts the mechanical steps; the tester adds the exploitation result.
     n = 0
     for step in _walkthrough_steps(f):
