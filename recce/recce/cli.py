@@ -6,8 +6,6 @@ Subcommands:
   status   print live review-coverage from the datastore
   review   mark hosts / services / items reviewed (or un-review) from the CLI
   demo     build reports from a bundled sample nmap XML (no network needed)
-
-Authorization is confirmed at startup for scans.
 """
 
 from __future__ import annotations
@@ -39,25 +37,45 @@ BANNER = r"""
    recon & coverage tracker for airgapped pentests
 """
 
-AUTH_NOTICE = (
-    "AUTHORIZATION REQUIRED: Only scan hosts and networks you have explicit,\n"
-    "written permission to test. Unauthorized scanning may be illegal.\n"
-)
 
 
-def _confirm_authorized(assume_yes: bool) -> None:
-    print(AUTH_NOTICE)
-    if assume_yes:
-        print("[+] Authorization acknowledged via --yes.\n")
+def _fmt_dur(seconds: float) -> str:
+    """Compact human duration: 45s / 3m20s / 1h04m."""
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def _progress(done: int, total: int, start: float) -> str:
+    """A '· 42% · ETA 3m20s' suffix from elapsed time and completion ratio."""
+    if total <= 0:
+        return ""
+    pct = int(done * 100 / total)
+    elapsed = time.monotonic() - start
+    if done and done < total:
+        eta = elapsed / done * (total - done)
+        return f" · {pct}% · ETA {_fmt_dur(eta)}"
+    if done >= total:
+        return f" · 100% · {_fmt_dur(elapsed)} total"
+    return f" · {pct}%"
+
+
+def _summarize_failures(phase: str, errs: list, total: int) -> None:
+    """Loud end-of-phase failure summary so a bad host can't scroll past unseen.
+    `errs` is a list of (ip, message); prints nothing when everything went fine."""
+    if not errs:
+        print(f"[+] {phase}: {total}/{total} host(s) OK, no errors.")
         return
-    try:
-        resp = input("Do you confirm you are authorized to scan these targets? [y/N] ")
-    except EOFError:
-        resp = ""
-    if resp.strip().lower() not in ("y", "yes"):
-        print("Aborting: authorization not confirmed.")
-        sys.exit(2)
-    print()
+    hosts = len({ip for ip, _ in errs})
+    print("\n" + "!" * 64)
+    print(f"[x] {phase}: {hosts} host(s) had errors ({len(errs)} issue(s)) - "
+          f"{total - hosts}/{total} clean:")
+    for ip, msg in errs:
+        print(f"      {ip:<16} {msg}")
+    print("!" * 64)
 
 
 def _ports_for_host(xml_path: str, ip: str) -> list[int]:
@@ -424,14 +442,14 @@ def _merge_vuln_results(host: Host, parsed_list) -> None:
 
 
 def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
-                 use_probes=True):
+                 use_probes=True, fast=False):
     """Returns (host, issues)."""
     ip = host.ip
     issues: list[dict] = []
     if portids:
         vx = os.path.join(paths["raw"], f"{ip}_vuln.xml")
         _, iss = scanner.vuln_scan(ip, portids, vx, profile, creds=creds,
-                                   aggressive=aggressive)
+                                   aggressive=aggressive, fast=fast)
         if iss:
             issues.append(_mkissue(iss, "vuln-scan"))
         _merge_vuln_results(host, np.parse_nmap_xml(vx))
@@ -486,6 +504,7 @@ def _vuln_targets(hosts, args):
 def _phase_vulns(store, paths, args, profile) -> None:
     creds = _creds_of(args)
     aggressive = getattr(args, "aggressive", False)
+    fast = getattr(args, "fast", False) and not aggressive
     use_ss = not getattr(args, "no_searchsploit", False) and exploits.available()
     use_probes = not getattr(args, "no_probes", False)
     if not getattr(args, "no_searchsploit", False) and not exploits.available():
@@ -493,8 +512,12 @@ def _phase_vulns(store, paths, args, profile) -> None:
               "(apt install exploitdb).")
     if profile.offline:
         print("[*] Offline: vulners disabled; using local vuln scripts + searchsploit.")
-    mode = "AGGRESSIVE (intrusive vuln category)" if aggressive else \
-        "safe (vuln+safe detection only)"
+    if aggressive:
+        mode = "AGGRESSIVE (intrusive vuln category)"
+    elif fast:
+        mode = "FAST (top-signal detection scripts only)"
+    else:
+        mode = "safe (vuln+safe detection only)"
     print(f"[*] Vuln-scan mode: {mode}"
           f"{' + searchsploit' if use_ss else ''}"
           f"{' + http/tls probes' if use_probes else ''}.")
@@ -505,13 +528,16 @@ def _phase_vulns(store, paths, args, profile) -> None:
         return
     workers = max(1, args.workers)
     total_ports = sum(len(p) for _, p in targets)
-    print(f"[*] Vuln-scanning {len(targets)} host(s) / {total_ports} port(s) "
+    total = len(targets)
+    print(f"[*] Vuln-scanning {total} host(s) / {total_ports} port(s) "
           f"with {workers} worker(s) ...")
     completed = 0
+    errs: list[tuple[str, str]] = []   # (ip, message) for a loud end-of-phase summary
+    start = time.monotonic()
     refresher = _Refresher(args)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_vuln_worker, h, ports, profile, paths, creds,
-                             aggressive, use_ss, use_probes): h.ip
+                             aggressive, use_ss, use_probes, fast): h.ip
                    for h, ports in targets}
         for fut in as_completed(futures):
             ip = futures[fut]
@@ -521,8 +547,14 @@ def _phase_vulns(store, paths, args, profile) -> None:
                 _record_issues(store, paths, ip,
                                [{"phase": "vuln-scan", "level": "error",
                                  "message": f"vuln-scan crashed: {e}"}])
+                completed += 1
+                errs.append((ip, f"crashed: {e}"))
+                print(f"    [{completed}/{total}] {ip}: FAILED (crashed)"
+                      f"{_progress(completed, total, start)}")
                 continue
             _record_issues(store, paths, ip, issues)
+            errs.extend((ip, i["message"]) for i in issues
+                        if i.get("level") == "error")
             store.upsert_host(host)   # durable immediately - crash-safe
             store.delete_tracking(tr.step_key("vuln", ip))  # re-run clears override
             completed += 1
@@ -532,8 +564,10 @@ def _phase_vulns(store, paths, args, profile) -> None:
             if host.exploits:
                 bits.append(f"{len(host.exploits)} exploit(s)")
             b = f" [{', '.join(bits)}]" if bits else ""
-            print(f"    [{completed}/{len(targets)}] {ip}: vuln-scanned{b}")
+            print(f"    [{completed}/{total}] {ip}: vuln-scanned{b}"
+                  f"{_progress(completed, total, start)}")
             refresher.tick(store, paths, args.title)
+    _summarize_failures("vuln-scan", errs, total)
 
 
 # --- phase: database enumeration / vuln scan ------------------------------------
@@ -653,11 +687,47 @@ def _ssh_creds_of(args) -> dict | None:
 
 
 def _credenum_worker(host, creds, ssh_creds, aggressive, admin_creds=None):
-    """Returns (host, issues)."""
+    """Returns (host, issues, auth)."""
     from . import credenum
-    issues = credenum.enrich_host(host, creds, ssh_creds, aggressive=aggressive,
-                                  admin_creds=admin_creds)
-    return host, issues
+    issues, auth = credenum.enrich_host(host, creds, ssh_creds, aggressive=aggressive,
+                                        admin_creds=admin_creds)
+    return host, issues, auth
+
+
+def _auth_cell(st: dict | None) -> str:
+    """Format one account's per-host auth outcome for the summary table."""
+    if not st or not st.get("tried"):
+        return "-"
+    if not st.get("auth"):
+        return "FAIL"
+    return "OK (admin)" if st.get("admin") else "OK"
+
+
+def _print_auth_table(auth_rows: list) -> None:
+    """Per-host authentication success/fail table. Only shows the columns that
+    were actually attempted; flags failures loudly at the end."""
+    if not auth_rows:
+        return
+    cols = [("user", "USER ACCT"), ("admin", "PRIV ACCT"), ("ssh", "SSH")]
+    used = [(k, hd) for k, hd in cols if any(a.get(k) for _, a in auth_rows)]
+    if not used:
+        return
+    print("\n[*] Authentication summary (per host):")
+    header = f"      {'HOST':<16}" + "".join(f"{hd:<13}" for _, hd in used)
+    print(header)
+    print("      " + "-" * (len(header) - 6))
+    fails = 0
+    for ip, a in sorted(auth_rows, key=lambda r: _ip_key(r[0])):
+        cells = ""
+        for k, _ in used:
+            val = _auth_cell(a.get(k))
+            if val == "FAIL":
+                fails += 1
+            cells += f"{val:<13}"
+        print(f"      {ip:<16}{cells}")
+    if fails:
+        print(f"[!] {fails} account/host auth attempt(s) FAILED - check "
+              "credentials, domain, and host reachability for those rows.")
 
 
 def _phase_credenum(store, paths, args) -> None:
@@ -667,15 +737,20 @@ def _phase_credenum(store, paths, args) -> None:
     ssh_creds = _ssh_creds_of(args)
     aggressive = getattr(args, "aggressive", False)
     if not creds and not ssh_creds and not admin_creds:
-        print("[!] credenum needs credentials: --username/--password (+--domain) "
-              "for SMB/AD, and/or --ssh-user for Linux hosts.")
+        print("\n" + "!" * 64)
+        print("[x] credenum needs credentials but none were given.")
+        print("    Provide --username/--password (+--domain) for SMB/AD, and/or "
+              "--ssh-user for Linux hosts.")
+        print("!" * 64)
         return
     tools = credenum.available_tools()
     have = [k for k, v in tools.items() if v]
     print(f"[*] Credentialed enum tools present: {', '.join(have) or 'NONE'}.")
     if not have:
-        print("[!] No credentialed-enum tools found (netexec/impacket/ssh). "
-              "Install netexec + impacket, or ensure ssh is on PATH.")
+        print("\n" + "!" * 64)
+        print("[x] No credentialed-enum tools found (netexec/impacket/ssh).")
+        print("    Install netexec + impacket, or ensure ssh is on PATH, then re-run.")
+        print("!" * 64)
         return
     targets = _selected_hosts(store.all_hosts(), args)
     if not targets:
@@ -689,9 +764,13 @@ def _phase_credenum(store, paths, args) -> None:
     mode = (" with " + " + ".join(accts)) if accts else ""
     if aggressive and not admin_creds:
         mode += " + secretsdump (aggressive)"
-    print(f"[*] Credentialed enum on {len(targets)} host(s){mode} ...")
+    total = len(targets)
+    print(f"[*] Credentialed enum on {total} host(s){mode} ...")
     refresher = _Refresher(args)
     completed = 0
+    start = time.monotonic()
+    errs: list[tuple[str, str]] = []
+    auth_rows: list[tuple[str, dict]] = []   # (ip, auth) for the success/fail table
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
         futures = {ex.submit(_credenum_worker, h, creds, ssh_creds, aggressive,
                              admin_creds): h.ip
@@ -699,20 +778,31 @@ def _phase_credenum(store, paths, args) -> None:
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
-                host, issues = fut.result()
+                host, issues, auth = fut.result()
             except Exception as e:  # noqa: BLE001
                 _record_issues(store, paths, ip,
                                [{"phase": "credenum", "level": "error",
                                  "message": f"credenum crashed: {e}"}])
+                completed += 1
+                errs.append((ip, f"crashed: {e}"))
+                print(f"    [{completed}/{total}] {ip}: FAILED (crashed)"
+                      f"{_progress(completed, total, start)}")
                 continue
             _record_issues(store, paths, ip, issues)
+            errs.extend((ip, i["message"]) for i in issues
+                        if i.get("level") == "error")
+            if auth:
+                auth_rows.append((ip, auth))
             store.upsert_host(host)
             completed += 1
             n_acct = sum(1 for a in host.accounts
                          if a.source in ("netexec", "impacket", "secretsdump"))
-            print(f"    [{completed}/{len(targets)}] {ip}: cred-enum done"
-                  + (f" ({n_acct} account/loot rows)" if n_acct else ""))
+            print(f"    [{completed}/{total}] {ip}: cred-enum done"
+                  + (f" ({n_acct} account/loot rows)" if n_acct else "")
+                  + _progress(completed, total, start))
             refresher.tick(store, paths, args.title)
+    _print_auth_table(auth_rows)
+    _summarize_failures("credenum", errs, total)
 
 
 def _setup_scan(args, need_targets=True):
@@ -733,7 +823,6 @@ def _setup_scan(args, need_targets=True):
 
 def cmd_enum(args: argparse.Namespace) -> int:
     print(BANNER)
-    _confirm_authorized(args.yes)
     profile, paths, store = _setup_scan(args)
     if store is None:
         return 1
@@ -757,7 +846,6 @@ def cmd_enum(args: argparse.Namespace) -> int:
 
 
 def cmd_vulns(args: argparse.Namespace) -> int:
-    _confirm_authorized(args.yes)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum` first.")
@@ -782,7 +870,6 @@ def cmd_vulns(args: argparse.Namespace) -> int:
 def cmd_scan(args: argparse.Namespace) -> int:
     """Convenience: run enum then vulns in one shot."""
     print(BANNER)
-    _confirm_authorized(args.yes)
     profile, paths, store = _setup_scan(args)
     if store is None:
         return 1
@@ -807,7 +894,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_db(args: argparse.Namespace) -> int:
-    _confirm_authorized(args.yes)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum` first.")
@@ -828,7 +914,6 @@ def cmd_db(args: argparse.Namespace) -> int:
 
 
 def cmd_privesc(args: argparse.Namespace) -> int:
-    _confirm_authorized(args.yes)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum` first.")
@@ -859,7 +944,6 @@ def cmd_privesc(args: argparse.Namespace) -> int:
 
 
 def cmd_credenum(args: argparse.Namespace) -> int:
-    _confirm_authorized(args.yes)
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']}. Run `enum` first.")
@@ -1092,6 +1176,84 @@ def _fold_host(ip, parsed_list, subnet_map):
 
 # --- report / status / review ---------------------------------------------------
 
+def _resolve_ingest_host(store, parsed, args):
+    """Pick (or create) the Host that on-target loot belongs to.
+
+    Priority: an explicit --host, else an IP parsed from the loot that already
+    exists, else a synthetic host keyed by the loot's hostname/filename so the
+    findings still land somewhere on the Priv-Esc sheet."""
+    hosts = {h.ip: h for h in store.all_hosts()}
+    if getattr(args, "host", None):
+        ip = args.host
+        host = hosts.get(ip) or Host(ip=ip)
+        _tag_host_os(host, parsed)
+        return host, (ip in hosts)
+    # No --host: try the hostname against known hostnames, else synthesize.
+    hn = parsed.get("hostname", "")
+    if hn:
+        for h in hosts.values():
+            if hn.lower() in [x.lower() for x in h.hostnames] or \
+               hn.lower() == (h.hostname or "").lower():
+                _tag_host_os(h, parsed)
+                return h, True
+    key = hn or os.path.splitext(os.path.basename(args.loot))[0]
+    host = hosts.get(f"local:{key}") or Host(ip=f"local:{key}")
+    if hn and hn not in host.hostnames:
+        host.hostnames.append(hn)
+    _tag_host_os(host, parsed)
+    return host, (host.ip in hosts)
+
+
+def _tag_host_os(host, parsed) -> None:
+    if not host.os_family and parsed.get("os"):
+        host.os_family = parsed["os"].capitalize()
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    from . import ingest
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum` first so there's a "
+              "workbook to fold findings into.")
+        return 1
+    if not os.path.exists(args.loot):
+        print(f"[x] Loot file not found: {args.loot}")
+        return 1
+    with open(args.loot, "r", errors="replace") as fh:
+        text = fh.read()
+    parsed = ingest.parse_loot(text)
+    if not parsed["is_recce"]:
+        print("[!] This doesn't look like recce-enum.sh/.ps1 output (no "
+              "'recce-enum host=...' banner). Parsing [!] lines anyway.")
+    if not parsed["findings"]:
+        print("[!] No [!] findings in that loot - nothing to ingest.")
+        return 0
+
+    source = os.path.basename(args.loot)
+    new_rows = ingest.to_local_findings(parsed, source)
+    store = Store(paths["db"])
+    _import_excel_tracking(store, paths)
+    host, existed = _resolve_ingest_host(store, parsed, args)
+    # Merge, de-duplicating against anything already ingested for this host.
+    have = {(f.get("category"), f.get("vector")) for f in host.local_findings}
+    added = [r for r in new_rows if (r["category"], r["vector"]) not in have]
+    host.local_findings.extend(added)
+    host.privesc_checked = True
+    store.upsert_host(host)
+    where = "existing host" if existed else "new host entry"
+    hn = f" ({parsed['hostname']})" if parsed["hostname"] else ""
+    print(f"[+] Ingested {len(added)} finding(s) from {source} into {where} "
+          f"{host.ip}{hn}"
+          + (f"; {len(new_rows) - len(added)} already present" if added != new_rows else "")
+          + ".")
+    print(f"    OS: {host.os_family or 'unknown'}. See the Priv-Esc tab "
+          "(rows tagged 'on-target finding').")
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -1317,8 +1479,6 @@ def _add_common(pp) -> None:
     pp.add_argument("--host-timeout", type=int, metavar="MIN",
                     help="per-host time ceiling in minutes; nmap gives up on a "
                          "host after this and moves on (0 = no limit)")
-    pp.add_argument("-y", "--yes", action="store_true",
-                    help="assume authorization is confirmed (non-interactive)")
 
 
 def _add_creds(pp) -> None:
@@ -1343,7 +1503,8 @@ def _add_discovery(pp) -> None:
     pp.add_argument("targets", nargs="+", help="CIDRs / ranges / IPs / hostnames, or @file")
     pp.add_argument("--exclude", nargs="*", help="hosts/CIDRs to exclude")
     pp.add_argument("--fast", action="store_true",
-                    help="masscan network-wide sweep instead of per-host nmap")
+                    help="go fast: masscan network-wide sweep instead of per-host "
+                         "nmap (and, in `scan`, top-signal vuln scripts only)")
     pp.add_argument("--masscan", action="store_true", help="use masscan for port sweep")
     pp.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
     pp.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
@@ -1409,6 +1570,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_common(v)
     _add_vuln_opts(v)
     _add_creds(v)
+    v.add_argument("--fast", action="store_true",
+                   help="top-signal detection scripts only (skip the broad "
+                        "'vuln and safe' net + deep enum) - much quicker on a /24, "
+                        "shows live per-host progress + ETA")
     v.add_argument("--only", nargs="*", metavar="SVC",
                    help="only ports matching these service names / port numbers "
                         "(e.g. http smb 445)")
@@ -1480,6 +1645,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_vuln_opts(s)
     _add_creds(s)
     s.set_defaults(func=cmd_scan)
+
+    # Fold on-target recce-enum.sh/.ps1 output into the Priv-Esc sheet.
+    ing = sub.add_parser("ingest",
+                         help="fold on-target recce-enum.sh/.ps1 output into Priv-Esc")
+    ing.add_argument("loot", help="path to saved recce-enum output (-o / -OutFile file)")
+    ing.add_argument("--host", help="attach findings to this IP (default: match the "
+                                    "loot's hostname, else a 'local:<host>' entry)")
+    ing.add_argument("-o", "--output-dir", default="engagement")
+    ing.add_argument("--title", default="Recce Engagement")
+    ing.set_defaults(func=cmd_ingest)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")

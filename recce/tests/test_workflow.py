@@ -677,6 +677,20 @@ class ScannerCommandTest(unittest.TestCase):
             self.assertIn(script, safe_j)
             self.assertIn(script, agg_j)
 
+    def test_vuln_scan_fast_tier(self):
+        import recce.scanner as s
+        with tempfile.TemporaryDirectory() as d:
+            fast = self._capture(s.vuln_scan, "1.2.3.4", [80, 445],
+                                 os.path.join(d, "v.xml"), s.PROFILES["standard"],
+                                 fast=True)
+        fast_j = " ".join(fast[0][0])
+        # --fast drops the broad category net + deep enum, keeps top-signal detection.
+        self.assertNotIn("vuln and safe", fast_j)
+        self.assertNotIn("http-enum", fast_j)          # deep-enum script excluded
+        self.assertIn("smb-vuln-ms17-010", fast_j)     # top-signal detection kept
+        self.assertIn("ssl-heartbleed", fast_j)
+        self.assertIn("90s", fast_j)                   # lighter script-timeout
+
     def test_enum_deep_scripts_on_standard_not_quick(self):
         import recce.scanner as s
         with tempfile.TemporaryDirectory() as d:
@@ -860,7 +874,8 @@ class PhaseWorkerTest(unittest.TestCase):
         from recce import cli
         import recce.scanner as s
         orig = s.vuln_scan
-        s.vuln_scan = lambda ip, ports, out, profile, creds=None, aggressive=False: \
+        s.vuln_scan = lambda ip, ports, out, profile, creds=None, aggressive=False, \
+            fast=False: \
             _fake_scan(out, ip, [{"port": 80, "service": "http", "scripts": [
                 ("http-vuln-x", "VULNERABLE: demo issue State: VULNERABLE")]}])
         try:
@@ -987,7 +1002,8 @@ class TargetingFormE2ETest(unittest.TestCase):
             seed.upsert_host(h)
         seed.close()
 
-        def fake_vuln(ip, portids, out, profile, creds=None, aggressive=False):
+        def fake_vuln(ip, portids, out, profile, creds=None, aggressive=False,
+                      fast=False):
             # Echo the requested ports back as an open-port XML the worker parses.
             return _fake_scan(out, ip, [{"port": p, "service": "tcp"}
                                         for p in portids])
@@ -996,7 +1012,7 @@ class TargetingFormE2ETest(unittest.TestCase):
         s.check_environment = lambda profile: []          # no nmap/root needed
         s.vuln_scan = fake_vuln
         s.udp_scan = lambda ip, out, profile: _fake_scan(out, ip, [])
-        argv = ["vulns", *targets, "-o", d, "--yes",
+        argv = ["vulns", *targets, "-o", d,
                 "--no-searchsploit", "--no-probes", "--workers", "1"]
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -1051,6 +1067,196 @@ class TargetingFormE2ETest(unittest.TestCase):
 
     def test_empty_targets_selects_everything(self):
         self.assertEqual(self._run_vulns([]), self.ALL)
+
+
+_LOOT_LINUX = """\
+recce-enum  host=web01  user=www-data  Mon Jul 20 12:00:00 UTC 2026
+
+==== System & kernel ====
+    Linux web01 5.4.0-42-generic
+[!] Old kernel (5.4.0) - run a local-exploit suggester offline
+
+==== Sudo ====
+[!] NOPASSWD sudo entries present -> check GTFOBins for the allowed binaries
+[!] sudo grants (ALL) ALL -> full root
+
+==== SUID / SGID / capabilities ====
+[!] SUID /usr/bin/find - GTFOBins escalation candidate
+
+==== How to exploit (reference for the [!] findings above) ====
+  Sudo: NOPASSWD / (ALL) ALL
+      sudo <binary> ; see GTFOBins
+[!] THIS LINE MUST NOT BE INGESTED (it lives in the how-to section)
+
+==== Writable files & PATH hijack ====
+[!] /etc/shadow is READABLE by www-data -> crack hashes
+"""
+
+_LOOT_WIN = """\
+recce-enum  host=DBSRV01  user=svc_sql  07/20/2026 12:00:00
+
+==== current context ====
+[!] Token holds SeImpersonate -> SYSTEM via Potato (GodPotato/PrintSpoofer)
+
+==== AlwaysInstallElevated ====
+[!] AlwaysInstallElevated is set (HKLM+HKCU) -> install a malicious MSI as SYSTEM
+"""
+
+
+class IngestParserTest(unittest.TestCase):
+    def test_parse_findings_and_skip_howto(self):
+        from recce import ingest
+        p = ingest.parse_loot(_LOOT_LINUX)
+        self.assertTrue(p["is_recce"])
+        self.assertEqual(p["hostname"], "web01")
+        self.assertEqual(p["os"], "linux")
+        texts = [f["text"] for f in p["findings"]]
+        self.assertEqual(len(texts), 5)                       # 6 [!] lines, 1 in how-to
+        self.assertTrue(all("MUST NOT BE INGESTED" not in t for t in texts))
+        cats = {f["category"] for f in p["findings"]}
+        self.assertTrue({"sudo", "suid", "kernel", "writable"} <= cats)
+
+    def test_windows_detection(self):
+        from recce import ingest
+        p = ingest.parse_loot(_LOOT_WIN)
+        self.assertEqual(p["os"], "windows")
+        self.assertEqual(p["hostname"], "DBSRV01")
+
+    def test_strips_ansi_colour(self):
+        from recce import ingest
+        coloured = ("recce-enum  host=h1\n\x1b[1;36m==== Sudo ====\x1b[0m\n"
+                    "\x1b[1;33m[!] NOPASSWD sudo entries present\x1b[0m\n")
+        p = ingest.parse_loot(coloured)
+        self.assertEqual(len(p["findings"]), 1)
+        self.assertEqual(p["findings"][0]["text"], "NOPASSWD sudo entries present")
+
+    def test_dedup(self):
+        from recce import ingest
+        dupe = ("recce-enum host=h\n==== Sudo ====\n[!] same\n[!] same\n")
+        self.assertEqual(len(ingest.parse_loot(dupe)["findings"]), 1)
+
+
+class IngestCommandTest(unittest.TestCase):
+    def _eng(self, d, host=None):
+        from recce.store import Store
+        os.makedirs(os.path.join(d, "raw"), exist_ok=True)
+        s = Store(os.path.join(d, "results.sqlite"))
+        s.set_meta("engagement", "T")
+        if host:
+            s.upsert_host(host)
+        s.close()
+
+    def _ingest(self, d, loot_text, extra=None):
+        from recce import cli
+        loot = os.path.join(d, "loot.txt")
+        with open(loot, "w") as fh:
+            fh.write(loot_text)
+        argv = ["ingest", loot, "-o", d] + (extra or [])
+        args = cli.build_arg_parser().parse_args(argv)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = args.func(args)
+        return rc
+
+    def test_ingest_matches_host_by_hostname(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"],
+                              os_family="Linux", enumerated=True))
+            self.assertEqual(self._ingest(d, _LOOT_LINUX), 0)
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.50")
+            self.assertEqual(len(h.local_findings), 5)
+            self.assertTrue(h.privesc_checked)
+
+    def test_ingest_is_idempotent(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"]))
+            self._ingest(d, _LOOT_LINUX)
+            self._ingest(d, _LOOT_LINUX)               # re-ingest same loot
+            h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.50")
+            self.assertEqual(len(h.local_findings), 5)  # not doubled
+
+    def test_ingest_synthesizes_host_when_unknown(self):
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d)                                # empty engagement
+            self.assertEqual(self._ingest(d, _LOOT_WIN), 0)
+            h = Store(os.path.join(d, "results.sqlite")).get_host("local:DBSRV01")
+            self.assertIsNotNone(h)
+            self.assertEqual(h.os_family, "Windows")
+            self.assertEqual(len(h.local_findings), 2)
+
+    def test_ingested_findings_appear_on_privesc_sheet(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
+            self._ingest(d, _LOOT_LINUX)
+            import openpyxl
+            ws = openpyxl.load_workbook(os.path.join(d, "enumeration.xlsx"))["Priv-Esc"]
+            hdr = [c.value for c in ws[1]]
+            hi = hdr.index("How-to / command")
+            on_target = sum(1 for r in ws.iter_rows(min_row=2, values_only=True)
+                            if r[hi] and "on-target" in str(r[hi]))
+            self.assertEqual(on_target, 5)
+
+
+class ProgressAndAuthTest(unittest.TestCase):
+    def test_fmt_dur(self):
+        from recce import cli
+        self.assertEqual(cli._fmt_dur(45), "45s")
+        self.assertEqual(cli._fmt_dur(200), "3m20s")
+        self.assertEqual(cli._fmt_dur(3660), "1h01m")
+
+    def test_progress_has_pct_and_eta(self):
+        from recce import cli
+        import time
+        s = cli._progress(2, 10, time.monotonic() - 4)
+        self.assertIn("20%", s)
+        self.assertIn("ETA", s)
+
+    def test_auth_cell(self):
+        from recce import cli
+        self.assertEqual(cli._auth_cell(None), "-")
+        self.assertEqual(cli._auth_cell({"tried": True, "auth": False}), "FAIL")
+        self.assertEqual(cli._auth_cell({"tried": True, "auth": True}), "OK")
+        self.assertEqual(cli._auth_cell({"tried": True, "auth": True, "admin": True}),
+                         "OK (admin)")
+
+    def test_auth_table_prints_rows_and_flags_fail(self):
+        from recce import cli
+        rows = [("10.0.0.5", {"user": {"tried": True, "auth": True, "admin": True}}),
+                ("10.0.0.9", {"user": {"tried": True, "auth": False}})]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli._print_auth_table(rows)
+        out = buf.getvalue()
+        self.assertIn("USER ACCT", out)
+        self.assertIn("OK (admin)", out)
+        self.assertIn("FAIL", out)
+
+    def test_no_yes_flag_and_ingest_present(self):
+        from recce import cli
+        p = cli.build_arg_parser()
+        # ingest is a registered command...
+        self.assertEqual(p.parse_args(["ingest", "x.txt"]).command, "ingest")
+        # ...and the authorization --yes flag is gone.
+        with self.assertRaises(SystemExit):
+            p.parse_args(["enum", "1.2.3.4", "--yes"])
+
+
+class RunbookSheetTest(unittest.TestCase):
+    def test_runbook_sheet_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "wb.xlsx")
+            build_workbook([], p, meta={"subtitle": "x"})
+            import openpyxl
+            wb = openpyxl.load_workbook(p)
+            self.assertIn("Runbook", wb.sheetnames)
+            vals = [c for row in wb["Runbook"].iter_rows(values_only=True)
+                    for c in row if c]
+            joined = " ".join(str(v) for v in vals)
+            self.assertIn("enum", joined)
+            self.assertIn("ingest", joined)
+            self.assertIn("--fast", joined)
 
 
 class EntryPointTest(unittest.TestCase):

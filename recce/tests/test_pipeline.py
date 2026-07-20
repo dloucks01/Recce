@@ -969,9 +969,10 @@ class CredEnumTest(unittest.TestCase):
         from recce import credenum as c
         h = Host(ip="10.0.0.9", os_family="Windows",
                  ports=[Port(portid=445, state="open")])
-        issues = c.enrich_host(h, {"username": "u", "password": "p"}, None)
+        issues, auth = c.enrich_host(h, {"username": "u", "password": "p"}, None)
         self.assertTrue(h.cred_enumerated)
         self.assertIsInstance(issues, list)
+        self.assertIsInstance(auth, dict)
 
 
 class ScanHardeningTest(unittest.TestCase):
@@ -1655,10 +1656,11 @@ class CliSmokeTest(unittest.TestCase):
         from recce import cli
         p = cli.build_arg_parser()
         # Parse a representative invocation of each command without executing.
-        for argv in (["enum", "10.0.0.1", "-y"], ["vulns", "10.0.0.0/24"],
+        for argv in (["enum", "10.0.0.1"], ["vulns", "10.0.0.0/24", "--fast"],
                      ["db", "-o", "x"], ["privesc", "--scan"], ["scan", "10.0.0.1"],
                      ["credenum", "-u", "a", "-p", "b", "-d", "corp.local"],
                      ["writeups", "--min-severity", "high", "--no-screenshots"],
+                     ["ingest", "loot.txt", "--host", "1.2.3.4"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
                      ["demo"], ["doctor", "--no-self-scan"]):
             ns = p.parse_args(argv)

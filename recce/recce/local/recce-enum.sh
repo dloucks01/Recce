@@ -5,9 +5,8 @@
 # surface privilege-escalation vectors and sensitive exposure (a linPEAS-style
 # sweep). It changes NOTHING - only reads system state with built-in tools - so
 # it is safe to run and does not behave like malware. There is no exploit code,
-# no download, no obfuscation. In an authorized engagement, if an EDR flags a
-# plain read-only script, coordinate an exclusion with the client; do not try to
-# evade it.
+# no download, no obfuscation. If an EDR flags a plain read-only script,
+# coordinate an exclusion rather than trying to evade it.
 #
 # Usage:  ./recce-enum.sh [-t] [-q] [-o report.txt]
 #           -t  self-test: parse-check the script + report which sections will
@@ -15,7 +14,7 @@
 #           -q  quiet: findings only (skip the raw dumps)
 #           -o  also write everything to a file
 #
-# Authorized testing only. Findings marked [!] are worth a closer look.
+# Findings marked [!] are worth a closer look.
 
 export LC_ALL=C
 QUIET=0; OUT=""; SELFTEST=0

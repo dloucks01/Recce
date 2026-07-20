@@ -7,8 +7,8 @@
   built-in cmdlets / reg queries - so it is safe to run and does not behave like
   malware. No exploit code, no download, no obfuscation, no AMSI/Defender
   tampering. Being a plain read-only Get-* script is exactly why it does not
-  match malware signatures; if an EDR still false-positives in an authorized
-  engagement, coordinate an exclusion with the client rather than evading it.
+  match malware signatures; if an EDR still false-positives, coordinate an
+  exclusion rather than evading it.
 
   Usage:
     powershell -ep bypass -File .\recce-enum.ps1 [-Quiet] [-OutFile report.txt]
@@ -17,7 +17,7 @@
       -Quiet     findings only (skip the raw dumps)
       -OutFile   also write everything to a file
 
-  Authorized testing only. Lines marked [!] are worth a closer look.
+  Lines marked [!] are worth a closer look.
 #>
 [CmdletBinding()]
 param([switch]$SelfTest, [switch]$Quiet, [string]$OutFile)

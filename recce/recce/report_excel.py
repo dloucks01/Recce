@@ -72,7 +72,7 @@ class SheetSpec:
 _TAB_GUIDE, _TAB_WORK = "FF8497B0", "FF0E7C75"
 _TAB_FIND, _TAB_INV, _TAB_RAW = "FFC00000", "FF548235", "FF7F7F7F"
 TAB_COLORS = {
-    "Start Here": _TAB_GUIDE, "Overview": _TAB_GUIDE,
+    "Start Here": _TAB_GUIDE, "Runbook": _TAB_GUIDE, "Overview": _TAB_GUIDE,
     "Checklist": _TAB_WORK, "Services": _TAB_WORK,
     "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND,
     "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
@@ -599,6 +599,8 @@ def _build_guide(wb, meta: dict) -> None:
     sh.write([("What each tab is", "title")])
     sh.write([("Tab", "header"), ("What it shows", "header")])
     for tab, desc in [
+        ("Runbook", "Step-by-step: exactly what to type for each phase + the options "
+                    "that matter. Start here if you just want the commands."),
         ("Overview", "Totals, review progress, and live-hosts-per-subnet coverage."),
         ("Checklist", "THE working tab: one row per IP (grouped by subnet) with a "
                       "checkbox for each phase + host detail + Reviewed + Notes."),
@@ -639,6 +641,105 @@ def _build_guide(wb, meta: dict) -> None:
                "whole subnet (10.0.0.0/24), or @file.", "sub")])
     sh.set_col(1, 24)
     sh.set_col(2, 78)
+
+
+def _build_runbook(wb, meta: dict) -> None:
+    """A step-by-step 'Runbook' sheet: exactly what to type, phase by phase,
+    with the options that matter for each phase. The tester can work top-to-
+    bottom without leaving the workbook."""
+    sh = wb.add_sheet("Runbook")
+    sh.hide_gridlines = True
+
+    def section(title, blurb=""):
+        sh.write([""])
+        sh.write([(title, "title")])
+        if blurb:
+            sh.write([(blurb, "sub")])
+        sh.write([("Type this", "header"), ("What it does / options", "header")])
+
+    def cmd(c, desc):
+        sh.write([(c, "cell_mono"), (desc, "wrap")])
+
+    sh.write([("recce - tester runbook", "title")])
+    sh.write([(meta.get("subtitle", "") or "Work top-to-bottom. Each phase writes "
+               "into this workbook; your ticks and notes survive re-scans.", "sub")])
+    sh.write([("Prefix every command with `python3 -m recce` (or use the bundled "
+               "`./bin/recce` wrapper). `-o DIR` is the engagement folder that holds "
+               "the workbook + datastore; keep it the same across all phases.", "bold")])
+
+    section("Targets - the one thing every scan phase takes",
+            "Give enum/vulns/scan any of these forms (space-separated to mix):")
+    cmd("10.0.0.5", "a single host")
+    cmd("10.0.0.5 10.0.0.9 10.0.0.20", "several hosts")
+    cmd("10.0.0.10-40", "a range (last octet 10 through 40)")
+    cmd("10.0.0.0/24", "a whole subnet")
+    cmd("@scope.txt", "read targets from a file (one per line; # comments ok)")
+    cmd("--exclude 10.0.0.1,10.0.0.0/28", "carve out-of-scope hosts back out")
+
+    section("0. Pre-flight - prove the box can do the work")
+    cmd("doctor", "Check env + required/optional tools + run a localhost self-scan. "
+                  "Run this first; it tells you loudly what's missing.")
+
+    section("1. Enumerate - discover hosts, ports, services (fast, safe)")
+    cmd("enum <targets> -o eng --title \"Client X\"",
+        "Host discovery + full TCP + service/version/OS + deep service NSE. "
+        "Fills Checklist, Services, Raw NSE.")
+    cmd("  --profile quick|standard|thorough",
+        "How hard to look (standard is the default; quick skips deep enum for speed).")
+    cmd("  --workers N", "How many hosts to scan at once (default 6).")
+    cmd("  --host-timeout MIN", "Give up on a slow host after MIN minutes and move on.")
+
+    section("2. Vulns - vuln-scan the open ports you found")
+    cmd("vulns -o eng", "Curated detection NSE + version-matched offline vuln DB + "
+                        "HTTP/TLS probes. Fills Vulnerabilities, Exploits.")
+    cmd("  --fast", "Top-signal detection scripts only - much quicker on a /24 when "
+                    "you just want the high-value hits. Shows live per-host progress + ETA.")
+    cmd("  --aggressive", "Add nmap `vulners` + broader scripts (slower, noisier, "
+                          "more coverage). Opposite end from --fast.")
+    cmd("  [targets]", "Optional: limit to specific hosts/ports (default = everything "
+                       "enum found).")
+
+    section("3. Databases (optional) - deep DB enumeration")
+    cmd("db -o eng", "Enumerate + vuln-scan discovered database services. Fills Databases.")
+
+    section("4. Priv-esc playbook - per-host escalation guidance")
+    cmd("privesc -o eng", "Build the Priv-Esc sheet from what's already known.")
+    cmd("  --scan", "Also run remote priv-esc NSE checks against the hosts.")
+    cmd("ingest loot.txt -o eng",
+        "Fold findings from an on-target run of recce-enum.sh / recce-enum.ps1 "
+        "(the [!] lines) into the Priv-Esc sheet. Point it at the saved -o/-OutFile.")
+
+    section("5. Credentialed enum - authenticated power moves",
+            "Two accounts are supported: a normal user does the enumeration; an "
+            "optional privileged account runs the admin-only checks.")
+    cmd("credenum -u user -p pass -d corp.local -o eng",
+        "Authenticated SMB/LDAP enum with the user account: shares, roasting, "
+        "delegation, local-admin reach. Fills Users & Accounts, AD sheets.")
+    cmd("  --admin-user adm --admin-pass P [--admin-domain D]",
+        "Privileged account: confirms local-admin reach and dumps secrets "
+        "(secretsdump). Each result is labelled by which account produced it.")
+    cmd("  --ldap-enum / --ldap-anon / --ldap-ssl / --dc-ip IP",
+        "Credentialed LDAP of the DC / anonymous bind / LDAPS / target a specific DC.")
+
+    section("6. Report - turn findings into deliverables")
+    cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
+                           "auto-added when a browser is present). Finish each in Word.")
+    cmd("report -o eng", "Rebuild this workbook + reports from the datastore "
+                         "(preserves your ticks and notes).")
+    cmd("status -o eng", "Print live review-coverage without rebuilding anything.")
+
+    section("On-target - run these ON a compromised host (read-only)",
+            "Copy the script from recce/local/ to the target, self-test, then run "
+            "and save the output; bring it back and `ingest` it (phase 4).")
+    cmd("./recce-enum.sh -t", "Linux: self-test (parse-check + what will run). Safe first step.")
+    cmd("./recce-enum.sh -o loot.txt", "Linux: full read-only sweep, saved to loot.txt.")
+    cmd("powershell -ep bypass -File recce-enum.ps1 -SelfTest",
+        "Windows: self-test only (no enumeration).")
+    cmd("powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt",
+        "Windows: full read-only sweep, saved to loot.txt.")
+
+    sh.set_col(1, 46)
+    sh.set_col(2, 82)
 
 
 def _bar(pct: int) -> str:
@@ -922,6 +1023,7 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         host_rows = {key_ip[k]: 2 + i for i, k in enumerate(ck_keys) if k in key_ip}
 
     _build_guide(wb, meta)
+    _build_runbook(wb, meta)
     _build_overview(wb, hosts, meta, domains, tracking, scope, issues or [], nav,
                     host_rows)
     for spec in pre:
