@@ -911,7 +911,52 @@ class VulnDbTest(unittest.TestCase):
 
     def test_signature_database_is_large(self):
         from recce import vulndb
-        self.assertGreaterEqual(vulndb.signature_count(), 50)
+        self.assertGreaterEqual(vulndb.signature_count(), 80)
+
+    def test_new_signature_categories_match(self):
+        from recce import vulndb
+        cases = {
+            "ActiveMQ OpenWire transport": "ActiveMQ",
+            "Oracle WebLogic admin httpd": "WebLogic",
+            "Docker": "Docker Engine API",
+            "Apache Solr": "Solr",
+            "Zabbix": "Zabbix",
+            "JetBrains TeamCity": "TeamCity",
+            "VMware ESXi": "ESXi",
+            "Apache CouchDB": "CouchDB",
+        }
+        for product, expect in cases.items():
+            h = Host(ip="1.1.1.1", ports=[Port(portid=8080, service="http",
+                     product=product, state="open")])
+            vulndb.assess_host_inplace(h)
+            self.assertTrue(any(expect in v.title for v in h.vulns),
+                            f"{product} -> expected a '{expect}' finding")
+
+    def test_windows_advisories_are_os_gated(self):
+        from recce import vulndb
+        win = Host(ip="1.1.1.1", os_family="Windows", os_name="Windows Server 2019",
+                   ports=[Port(portid=445, service="microsoft-ds",
+                               product="Microsoft Windows Server 2019", state="open")])
+        vulndb.assess_host_inplace(win)
+        titles = " ".join(v.title for v in win.vulns)
+        for expect in ("SMBGhost", "PrintNightmare", "ZeroLogon"):
+            self.assertIn(expect, titles)
+        # A Linux/Samba SMB host must NOT get the Windows-only advisories.
+        lin = Host(ip="1.1.1.2", os_family="Linux", os_name="Linux",
+                   ports=[Port(portid=445, service="microsoft-ds",
+                               product="Samba smbd", version="4.13.0", state="open")])
+        vulndb.assess_host_inplace(lin)
+        self.assertFalse(any(w in " ".join(v.title for v in lin.vulns)
+                             for w in ("SMBGhost", "PrintNightmare", "ZeroLogon")))
+
+    def test_jetty_version_gate(self):
+        from recce import vulndb
+        for ver, should in [("9.4.30.v20200611", True), ("9.4.50", False)]:
+            h = Host(ip="1.1.1.1", ports=[Port(portid=8080, service="http",
+                     product="Jetty", version=ver, state="open")])
+            vulndb.assess_host_inplace(h)
+            hit = any("Jetty" in v.title for v in h.vulns)
+            self.assertEqual(hit, should, f"Jetty {ver}")
 
     def test_findings_carry_cwes(self):
         from recce import vulndb

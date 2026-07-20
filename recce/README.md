@@ -237,14 +237,19 @@ airgapped, none need internet):
    methods, empty DB passwords, cleartext Telnet, SMTP open relay, exposed
    Redis/Mongo, SNMP community strings, DNS zone transfer, etc.
 2. **Offline version→CVE engine** (`vulndb.py`) — a curated knowledge base of
-   50+ high-signal signatures that matches the product+version data `enum`
-   already collected against known CVEs, with a description and **remediation**.
-   Covers FTP/SSH/web servers, Samba/SMB, databases, CI/web apps (Jenkins,
-   Tomcat, Drupal, Confluence, GitLab, Grafana…), VPN/edge appliances (Fortinet,
-   Pulse, Citrix, Palo Alto), Exchange, and default-credential advisories for
-   Tomcat/Jenkins/iLO/iDRAC. This is the airgapped replacement for nmap's
-   internet-only `vulners` script. Findings are tagged `likely` (a concrete
-   version range matched) or `potential` (a product-only advisory lead).
+   **80+ high-signal signatures** that matches the product+version data `enum`
+   already collected against known CVEs, with a description, CWE(s) and
+   **remediation**. Covers FTP/SSH/web servers, Samba/SMB, databases, CI/web apps
+   (Jenkins, Tomcat, Drupal, Confluence, GitLab, Grafana…), VPN/edge appliances
+   (Fortinet, Pulse, Citrix, Palo Alto), Exchange, **virtualization (vCenter,
+   ESXi, Horizon), Java middleware (WebLogic, JBoss, ActiveMQ, ColdFusion, Solr,
+   Zimbra, Jetty), dev/CI/infra exposure (Docker API, Kubernetes/kubelet, etcd,
+   Nexus, TeamCity, SonarQube), monitoring (Zabbix, Cacti, PRTG, Nagios, CouchDB,
+   Kibana, Splunk), OS-gated Windows/AD advisories (SMBGhost, PrintNightmare,
+   ZeroLogon, WinRM, MSSQL)**, and default-credential advisories. This is the
+   airgapped replacement for nmap's internet-only `vulners` script. Findings are
+   tagged `likely` (a concrete version range matched) or `potential` (a
+   product-only or OS-gated advisory lead).
 3. **Pure-Python enrichment probes** (`probes.py`, stdlib only) — an active
    layer stock Kali needs extra tooling (testssl.sh, nikto, httpx) for:
    **HTTP security-header analysis** (missing HSTS/CSP/X-Frame-Options/

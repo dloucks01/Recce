@@ -424,6 +424,231 @@ SIGNATURES: list[dict] = [
      "remediation": "Disable VRFY/EXPN; ensure no open relay; require auth to submit.",
      "desc": "Confirm the MTA does not allow open relay or VRFY/EXPN user "
              "enumeration; check for anonymous submission on 25/587."},
+
+    # === Virtualization ========================================================
+    {"product": ["vmware esxi", "vmware authentication daemon"], "severity": "critical",
+     "advisory": True,
+     "title": "VMware ESXi exposed - OpenSLP pre-auth RCE (ransomware target)",
+     "cves": ["CVE-2021-21974", "CVE-2019-5544", "CVE-2020-3992"],
+     "cwe": ["CWE-787", "CWE-416"],
+     "remediation": "Patch ESXi; disable OpenSLP (427/tcp); isolate the management "
+                    "network.",
+     "desc": "ESXi's OpenSLP service has heap-overflow pre-auth RCE (CVE-2021-21974) - "
+             "the ESXiArgs ransomware entry point. Confirm build and that 427/tcp is "
+             "firewalled."},
+    {"product": ["vmware vcenter", "vsphere"], "severity": "critical", "advisory": True,
+     "title": "VMware vCenter exposed - unauthenticated RCE risk",
+     "cves": ["CVE-2021-22005", "CVE-2021-21972", "CVE-2023-34048"],
+     "cwe": ["CWE-434", "CWE-502"],
+     "remediation": "Apply current vCenter patches; restrict management-plane access.",
+     "desc": "vCenter has repeated pre-auth RCE (file-upload CVE-2021-22005, vSphere "
+             "Client CVE-2021-21972, DCERPC CVE-2023-34048). Compromise = control of "
+             "the entire virtual estate."},
+    {"product": ["vmware horizon", "vmware view"], "severity": "critical",
+     "advisory": True,
+     "title": "VMware Horizon exposed - Log4Shell / RCE target",
+     "cves": ["CVE-2021-44228"], "cwe": ["CWE-502", "CWE-917"],
+     "remediation": "Patch Horizon/Log4j; hunt for prior compromise (webshells).",
+     "desc": "Internet/intranet-facing Horizon was mass-exploited via Log4Shell "
+             "(CVE-2021-44228). Verify Log4j remediation and scan for webshells."},
+
+    # === Java / web middleware =================================================
+    {"product": ["weblogic"], "severity": "critical", "advisory": True,
+     "title": "Oracle WebLogic exposed - deserialization / unauth RCE",
+     "cves": ["CVE-2020-14882", "CVE-2019-2725", "CVE-2023-21839"],
+     "cwe": ["CWE-502"],
+     "remediation": "Apply Oracle CPU patches; restrict the admin console and T3/IIOP.",
+     "desc": "WebLogic has a long line of pre-auth RCE (console path traversal "
+             "CVE-2020-14882, T3/IIOP deserialization) - a prime internal foothold."},
+    {"product": ["jboss", "wildfly"], "severity": "high", "advisory": True,
+     "title": "JBoss/WildFly exposed - deserialization / JMXInvoker RCE",
+     "cves": ["CVE-2017-12149", "CVE-2015-7501"], "cwe": ["CWE-502"],
+     "remediation": "Remove/secure JMXInvokerServlet & the admin console; patch.",
+     "desc": "Legacy JBoss exposes JMXInvokerServlet/HTTPInvoker and Java "
+             "deserialization gadgets leading to unauthenticated RCE."},
+    {"product": ["activemq"], "severity": "critical", "advisory": True,
+     "title": "Apache ActiveMQ exposed - OpenWire RCE (CVE-2023-46604)",
+     "cves": ["CVE-2023-46604"], "cwe": ["CWE-502"],
+     "remediation": "Upgrade ActiveMQ (5.15.16/5.16.7/5.17.6/5.18.3+); firewall 61616.",
+     "desc": "The OpenWire protocol (61616) has an unauthenticated deserialization RCE "
+             "mass-exploited for ransomware; also secure the 8161 web console."},
+    {"product": ["coldfusion"], "severity": "critical", "advisory": True,
+     "title": "Adobe ColdFusion exposed - unauthenticated RCE",
+     "cves": ["CVE-2023-26360", "CVE-2023-29298", "CVE-2010-2861"],
+     "cwe": ["CWE-284", "CWE-22"],
+     "remediation": "Apply ColdFusion security updates; restrict the admin panel.",
+     "desc": "ColdFusion has recurring pre-auth RCE and admin-panel path traversal. "
+             "Confirm the exact update level."},
+    {"product": ["solr"], "severity": "high", "advisory": True,
+     "title": "Apache Solr exposed - Velocity template RCE",
+     "cves": ["CVE-2019-17558", "CVE-2021-27905"], "cwe": ["CWE-94", "CWE-918"],
+     "remediation": "Disable the Velocity response writer / params resource loading; "
+                    "firewall 8983; upgrade Solr.",
+     "desc": "Solr's VelocityResponseWriter allows template-injection RCE, plus SSRF in "
+             "the replication handler; the admin API is usually unauthenticated."},
+    {"product": ["zimbra"], "severity": "critical", "advisory": True,
+     "title": "Zimbra Collaboration exposed - unauthenticated RCE",
+     "cves": ["CVE-2022-27925", "CVE-2022-41352", "CVE-2019-9670"],
+     "cwe": ["CWE-22", "CWE-611"],
+     "remediation": "Patch Zimbra; replace vulnerable cpio/pax; hunt for webshells.",
+     "desc": "Zimbra has multiple mass-exploited pre-auth RCE (mboximport traversal, "
+             "cpio extraction) and XXE - a frequent full-mail-server compromise."},
+    {"product": ["jetty"], "lt": "9.4.41", "ge": "9.0", "severity": "medium",
+     "title": "Eclipse Jetty < 9.4.41 - path normalization info disclosure",
+     "cves": ["CVE-2021-28164", "CVE-2021-28169", "CVE-2021-34429"],
+     "cwe": ["CWE-22", "CWE-200"],
+     "remediation": "Upgrade Jetty to 9.4.41+ (or 10.0.2+/11.0.2+).",
+     "desc": "Encoded paths bypass access controls and expose WEB-INF/protected "
+             "resources (config, credentials)."},
+
+    # === Dev / CI / infrastructure exposure ====================================
+    {"product": ["docker"], "severity": "critical", "advisory": True,
+     "title": "Docker Engine API exposed - unauthenticated host RCE",
+     "cves": [], "cwe": ["CWE-306", "CWE-284"],
+     "remediation": "Never expose 2375/2376 unauthenticated; bind to localhost or "
+                    "require mTLS; firewall it.",
+     "desc": "An open Docker Engine API (2375/2376) lets anyone start a privileged "
+             "container mounting the host filesystem - trivial root on the host."},
+    {"product": ["kubernetes", "kubelet"], "severity": "high", "advisory": True,
+     "title": "Kubernetes API / kubelet exposed - unauth container exec",
+     "cves": [], "cwe": ["CWE-306"],
+     "remediation": "Require authN/Z on the API server; disable anonymous kubelet "
+                    "(10250) auth; firewall 6443/10250.",
+     "desc": "An anonymous kube-apiserver (6443) or kubelet (10250) allows listing and "
+             "exec-ing into pods - cluster-wide compromise."},
+    {"product": ["etcd"], "severity": "high", "advisory": True,
+     "title": "etcd exposed - unauthenticated cluster secrets",
+     "cves": [], "cwe": ["CWE-306"],
+     "remediation": "Require client-certificate auth on etcd (2379); firewall it.",
+     "desc": "An open etcd store (2379) exposes all Kubernetes secrets and config - "
+             "service-account tokens, credentials, the lot."},
+    {"product": ["nexus"], "severity": "high", "advisory": True,
+     "title": "Sonatype Nexus exposed - RCE / traversal / default creds",
+     "cves": ["CVE-2024-4956", "CVE-2019-7238"], "cwe": ["CWE-22", "CWE-94", "CWE-798"],
+     "remediation": "Patch Nexus; change the default admin/admin123 credentials.",
+     "desc": "Nexus has unauth path traversal (CVE-2024-4956) and older unauth RCE, and "
+             "ships with default admin/admin123 - repo write access is supply-chain."},
+    {"product": ["teamcity"], "severity": "critical", "advisory": True,
+     "title": "JetBrains TeamCity exposed - authentication-bypass RCE",
+     "cves": ["CVE-2023-42793", "CVE-2024-27198"], "cwe": ["CWE-288"],
+     "remediation": "Upgrade TeamCity to a fixed build; rotate tokens after exposure.",
+     "desc": "TeamCity has authentication-bypass to admin/RCE - CI compromise exposes "
+             "source code and deployment credentials."},
+    {"product": ["sonarqube"], "severity": "medium", "advisory": True,
+     "title": "SonarQube exposed - default credentials / anonymous access",
+     "cves": ["CVE-2020-27986"], "cwe": ["CWE-1188", "CWE-798"],
+     "remediation": "Change the default admin/admin; disable anonymous access.",
+     "desc": "SonarQube ships with admin/admin and often allows anonymous project "
+             "access, exposing source code and tokens."},
+    {"product": ["gitea", "gogs"], "severity": "medium", "advisory": True,
+     "title": "Gitea/Gogs exposed - check for RCE and weak auth",
+     "cves": ["CVE-2022-30781"], "cwe": ["CWE-94", "CWE-1188"],
+     "remediation": "Patch Gitea/Gogs; disable open registration; enforce strong auth.",
+     "desc": "Self-hosted Git services have had template/hook RCE and often allow open "
+             "registration - a route to source code and CI secrets."},
+
+    # === Monitoring / management ===============================================
+    {"product": ["zabbix"], "severity": "high", "advisory": True,
+     "title": "Zabbix exposed - SAML auth bypass / default creds",
+     "cves": ["CVE-2022-23131", "CVE-2022-23134"], "cwe": ["CWE-290", "CWE-287"],
+     "remediation": "Patch Zabbix; change default Admin/zabbix; restrict the frontend.",
+     "desc": "Zabbix has an unauth SAML session-forgery admin bypass and ships with "
+             "Admin/zabbix; admin = command execution on monitored hosts."},
+    {"product": ["cacti"], "severity": "critical", "advisory": True,
+     "title": "Cacti exposed - unauthenticated command injection",
+     "cves": ["CVE-2022-46169", "CVE-2023-39362"], "cwe": ["CWE-78", "CWE-94"],
+     "remediation": "Upgrade Cacti (1.2.23+); restrict access; change default creds.",
+     "desc": "Cacti has unauthenticated OS command injection (CVE-2022-46169) - direct "
+             "RCE on the monitoring server."},
+    {"product": ["prtg"], "severity": "high", "advisory": True,
+     "title": "PRTG Network Monitor exposed - command injection / default creds",
+     "cves": ["CVE-2018-9276"], "cwe": ["CWE-78", "CWE-798"],
+     "remediation": "Patch PRTG; change default prtgadmin/prtgadmin; restrict access.",
+     "desc": "PRTG has authenticated command injection and ships with prtgadmin/"
+             "prtgadmin - notifications/sensors run commands on the host."},
+    {"product": ["nagios"], "severity": "high", "advisory": True,
+     "title": "Nagios exposed - multiple RCE / default creds",
+     "cves": ["CVE-2018-15708", "CVE-2016-9566"], "cwe": ["CWE-78", "CWE-22"],
+     "remediation": "Patch Nagios XI/Core; change default nagiosadmin; restrict access.",
+     "desc": "Nagios XI/Core have a history of unauth RCE and privilege escalation, and "
+             "default nagiosadmin credentials."},
+    {"product": ["couchdb"], "severity": "critical", "advisory": True,
+     "title": "Apache CouchDB exposed - admin bypass / Erlang cookie RCE",
+     "cves": ["CVE-2022-24706", "CVE-2017-12635"], "cwe": ["CWE-306", "CWE-94"],
+     "remediation": "Upgrade CouchDB (3.2.2+); set a strong Erlang cookie; require auth; "
+                    "firewall 5984/4369.",
+     "desc": "CouchDB had 'admin party' privilege escalation and an Erlang-distribution "
+             "cookie RCE (CVE-2022-24706) reachable when the cluster port is exposed."},
+    {"product": ["kibana"], "severity": "high", "advisory": True,
+     "title": "Kibana exposed - Timelion prototype-pollution RCE",
+     "cves": ["CVE-2019-7609"], "cwe": ["CWE-94", "CWE-306"],
+     "remediation": "Upgrade Kibana; enable authentication; never expose 5601.",
+     "desc": "Kibana's Timelion had a prototype-pollution RCE, and it is frequently "
+             "exposed without authentication over the whole Elastic dataset."},
+    {"product": ["splunk"], "severity": "medium", "advisory": True,
+     "title": "Splunk exposed - check patch level and default credentials",
+     "cves": ["CVE-2023-40598"], "cwe": ["CWE-78", "CWE-798"],
+     "remediation": "Patch Splunk; change default admin credentials; restrict 8000/8089.",
+     "desc": "Splunk Enterprise has had authenticated RCE and older default creds; the "
+             "management port (8089) and web (8000) should not be broadly exposed."},
+
+    # === Windows / AD (OS-gated advisories - verify build/patch level) ==========
+    {"product": ["microsoft-ds", "netbios-ssn"], "os": "windows", "severity": "critical",
+     "advisory": True,
+     "title": "Windows SMB - verify SMBGhost (CVE-2020-0796)",
+     "cves": ["CVE-2020-0796"], "cwe": ["CWE-787"],
+     "remediation": "Patch (KB4551762); disable SMBv3.1.1 compression; block 445 "
+                    "externally.",
+     "desc": "SMBv3.1.1 compression pre-auth RCE affecting Windows 10 / Server "
+             "1903-1909. Confirm the build/patch level - not fingerprintable from the "
+             "banner alone."},
+    {"product": ["microsoft-ds", "netbios-ssn"], "os": "windows", "severity": "critical",
+     "advisory": True,
+     "title": "Windows - verify PrintNightmare (CVE-2021-34527)",
+     "cves": ["CVE-2021-34527", "CVE-2021-1675"], "cwe": ["CWE-269"],
+     "remediation": "Patch; disable the Print Spooler where not needed; restrict "
+                    "Point-and-Print.",
+     "desc": "Print Spooler remote code execution / LPE - any unpatched Windows host "
+             "with the spooler running is exploitable to SYSTEM."},
+    {"product": ["microsoft-ds", "netbios-ssn"], "os": "windows", "severity": "critical",
+     "advisory": True,
+     "title": "Windows DC - verify ZeroLogon (CVE-2020-1472)",
+     "cves": ["CVE-2020-1472"], "cwe": ["CWE-330"],
+     "remediation": "Apply Aug-2020+ patches and enforce secure RPC on Netlogon.",
+     "desc": "Netlogon cryptographic flaw lets an unauthenticated attacker reset a "
+             "domain controller's machine password - instant domain takeover. Verify "
+             "whether this host is a DC and its patch level."},
+    {"product": ["wsman", "winrm"], "severity": "medium", "advisory": True,
+     "title": "WinRM exposed - remote credentialed execution surface",
+     "cves": [], "cwe": ["CWE-284"],
+     "remediation": "Restrict WinRM (5985/5986) to management hosts; require HTTPS; "
+                    "monitor for credential-based lateral movement.",
+     "desc": "Exposed WinRM (5985/5986) is a primary lateral-movement channel "
+             "(evil-winrm / PSRemoting) once any valid credentials are obtained."},
+    {"product": ["microsoft sql server", "ms-sql"], "severity": "medium",
+     "advisory": True,
+     "title": "Microsoft SQL Server exposed - verify version, sa auth, xp_cmdshell",
+     "cves": ["CVE-2020-0618"], "cwe": ["CWE-1104", "CWE-798"],
+     "remediation": "Restrict SQL exposure; upgrade off EOL (<2016) builds; enforce "
+                    "strong sa auth; disable xp_cmdshell.",
+     "desc": "Network-exposed SQL Server is a prime lateral-movement/data target. "
+             "Pre-2016 builds are EOL (SSRS RCE CVE-2020-0618); check for weak/blank sa "
+             "credentials and enabled xp_cmdshell."},
+
+    # === Default-credential advisories =========================================
+    {"product": ["grafana"], "severity": "medium", "advisory": True,
+     "title": "Grafana exposed - check for default admin/admin credentials",
+     "cves": [], "cwe": ["CWE-798", "CWE-1392"],
+     "remediation": "Change the default admin password; disable anonymous/org signup.",
+     "desc": "Grafana ships with admin/admin; dashboards and datasource credentials "
+             "(often DB/cloud) are exposed if the default is unchanged."},
+    {"product": ["rabbitmq"], "severity": "medium", "advisory": True,
+     "title": "RabbitMQ exposed - check for default guest/guest credentials",
+     "cves": [], "cwe": ["CWE-798", "CWE-1392"],
+     "remediation": "Remove/disable the guest account; restrict the management UI "
+                    "(15672).",
+     "desc": "RabbitMQ's default guest/guest account (management UI on 15672) exposes "
+             "queues and often the application credentials passing through them."},
 ]
 
 
