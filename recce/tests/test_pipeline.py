@@ -415,6 +415,68 @@ class WeakConfigFindingTest(unittest.TestCase):
         self.assertEqual(v.severity, "critical")
 
 
+class ScanHardeningTest(unittest.TestCase):
+    def test_timeout_and_version_args(self):
+        p = scanner.PROFILES["standard"]
+        args, kill = scanner._timeout_args(p)
+        self.assertEqual(args, ["--host-timeout", f"{p.host_timeout}m"])
+        self.assertEqual(kill, p.host_timeout * 60 + 120)
+        # 0 disables both.
+        self.assertEqual(scanner._timeout_args(p, 0), ([], None))
+        # Service detection: explicit intensity vs --version-all.
+        self.assertIn("--version-intensity", scanner._version_args(p))
+        self.assertIn("--version-all", scanner._version_args(scanner.PROFILES["thorough"]))
+
+    def test_issue_classification(self):
+        s = scanner
+        self.assertEqual(
+            s._issue_from(s.RunOutcome(timed_out=True), "/no", "enum", 20).level,
+            "error")
+        self.assertEqual(
+            s._issue_from(s.RunOutcome(missing=True), "/no", "enum", 20).level,
+            "error")
+        ht = s.RunOutcome(returncode=0, stdout="Skipping host X due to host timeout")
+        self.assertEqual(s._issue_from(ht, "/no", "port-sweep", 20).level, "warning")
+        # A clean run against a real (existing, non-empty) file -> no issue.
+        self.assertIsNone(s._issue_from(s.RunOutcome(returncode=0), SAMPLE, "enum", 20))
+
+    def test_store_issue_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(os.path.join(d, "s.sqlite"))
+            store.add_issue("10.0.0.5", "port-sweep", "warning", "host timed out")
+            store.add_issue("10.0.0.9", "enum", "error", "nmap unresponsive")
+            self.assertEqual(store.count_issues(),
+                             {"warning": 1, "error": 1, "total": 2})
+            issues = store.get_issues()
+            self.assertEqual(len(issues), 2)
+            self.assertEqual(issues[0]["ip"], "10.0.0.9")   # newest first
+            store.close()
+
+    def test_overview_surfaces_issues(self):
+        issues = [{"ts": "t", "ip": "10.0.0.9", "phase": "enum", "level": "error",
+                   "message": "hard-timed-out"}]
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([Host(ip="10.0.0.5", subnet="10.0.0.0/24")], out,
+                           issues=issues)
+            flat = [str(c) for r in xlsx.read_sheets(out)["Overview"] for c in r]
+            self.assertTrue(any("SCAN ISSUES" in c for c in flat))
+            self.assertTrue(any("hard-timed-out" in c for c in flat))
+
+    def test_migration_adds_issues_table(self):
+        # A datastore created before the issues table still gains it.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "old.sqlite")
+            import sqlite3
+            con = sqlite3.connect(path)
+            con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            con.commit(); con.close()
+            store = Store(path)
+            store.add_issue("1.2.3.4", "enum", "error", "boom")
+            self.assertEqual(store.count_issues()["total"], 1)
+            store.close()
+
+
 class ProbesTest(unittest.TestCase):
     def test_port_classification(self):
         from recce import probes

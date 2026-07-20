@@ -482,7 +482,7 @@ def _bar(pct: int) -> str:
 
 
 def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
-                    tracking: Tracking, scope: dict) -> None:
+                    tracking: Tracking, scope: dict, issues: list | None = None) -> None:
     """One summary tab: engagement totals, review progress, and (prominently)
     live-hosts-per-subnet coverage. Replaces the old Dashboard/Coverage/Subnets."""
     sh = wb.add_sheet("Overview")
@@ -494,6 +494,27 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     sh.write([("Engagement Overview", "title")])
     sh.write([(meta.get("subtitle", ""), "sub")])
     sh.write([""])
+
+    # --- Scan issues (front and centre so nothing failed silently) ---
+    issues = issues or []
+    if issues:
+        errs = sum(1 for i in issues if i.get("level") == "error")
+        warns = len(issues) - errs
+        sh.write([(f"⚠ SCAN ISSUES: {errs} error(s), {warns} incomplete - "
+                   f"review before trusting coverage (full log: recce.log)",
+                   "boldred")])
+        sh.write([("When", "bold"), ("Host", "bold"), ("Phase", "bold"),
+                  ("Level", "bold"), ("What happened", "bold")])
+        for i in issues[:40]:
+            lvl = i.get("level", "warning")
+            sh.write([i.get("ts", ""), i.get("ip", ""), i.get("phase", ""),
+                      (lvl.upper(), "sev_high" if lvl == "error" else "sev_medium"),
+                      i.get("message", "")])
+        if len(issues) > 40:
+            sh.write([("", None), (f"... and {len(issues) - 40} more (see recce.log)",
+                                   "sub")])
+        sh.set_col(5, 70)
+        sh.write([""])
 
     # --- Totals ---
     sh.write([("Totals", "header"), ("", "header")])
@@ -632,7 +653,8 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
                    tracking: Tracking | None = None,
                    order_map: dict | None = None,
                    scope: dict | None = None,
-                   statuses: dict | None = None) -> str:
+                   statuses: dict | None = None,
+                   issues: list | None = None) -> str:
     meta = meta or {}
     domains = domains or []
     tracking = tracking or {}
@@ -640,7 +662,7 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     statuses = statuses or {}
     wb = xlsx.Workbook()
     _build_guide(wb, meta)
-    _build_overview(wb, hosts, meta, domains, tracking, scope)
+    _build_overview(wb, hosts, meta, domains, tracking, scope, issues or [])
     pre, post = _ordered_specs(hosts, scope)
     for spec in pre:
         if spec.skip_if_empty and not spec.rows:
@@ -661,7 +683,8 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
                     domains: list[Domain] | None = None,
                     tracking: Tracking | None = None,
                     scope: dict | None = None,
-                    statuses: dict | None = None) -> str:
+                    statuses: dict | None = None,
+                    issues: list | None = None) -> str:
     """Regenerate preserving existing row order (new rows appended) + tracking.
 
     The tool re-lays-out the sheet each time; the operator's checkboxes, notes and
@@ -670,7 +693,7 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
     """
     order_map = read_key_order(path) if os.path.exists(path) else {}
     return build_workbook(hosts, path, meta, domains, tracking, order_map, scope,
-                          statuses)
+                          statuses, issues)
 
 
 def read_key_order(path: str) -> dict[str, list[str]]:
