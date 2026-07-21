@@ -39,8 +39,19 @@ All notable changes to recce are documented here. Dates are UTC.
   the admin-only power moves, each result labelled by the account that produced
   it. A **credentialed access matrix** on the Overview summarises reach.
 - **On-target enum scripts** (`recce/local/recce-enum.sh`, `recce-enum.ps1`) —
-  read-only, winPEAS/linPEAS-style deep sweeps with `-t`/`-SelfTest` pre-flight
-  and a "how to exploit" reference.
+  read-only, winPEAS/linPEAS-style deep sweeps with `-t`/`-SelfTest` pre-flight.
+  Detection deepened well past the first cut: Linux now flags Dirty COW,
+  OverlayFS / GameOver(lay), Looney Tunables, `sudo` CVE-2023-22809, non-standard
+  SUID roots, per-binary NOPASSWD→GTFOBins mapping, cron wildcard injection,
+  writable `ld.so.preload`, MySQL-as-root / unauth-Redis, and creds on process
+  command lines; Windows adds HiveNightmare/SeriousSAM, PrintNightmare surface,
+  SeManageVolume / SeCreateToken / SeTcb, and admin-token/UAC state — each with
+  the exact discovered artifact. The closing **"how to exploit"** section is now
+  a **tailored, per-finding runbook**: it prints only the vectors that actually
+  fired on the host, substitutes in the specific file / binary / privilege
+  found, and gives prereq → command → how-to-confirm → cleanup for each, pointing
+  at existing public tools (GTFOBins, the Potato family, impacket, PwnKit/Dirty
+  Pipe PoCs, gpp-decrypt, …) — it does not generate exploit code.
 - **Louder failures** — per-phase error summaries, a per-host **auth
   success/fail table** (distinguishing rejected credentials `FAIL` from tool/
   connection errors `ERR`), and explicit missing-tool stops.

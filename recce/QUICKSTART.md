@@ -66,7 +66,9 @@ sudo ./bin/recce db -o eng                 # databases
 
 # 4b) On-target enum: got a shell on a box? Run the bundled read-only sweep
 #     (recce/local/), bring the output back, and fold its [!] findings into the
-#     Priv-Esc tab for that host:
+#     Priv-Esc tab for that host. The sweep ends with a "How to exploit" runbook
+#     tailored to THAT host's findings (prereq -> command -> confirm -> cleanup,
+#     using existing public tools):
 #       target$  ./recce-enum.sh -o loot.txt          # Linux  (-t self-tests first)
 #       target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
 ./bin/recce      ingest loot.txt -o eng    # matches the host by name (or --host IP)
