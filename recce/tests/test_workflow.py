@@ -1316,6 +1316,26 @@ class IngestCommandTest(unittest.TestCase):
             h = Store(os.path.join(d, "results.sqlite")).get_host("10.0.0.1")
             self.assertEqual(len(h.local_findings), 1)
 
+    def test_exploitation_sheet_lists_confirmed_findings(self):
+        from recce.report_excel import build_workbook
+        import openpyxl
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
+            self._ingest(d, _LOOT_LINUX)      # sudo/suid/shadow -> confirmed
+            from recce.store import Store
+            hosts = Store(os.path.join(d, "results.sqlite")).all_hosts()
+            p = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, p)
+            wb = openpyxl.load_workbook(p)
+            self.assertIn("Exploitation", wb.sheetnames)
+            ws = wb["Exploitation"]
+            hdr = [c.value for c in ws[1]]
+            ti = hdr.index("Existing tool")
+            tools = " ".join(str(r[ti]) for r in ws.iter_rows(min_row=2, values_only=True)
+                             if r[ti])
+            self.assertIn("GTFOBins", tools)      # sudo / SUID findings
+            self.assertGreaterEqual(ws.max_row - 1, 2)
+
     def test_high_signal_findings_promoted_to_vulns(self):
         from recce.store import Store
         with tempfile.TemporaryDirectory() as d:

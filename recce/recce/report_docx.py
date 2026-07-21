@@ -17,6 +17,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from . import playbook as _pb
 from .docx import Document
 from .exploitref import proven_exploit_ref
 from .models import Host, Vuln
@@ -613,6 +614,16 @@ def _walkthrough_steps(f: Finding) -> list[str]:
                 steps.append(f"Proven public exploit available: {proven}. Validate "
                              f"it in a controlled manner within the rules of "
                              f"engagement.")
+        # Priv-esc findings: point at the exact EXISTING tool + command, with the
+        # finding's own values filled in (see the Exploitation sheet). Reference to
+        # vetted tooling, gated to confirmed findings - never for an advisory.
+        evidence = " ".join(o for _i, _p, o in f.evidence)
+        play = _pb.for_text(f"{f.title} {evidence}")
+        if play:
+            steps.append(
+                f"Escalate with existing tooling - {play['tool']}: {play['cmd']} "
+                f"(prerequisite: {play['prereq']}; confirm success by: "
+                f"{play['validate']}).")
 
     return steps
 

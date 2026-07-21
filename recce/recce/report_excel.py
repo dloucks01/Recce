@@ -23,6 +23,7 @@ from typing import Callable
 
 from . import ad
 from . import db as dbmod
+from . import playbook as pb
 from . import privesc as pe
 from . import tracking as tr
 from . import xlsx
@@ -52,7 +53,7 @@ _SEV_STYLE = {
 MONO_COLS = {
     "Port", "Proto", "Version", "CVE / refs", "CWE", "Scope", "CPE",
     "Extra info", "RID", "EDB-ID", "CVEs", "Hosts (ip:port)", "Open ports",
-    "# Vulns", "# Hosts", "Script", "Path", "SPN",
+    "# Vulns", "# Hosts", "Script", "Path", "SPN", "Command (fill in your values)",
 }
 
 
@@ -76,6 +77,7 @@ TAB_COLORS = {
     "Checklist": _TAB_WORK, "Services": _TAB_WORK,
     "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND,
     "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
+    "Exploitation": _TAB_FIND,
     "Services by Product": _TAB_INV, "Databases": _TAB_INV,
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
     "Raw NSE": _TAB_RAW,
@@ -367,6 +369,26 @@ def _spec_privesc(hosts: list[Host]) -> SheetSpec:
     return SheetSpec("Priv-Esc", cols, rows, _styler_privesc, skip_if_empty=True)
 
 
+def _spec_exploitation(hosts: list[Host]) -> SheetSpec:
+    """The finding -> run-this bridge: each CONFIRMED privesc finding mapped to the
+    exact EXISTING public tool, the command (with the finding's values filled in),
+    prerequisites, and how to validate. References vetted tools - not generated
+    exploit code. Empty (sheet skipped) until there are confirmed findings."""
+    cols = [
+        ("Done", "checkbox", 9), ("IP", "data", 15), ("Hostname", "data", 18),
+        ("Finding", "data", 34), ("Existing tool", "data", 34),
+        ("Command (fill in your values)", "data", 60),
+        ("Prerequisite", "data", 34), ("Validate", "data", 26),
+        ("Notes", "notes", 24), ("Key", "key", 4),
+    ]
+    rows = [{"key": e["key"], "data": {
+        "IP": e["ip"], "Hostname": e["hostname"], "Finding": e["finding"],
+        "Existing tool": e["tool"], "Command (fill in your values)": e["cmd"],
+        "Prerequisite": e["prereq"], "Validate": e["validate"]}}
+        for e in pb.all_entries(hosts)]
+    return SheetSpec("Exploitation", cols, rows, skip_if_empty=True)
+
+
 def _spec_quick_wins(hosts: list[Host]) -> SheetSpec:
     cols = [
         ("Checked", "checkbox", 9), ("Category", "data", 20), ("Target", "data", 34),
@@ -617,6 +639,9 @@ def _build_guide(wb, meta: dict) -> None:
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
         ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
+        ("Exploitation", "Each confirmed priv-esc finding mapped to the exact "
+                         "existing tool + command (your values filled in) + how "
+                         "to validate. References vetted tools, not new exploits."),
         ("Raw NSE", "All raw NSE script output, verbatim (Scope = host or port) - "
                     "the evidence behind the parsed sheets; grouped by host."),
     ]:
@@ -1034,7 +1059,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
             _spec_exploits(hosts), _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
            [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts),
-            _spec_raw_nse(hosts)]
+            _spec_exploitation(hosts), _spec_raw_nse(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
