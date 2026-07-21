@@ -100,6 +100,12 @@ scripts, OS); grepable (`-oG`) gives hosts + open ports + service/version. From
 there, every other phase (`vulns`, `db`, `credenum`, `writeups`, …) works exactly
 as if recce had done the scan itself.
 
+**Import as many scans as you like** — a single IP, a range, one subnet, or many
+— into the same engagement. New hosts are **appended** and grouped by subnet; a
+host seen in more than one scan is **merged, never duplicated** (its open ports
+are unioned, richer service/version wins). So you can drip-feed scans in as they
+finish, or combine per-subnet scans into one workbook.
+
 ```bash
 # FIRST, on any new box: verify it can run the tool (env + tools + a real
 # localhost self-scan). Do this before every engagement.

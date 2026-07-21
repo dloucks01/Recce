@@ -1258,6 +1258,39 @@ class NmapImportTest(unittest.TestCase):
             self.assertIn("path traversal", titles.lower())
             self.assertTrue(os.path.exists(os.path.join(eng, "enumeration.xlsx")))
 
+    def test_import_appends_subnets_and_merges_overlap(self):
+        # Several scans (different subnets, then an overlapping host) must APPEND
+        # new hosts and MERGE overlaps - never duplicate a host or a port.
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            eng = os.path.join(d, "eng")
+
+            def imp(text):
+                f = os.path.join(d, "s.gnmap")
+                with open(f, "w") as fh:
+                    fh.write(text)
+                a = cli.build_arg_parser().parse_args(["import", f, "-o", eng])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    a.func(a)
+
+            imp("Host: 10.0.10.10 (dc01)\tPorts: 445/open/tcp//microsoft-ds//, "
+                "3389/open/tcp//ms-wbt-server//\tIgnored State: closed\n"
+                "Host: 10.0.10.25 (ws01)\tPorts: 445/open/tcp//microsoft-ds//"
+                "\tIgnored State: closed\n")                       # subnet .10
+            imp("Host: 10.0.20.5 (web01)\tPorts: 22/open/tcp//ssh//OpenSSH 8.2p1/"
+                "\tIgnored State: closed\n")                       # subnet .20 (appended)
+            imp("Host: 10.0.10.10 (dc01)\tPorts: 88/open/tcp//kerberos-sec//, "
+                "445/open/tcp//microsoft-ds//\tIgnored State: closed\n")  # overlap
+            s = Store(os.path.join(eng, "results.sqlite"))
+            hosts = s.all_hosts()
+            self.assertEqual(len(hosts), 3)                        # dc01 not duplicated
+            self.assertEqual({h.subnet for h in hosts},
+                             {"10.0.10.0/24", "10.0.20.0/24"})     # both subnets present
+            dc = s.get_host("10.0.10.10")
+            self.assertEqual(sorted(p.portid for p in dc.open_ports), [88, 445, 3389])
+            s.close()
+
     def test_import_merges_and_preserves_tracking(self):
         from recce import cli
         from recce.store import Store
