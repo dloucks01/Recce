@@ -53,6 +53,15 @@ All notable changes to recce are documented here. Dates are UTC.
   in-workbook troubleshooting section on the **Runbook** tab.
 
 ### Changed
+- **Ping-blocking networks no longer come back empty.** Discovery now auto-falls
+  back to `-Pn` (scan every target as up) when **zero** hosts answer the sweep,
+  and hints to use `-Pn` when some don't respond. Added a `-Pn` alias for
+  `--no-discovery` (matches nmap). This was the #1 real-engagement pain point:
+  firewalled / Windows / AD hosts block ping and were being skipped.
+- **Friendlier first run.** Bare `recce` (no subcommand) prints a short quickstart
+  instead of an argparse error; `enum`/`vulns` end with an explicit copy-paste
+  `Next:` command.
+
 - Deeper scanning by default: a curated `_VULN_DETECT` set (ms17-010, heartbleed,
   vsftpd backdoor, …) always layers into the vuln pass, since the bare
   `vuln and safe` category misses these.

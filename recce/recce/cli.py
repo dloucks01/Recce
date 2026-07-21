@@ -402,10 +402,26 @@ def _discover(args, profile, store, paths):
                 _record_issues(store, paths, "(discovery)", [_mkissue(iss, "discovery")])
             live_ips = [h.ip for h in np.parse_nmap_xml(disc_xml)]
             os.unlink(targets_file)
-            print(f"[+] {len(live_ips)} live host(s) found.")
+            print(f"[+] {len(live_ips)} of {len(hosts)} target(s) responded to discovery.")
+            if not live_ips:
+                # Zero responses almost always means the network blocks ping/probes,
+                # not that nothing is there. Don't hand back an empty engagement -
+                # fall back to -Pn (scan every target as up) automatically.
+                print("\n" + "!" * 64)
+                print("[!] 0 hosts answered host discovery - the network is likely "
+                      "blocking ping/probes.")
+                print("    Falling back to -Pn (scanning all targets as up) so you "
+                      "don't miss firewalled hosts.")
+                print("!" * 64)
+                live_ips = hosts
+            elif len(live_ips) < len(hosts):
+                missed = len(hosts) - len(live_ips)
+                print(f"    ({missed} didn't answer. If you expect more live hosts, "
+                      "re-run with -Pn - firewalled hosts often block ping.)")
         else:
             live_ips = hosts
-            print("[*] Discovery skipped (treating all targets as up).")
+            print(f"[*] -Pn: skipping discovery, scanning all {len(hosts)} target(s) "
+                  "as up.")
 
     if getattr(args, "resume", False):
         done = store.scanned_ips()
@@ -884,7 +900,9 @@ def cmd_enum(args: argparse.Namespace) -> int:
     finally:
         _final_report(store, paths, args.title)
         store.close()
-    print("\n[+] Enumeration done. Review the sheet, then run `vulns` on open ports.")
+    print(f"\n[+] Enumeration done -> {paths['xlsx']}")
+    print(f"    Next:  recce vulns -o {args.output_dir}     "
+          "# vuln-scan the open ports it found")
     return 0
 
 
@@ -906,7 +924,9 @@ def cmd_vulns(args: argparse.Namespace) -> int:
     finally:
         _final_report(store, paths, title)
         store.close()
-    print("\n[+] Vuln scan done.")
+    print("\n[+] Vuln scan done -> open the Vulnerabilities / Exploitation tabs.")
+    print(f"    Next:  recce status -o {args.output_dir}      # what's left, and the "
+          "suggested next step")
     return 0
 
 
@@ -1679,8 +1699,10 @@ def _add_discovery(pp) -> None:
     pp.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
     pp.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
     pp.add_argument("--min-rate", type=int, help="nmap --min-rate override")
-    pp.add_argument("--no-discovery", action="store_true",
-                    help="skip ping sweep; treat all targets as up (-Pn)")
+    pp.add_argument("-Pn", "--no-discovery", action="store_true", dest="no_discovery",
+                    help="skip the ping sweep and scan every target as if up (like "
+                         "nmap -Pn). Use this when hosts block ping - common on "
+                         "firewalled / Windows / AD networks.")
     pp.add_argument("--no-ad", action="store_true", help="skip SMB/LDAP AD scripts")
     pp.add_argument("--no-os", action="store_true", help="skip OS detection")
     pp.add_argument("--version-all", action="store_true",
@@ -1724,7 +1746,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-V", "--version", action="version",
                    version=f"recce {__version__}")
-    sub = p.add_subparsers(dest="command", required=True, metavar="<command>")
+    sub = p.add_subparsers(dest="command", required=False, metavar="<command>")
 
     # Phase 1: fast enumeration -> sheet.
     e = sub.add_parser("enum", help="discover hosts, scan ports, ID services -> sheet")
@@ -1873,8 +1895,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+_QUICKSTART = r"""
+recce - phased enumeration & reporting. You mostly need three commands:
+
+  1.  recce doctor                         check this box can run everything
+  2.  recce enum   <targets> -o eng        find hosts, ports, services -> workbook
+  3.  recce vulns  -o eng                   vuln-scan what enum found
+
+Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options)
+and, when you want more depth, run any of:
+      recce db -o eng · privesc -o eng · credenum -u USER -p PASS -d DOMAIN -o eng
+      recce writeups -o eng · recce status -o eng
+
+Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
+
+Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
+Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.
+Run scans with sudo for SYN + OS detection.  `recce <command> -h` for options.
+"""
+
+
+def _print_quickstart() -> int:
+    print(BANNER)
+    print(_QUICKSTART)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    if getattr(args, "command", None) is None:
+        # Bare `recce` (no subcommand): a friendly quickstart beats an argparse error.
+        return _print_quickstart()
     try:
         return args.func(args)
     except KeyboardInterrupt:

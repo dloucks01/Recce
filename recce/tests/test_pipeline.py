@@ -1147,6 +1147,7 @@ class RobustnessTest(unittest.TestCase):
         class _P:
             def parse_args(self, _a):
                 ns = argparse.Namespace()
+                ns.command = "boom"      # non-None so main() dispatches to func
                 ns.func = boom
                 return ns
 

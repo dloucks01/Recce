@@ -40,6 +40,8 @@ cd recce
 ```bash
 # 1) Fast enumeration -> fills the sheet (hosts, ports, services)
 sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
+#    Hosts blocking ping (firewalled / Windows / AD)? add -Pn to scan all as up:
+#    sudo ./bin/recce enum 10.0.10.0/24 -Pn -o eng
 #    ...or, if you ALREADY have an nmap scan, skip enum and import it:
 #    ./bin/recce import scan.xml -o eng      # -oX XML (best), -oG .gnmap, dir, or glob
 
@@ -152,7 +154,7 @@ pipeline on this box. The usual snags:
 |---|---|
 | `nmap ... not found` | Install nmap — the only hard requirement. |
 | "Not running as root" / weak scan | Run with `sudo`; use `sudo ./bin/recce ...` so PATH survives sudo. |
-| Discovery finds no hosts | A firewall drops pings — re-run `enum` with `--no-discovery` (`-Pn`). |
+| Hosts show zero ports / few live | They block ping — add **`-Pn`** to `enum`/`scan` (scan all as up). recce also auto-falls-back to `-Pn` if discovery gets zero responses. |
 | Too slow | `--fast`, `--workers N`, `vulns --fast`, `--profile quick`, `--host-timeout`. |
 | Crashed / interrupted | Re-run with `--resume`, or `report -o eng`. `RECCE_DEBUG=1` for the traceback. |
 | "No open ports match" on `vulns` | Run `enum` first; `--unscanned` finds nothing once all is scanned. |

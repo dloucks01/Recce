@@ -1069,6 +1069,67 @@ class TargetingFormE2ETest(unittest.TestCase):
         self.assertEqual(self._run_vulns([]), self.ALL)
 
 
+class UsabilityAndDiscoveryTest(unittest.TestCase):
+    def test_pn_alias_parses(self):
+        from recce import cli
+        for argv in (["enum", "10.0.0.0/24", "-Pn"],
+                     ["enum", "10.0.0.0/24", "--no-discovery"],
+                     ["scan", "10.0.0.5", "-Pn"]):
+            self.assertTrue(cli.build_arg_parser().parse_args(argv).no_discovery, argv)
+
+    def test_bare_recce_prints_quickstart_not_error(self):
+        from recce import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main([])
+        self.assertEqual(rc, 0)                        # no argparse error exit
+        out = buf.getvalue()
+        self.assertIn("recce enum", out)
+        self.assertIn("-Pn", out)                      # the ping-blocking hint
+
+    def test_zero_discovery_auto_falls_back_to_pn(self):
+        # The killer field bug: hosts that block ping got dropped -> zero ports.
+        # Now 0 discovery responses must auto-fall-back to scanning all as up.
+        from recce import cli
+        import recce.scanner as s
+        from recce.store import Store
+
+        def empty_disc(tf, out):
+            with open(out, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun></nmaprun>')
+            return out, None
+
+        def fps(ip, out, profile):
+            with open(out, "w") as fh:
+                fh.write(f'<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                         f'<address addr="{ip}" addrtype="ipv4"/><ports><port '
+                         f'protocol="tcp" portid="445"><state state="open"/>'
+                         f'<service name="microsoft-ds"/></port></ports></host></nmaprun>')
+            return out, None
+
+        def enum(ip, ports, out, profile, creds=None):
+            return fps(ip, out, profile)
+
+        saved = (s.check_environment, s.discover_hosts, s.full_port_scan, s.enum_scan)
+        s.check_environment = lambda p: []
+        s.discover_hosts, s.full_port_scan, s.enum_scan = empty_disc, fps, enum
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["enum", "10.0.10.10", "10.0.10.11",
+                                   "-o", d, "--workers", "1"])
+                self.assertEqual(rc, 0)
+                self.assertIn("Falling back to -Pn", buf.getvalue())
+                hosts = Store(os.path.join(d, "results.sqlite")).all_hosts()
+                # Both ping-blocking hosts still got enumerated with their ports.
+                self.assertEqual(len(hosts), 2)
+                self.assertTrue(all(h.open_ports for h in hosts))
+        finally:
+            (s.check_environment, s.discover_hosts,
+             s.full_port_scan, s.enum_scan) = saved
+
+
 class PhaseIdempotencyTest(unittest.TestCase):
     """Re-running a phase must NOT duplicate rows. Guards the core store-merge
     contract: hosts/vulns/accounts/exploits/issues dedupe on re-scan."""
