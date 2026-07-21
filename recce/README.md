@@ -338,6 +338,24 @@ recce ingest loot.txt -o eng          # matches the host by name (or --host IP)
 `ingest` needs no tools or network — it parses text recce itself produced. Findings
 land as rows tagged **on-target finding** at the top of the host's Priv-Esc section.
 
+### Exploitation playbook (the *Exploitation* sheet)
+
+For every **confirmed** priv-esc finding, recce builds a row on the
+**Exploitation** sheet that turns the finding into an actionable next step using
+**existing, published tools** — it does not generate exploit code. Each row gives:
+
+- the **exact existing tool** (GodPotato / PrintSpoofer for `SeImpersonate`,
+  PowerUp for a writable service, `gpp-decrypt` for a GPP cpassword, `reg save` +
+  impacket-secretsdump for `SeBackupPrivilege`, GTFOBins for sudo/SUID,
+  `openssl` for a writable `/etc/passwd`, the public PwnKit / Dirty Pipe PoCs, …),
+- the **precise command with the finding's own values filled in** (the service
+  name, the writable path, the SUID binary),
+- the **prerequisite** and a **validation step** to confirm it worked.
+
+Only confirmed findings get an entry — advisories / unconfirmed version matches
+never get a "run this" line, matching the proven-exploit gating. The same guidance
+appears in each finding's Word write-up as an *Escalate with existing tooling* step.
+
 ## Credentialed enumeration (`credenum`)
 
 Once you have valid creds, `credenum` runs the *authenticated* checks nmap can't
@@ -563,7 +581,7 @@ are color-flagged).
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) |
@@ -669,6 +687,7 @@ recce/               the package (python -m recce)
   privesc.py         Windows/Linux priv-esc findings + playbook knowledge base
   credenum.py        credentialed enum via netexec / impacket / ssh (tool-gated)
   ingest.py          on-target loot -> Priv-Esc rows + promoted Vulnerabilities
+  playbook.py        confirmed finding -> exact existing tool + command + validate
   screenshot.py      optional headless-browser web screenshots (tool-gated)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)
   docx.py            standard-library .docx writer (no python-docx) + image embed
