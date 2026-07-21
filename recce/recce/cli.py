@@ -1321,6 +1321,97 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_scan_files(paths: list[str]) -> list[str]:
+    """Expand files / directories / globs into a list of nmap scan files. When a
+    scan was written with -oA (base.xml + base.gnmap), prefer the richer .xml and
+    drop the same-basename .gnmap so a scan isn't imported twice."""
+    import glob
+    found: list[str] = []
+    for p in paths:
+        if os.path.isdir(p):
+            for pat in ("*.xml", "*.gnmap", "*.grep"):
+                found += sorted(glob.glob(os.path.join(p, pat)))
+        elif os.path.exists(p):
+            found.append(p)
+        else:
+            found += sorted(glob.glob(p))          # maybe a glob pattern
+    xml_bases = {os.path.splitext(f)[0] for f in found if f.lower().endswith(".xml")}
+    out: list[str] = []
+    for f in found:
+        if f.lower().endswith((".gnmap", ".grep")) and os.path.splitext(f)[0] in xml_bases:
+            continue
+        if f not in out:
+            out.append(f)
+    return out
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """Import an already-completed nmap scan (XML -oX or grepable -oG) and build /
+    update the workbook - no scanning, no network. Folds hosts into the datastore,
+    runs the offline enrichment (version->CVE, AD roles, SMB signing), sets the
+    checkmarks, and preserves any existing tracking."""
+    from . import vulndb
+    files = _collect_scan_files(args.files)
+    if not files:
+        print("[x] No nmap scan files found. Point at .xml (-oX) or .gnmap (-oG) "
+              "files, a directory, or a glob.")
+        return 1
+    parsed: list[Host] = []
+    for f in files:
+        hs = np.parse_nmap_file(f)
+        print(f"    {os.path.basename(f)}: {len(hs)} host(s)")
+        parsed.extend(hs)
+    if not parsed:
+        print("[x] Nothing parsed. Use nmap XML (-oX) or grepable (-oG) output - "
+              "the normal (-oN) text format can't be parsed reliably.")
+        return 1
+
+    paths = _open_paths(args.output_dir)
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)          # honour existing ticks first
+    if not store.get_meta("engagement"):
+        store.set_meta("engagement", args.title)
+
+    by_ip: dict[str, list[Host]] = {}
+    for h in parsed:
+        by_ip.setdefault(h.ip, []).append(h)
+    use_ss = getattr(args, "searchsploit", False) and exploits.available()
+    enum_only = getattr(args, "enum_only", False)
+    n_hosts = n_ports = n_findings = n_scanned = 0
+    for ip, group in by_ip.items():
+        subnet = ".".join(ip.split(".")[:3]) + ".0/24" if ip.count(".") == 3 else ""
+        host = _fold_host(ip, group, {ip: subnet})
+        host.enumerated = True
+        if not enum_only:
+            for p in host.ports:                  # scan ran scripts here -> vuln step done
+                if p.scripts and not p.vuln_scanned:
+                    p.vuln_scanned = True
+                    n_scanned += 1
+        ad.identify_roles(host)
+        ad.parse_signing_and_ntlm(host)
+        vulndb.assess_host_inplace(host)          # offline version->CVE/CWE findings
+        if use_ss:
+            exploits.enrich_hosts([host])
+        store.upsert_host(host)                    # merges with existing (tracking kept)
+        n_hosts += 1
+        n_ports += len(host.open_ports)
+        n_findings += len(host.vulns)
+
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print(f"\n[+] Imported {n_hosts} host(s) / {n_ports} open port(s) from "
+          f"{len(files)} file(s): {n_findings} offline finding(s), "
+          f"{n_scanned} port(s) marked vuln-scanned (had NSE output).")
+    print("    Checklist 'Enumerated'"
+          + ("" if enum_only else " + 'Vuln-scan' (where scripts ran)")
+          + " are ticked. Run `vulns` to add recce's deeper detection, or "
+          "`status` to see what's left.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -1730,6 +1821,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ing.add_argument("-o", "--output-dir", default="engagement")
     ing.add_argument("--title", default="Recce Engagement")
     ing.set_defaults(func=cmd_ingest)
+
+    # Import an existing nmap scan (XML / grepable) -> workbook, no scanning.
+    imp = sub.add_parser("import",
+                         help="import an existing nmap scan (-oX XML / -oG grepable) -> sheet")
+    imp.add_argument("files", nargs="+",
+                     help="nmap .xml / .gnmap file(s), a directory, or a glob")
+    imp.add_argument("-o", "--output-dir", default="engagement")
+    imp.add_argument("--title", default="Recce Engagement",
+                     help="engagement title (only used when starting a fresh datastore)")
+    imp.add_argument("--enum-only", action="store_true",
+                     help="mark hosts enumerated only; don't auto-mark ports vuln-scanned "
+                          "even if the imported scan ran NSE scripts")
+    imp.add_argument("--searchsploit", action="store_true",
+                     help="also map exploits via searchsploit (needs the tool)")
+    imp.set_defaults(func=cmd_import)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")

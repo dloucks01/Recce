@@ -84,6 +84,22 @@ that — `db`, `privesc`, `credenum`, `ingest`, `writeups` — is an **optional
 deeper phase** you run on whatever subset you like, whenever you like. Each phase
 is separate and re-runnable (re-running never duplicates anything).
 
+**Already have an nmap scan?** Skip `enum` and `import` it — no scanning needed:
+
+```bash
+recce import scan.xml -o eng          # nmap -oX output (richest)
+recce import scan.gnmap -o eng        # nmap -oG grepable
+recce import scans/ -o eng            # a whole directory (or a glob)
+```
+
+`import` folds the hosts into the workbook, runs the same offline enrichment as
+`enum` (version→CVE/CWE database, AD role/DC identification, SMB signing), ticks
+**Enumerated** (and **Vuln-scan** where the scan ran NSE scripts), and preserves
+any ticks/notes already in the sheet. XML (`-oX`) carries the most (services, NSE
+scripts, OS); grepable (`-oG`) gives hosts + open ports + service/version. From
+there, every other phase (`vulns`, `db`, `credenum`, `writeups`, …) works exactly
+as if recce had done the scan itself.
+
 ```bash
 # FIRST, on any new box: verify it can run the tool (env + tools + a real
 # localhost self-scan). Do this before every engagement.
@@ -621,6 +637,7 @@ Every command takes targets as a single IP, several IPs, a range
 |---|---|---|
 | `doctor` | Verify the box (env + tools + real localhost self-scan) | `--no-self-scan` |
 | `demo` | Build reports from a bundled sample scan (no network) | — |
+| `import <files>` | Import an **existing** nmap scan (`-oX` XML / `-oG` grepable) → workbook, no scanning | `--enum-only`, `--searchsploit` |
 | `enum <targets>` | Discover hosts, port sweep, service/OS/AD enum → sheet | `--fast` (masscan), `--all-ports`, `--top-ports N`, `--no-discovery`, `--no-ad`, `--no-os`, `--version-all`, `--version-intensity 0-9`, `--min-rate`, `--exclude`, `--resume` |
 | `vulns [targets]` | Vuln-scan open ports (safe detection + offline CVE/CWE DB + probes) | `--fast` (top-signal + progress/ETA), `--aggressive` (full NSE), `--only SVC`, `--unscanned`, `--offline`, `--no-searchsploit`, `--no-probes`, `--udp-top N` |
 | `scan <targets>` | `enum` then `vulns` in one shot | all of enum + vulns (`--fast` = fast sweep *and* fast vulns) |

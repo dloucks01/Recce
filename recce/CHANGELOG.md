@@ -5,6 +5,12 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **`import` command** — build (or update) the workbook from an **already-completed
+  nmap scan** with no scanning: `recce import scan.xml -o eng` (XML `-oX`, grepable
+  `-oG` .gnmap, a directory, or a glob). Folds hosts into the datastore, runs the
+  same offline enrichment as `enum` (version→CVE/CWE, AD role/DC ID, SMB signing),
+  ticks Enumerated (+ Vuln-scan where the scan ran NSE scripts), and preserves any
+  existing ticks/notes. New `parser.parse_gnmap` / `parser.parse_nmap_file`.
 - **Exploitation playbook** — a new **Exploitation** workbook sheet (and an
   *Escalate with existing tooling* step in each write-up) that maps every
   confirmed priv-esc finding to the exact **existing** public tool, the command

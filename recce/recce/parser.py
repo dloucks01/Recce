@@ -325,3 +325,88 @@ def parse_nmap_xml(path: str) -> list[Host]:
         hosts.append(host)
 
     return hosts
+
+
+def _split_product_version(s: str) -> tuple[str, str]:
+    """gnmap merges product+version+extra into one field, e.g.
+    'OpenSSH 8.2p1 Ubuntu 4ubuntu0.1' -> ('OpenSSH', '8.2p1'). The version is the
+    first token that starts with a digit; everything before it is the product."""
+    s = s.strip()
+    if not s:
+        return "", ""
+    toks = s.split()
+    for i, t in enumerate(toks):
+        if t[0].isdigit():
+            return " ".join(toks[:i]), t
+    return s, ""
+
+
+def parse_gnmap(path: str) -> list[Host]:
+    """Parse nmap grepable output (-oG / .gnmap) into Host objects.
+
+    Grepable output carries host + open ports + service + version (when -sV was
+    used) but NO NSE scripts or structured OS match - so it feeds enumeration and
+    the offline version->CVE engine, just with less fidelity than XML. Prefer XML
+    (-oX) when you have it. Never raises."""
+    try:
+        with open(path, "r", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    hosts: dict[str, Host] = {}
+    for line in lines:
+        line = line.rstrip("\n")
+        m = re.match(r"Host:\s+(\S+)\s+\(([^)]*)\)", line)
+        if not m:
+            continue
+        ip, hostname = m.group(1), m.group(2)
+        host = hosts.get(ip)
+        if host is None:
+            host = Host(ip=ip, state="up")
+            hosts[ip] = host
+        if hostname and hostname not in host.hostnames:
+            host.hostnames.append(hostname)
+        pm = re.search(r"Ports:\s*(.+?)(?:\tIgnored State:|$)", line)
+        if pm:
+            for entry in pm.group(1).split(","):
+                fields = entry.strip().split("/")
+                if len(fields) < 3 or not fields[0].isdigit():
+                    continue
+                if "open" not in fields[1]:
+                    continue
+                portid, proto = int(fields[0]), (fields[2] or "tcp")
+                if any(p.portid == portid and p.protocol == proto for p in host.ports):
+                    continue
+                service = fields[4] if len(fields) > 4 else ""
+                product, version = _split_product_version(
+                    fields[6] if len(fields) > 6 else "")
+                host.ports.append(Port(portid=portid, protocol=proto, state="open",
+                                       service=service, product=product, version=version))
+        om = re.search(r"\bOS:\s*([^\t]+)", line)
+        if om and not host.os_name:
+            host.os_name = om.group(1).strip()
+            low = host.os_name.lower()
+            host.os_family = ("Windows" if "windows" in low else
+                              "Linux" if ("linux" in low or "unix" in low) else "")
+    return list(hosts.values())
+
+
+def parse_nmap_file(path: str) -> list[Host]:
+    """Parse an already-completed nmap scan, auto-detecting the format: XML (-oX)
+    or grepable (-oG). Sniffs content when the extension is ambiguous. Returns []
+    for an unreadable file or the normal (-oN) text format (unparseable)."""
+    low = path.lower()
+    if low.endswith(".xml"):
+        return parse_nmap_xml(path)
+    if low.endswith((".gnmap", ".grep")):
+        return parse_gnmap(path)
+    try:
+        with open(path, "r", errors="replace") as fh:
+            head = fh.read(2048)
+    except OSError:
+        return []
+    if "<nmaprun" in head or head.lstrip().startswith("<?xml"):
+        return parse_nmap_xml(path)
+    if re.search(r"^Host:\s+\S+\s+\(", head, re.M):
+        return parse_gnmap(path)
+    return []

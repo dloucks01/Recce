@@ -40,6 +40,8 @@ cd recce
 ```bash
 # 1) Fast enumeration -> fills the sheet (hosts, ports, services)
 sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
+#    ...or, if you ALREADY have an nmap scan, skip enum and import it:
+#    ./bin/recce import scan.xml -o eng      # -oX XML (best), -oG .gnmap, dir, or glob
 
 # 2) Open the workbook and start working
 #    eng/enumeration.xlsx  ->  read the "Start Here" tab, then use "Checklist"

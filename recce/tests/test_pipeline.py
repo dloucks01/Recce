@@ -1850,6 +1850,7 @@ class CliSmokeTest(unittest.TestCase):
                      ["credenum", "-u", "a", "-p", "b", "-d", "corp.local"],
                      ["writeups", "--min-severity", "high", "--no-screenshots"],
                      ["ingest", "loot.txt", "--host", "1.2.3.4"],
+                     ["import", "scan.xml", "-o", "eng"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
                      ["demo"], ["doctor", "--no-self-scan"]):
             ns = p.parse_args(argv)

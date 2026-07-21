@@ -1187,6 +1187,106 @@ recce-enum  host=DBSRV01  user=svc_sql  07/20/2026 12:00:00
 """
 
 
+_GNMAP = ("# Nmap 7.94 scan initiated\n"
+          "Host: 10.0.20.6 (web02)\tStatus: Up\n"
+          "Host: 10.0.20.6 (web02)\tPorts: 21/open/tcp//ftp//vsftpd 2.3.4/, "
+          "22/open/tcp//ssh//OpenSSH 7.4/, 80/open/tcp//http//Apache httpd 2.4.49/"
+          "\tIgnored State: closed (997)\n"
+          "Host: 10.0.20.6 (web02)\tOS: Linux 5.4\n")
+
+
+class NmapImportTest(unittest.TestCase):
+    def test_split_product_version(self):
+        from recce.parser import _split_product_version
+        self.assertEqual(_split_product_version("OpenSSH 8.2p1 Ubuntu"),
+                         ("OpenSSH", "8.2p1"))
+        self.assertEqual(_split_product_version("Apache httpd 2.4.49"),
+                         ("Apache httpd", "2.4.49"))
+        self.assertEqual(_split_product_version("Microsoft Windows RPC"),
+                         ("Microsoft Windows RPC", ""))
+
+    def test_parse_gnmap(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.gnmap")
+            with open(f, "w") as fh:
+                fh.write(_GNMAP)
+            hosts = parser.parse_gnmap(f)
+            self.assertEqual(len(hosts), 1)
+            h = hosts[0]
+            self.assertEqual(h.ip, "10.0.20.6")
+            self.assertIn("web02", h.hostnames)
+            self.assertEqual({p.portid for p in h.ports}, {21, 22, 80})
+            ftp = next(p for p in h.ports if p.portid == 21)
+            self.assertEqual(ftp.product, "vsftpd")
+            self.assertEqual(ftp.version, "2.3.4")
+            self.assertEqual(h.os_family, "Linux")
+
+    def test_parse_nmap_file_autodetects(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            g = os.path.join(d, "noext_grep")
+            with open(g, "w") as fh:
+                fh.write(_GNMAP)
+            self.assertTrue(parser.parse_nmap_file(g))     # sniffed as gnmap
+            x = os.path.join(d, "s.xml")
+            with open(x, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                         '<address addr="1.2.3.4" addrtype="ipv4"/><ports>'
+                         '<port protocol="tcp" portid="80"><state state="open"/>'
+                         '<service name="http"/></port></ports></host></nmaprun>')
+            self.assertEqual(parser.parse_nmap_file(x)[0].ip, "1.2.3.4")
+
+    def test_import_builds_workbook_with_checkmarks_and_findings(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.gnmap")
+            with open(f, "w") as fh:
+                fh.write(_GNMAP)
+            eng = os.path.join(d, "eng")
+            argv = ["import", f, "-o", eng, "--title", "T"]
+            args = cli.build_arg_parser().parse_args(argv)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(args.func(args), 0)
+            h = Store(os.path.join(eng, "results.sqlite")).get_host("10.0.20.6")
+            self.assertTrue(h.enumerated)                  # checkmark set
+            self.assertEqual(len(h.open_ports), 3)
+            # offline version->CVE engine fired on the imported versions
+            titles = " ".join(v.title for v in h.vulns)
+            self.assertIn("vsftpd 2.3.4 backdoor", titles)
+            self.assertIn("path traversal", titles.lower())
+            self.assertTrue(os.path.exists(os.path.join(eng, "enumeration.xlsx")))
+
+    def test_import_merges_and_preserves_tracking(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.gnmap")
+            with open(f, "w") as fh:
+                fh.write(_GNMAP)
+            eng = os.path.join(d, "eng")
+            def run():
+                a = cli.build_arg_parser().parse_args(["import", f, "-o", eng])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    a.func(a)
+            run()
+            # Tick via the `review` command (writes tracking AND regenerates the
+            # workbook, the real path a tester's edits take).
+            rv = cli.build_arg_parser().parse_args(
+                ["review", "--host", "10.0.20.6", "--note", "manually reviewed",
+                 "-o", eng])
+            with contextlib.redirect_stdout(io.StringIO()):
+                rv.func(rv)
+            run()                                          # re-import same scan
+            s = Store(os.path.join(eng, "results.sqlite"))
+            h = s.get_host("10.0.20.6")
+            self.assertEqual(len(h.open_ports), 3)         # not duplicated
+            self.assertEqual(s.get_tracking().get("host:10.0.20.6"),
+                             (True, "manually reviewed"))  # tick preserved
+            s.close()
+
+
 class IngestParserTest(unittest.TestCase):
     def test_parse_findings_and_skip_howto(self):
         from recce import ingest
