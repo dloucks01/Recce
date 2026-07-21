@@ -5,6 +5,14 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **Exploitation playbook** — a new **Exploitation** workbook sheet (and an
+  *Escalate with existing tooling* step in each write-up) that maps every
+  confirmed priv-esc finding to the exact **existing** public tool, the command
+  with the finding's own values filled in, prerequisites, and a validation step.
+  References vetted tooling (Metasploit, PowerUp, the Potato family, impacket,
+  GTFOBins, gpp-decrypt, public PoCs) — it does not generate exploit code. Gated
+  to confirmed findings. Expanded the curated proven-exploit + NSE→CVE references
+  for Windows (MS08-067, EternalBlue set, SMBGhost, ZeroLogon, MS14-068, …).
 - **Runbook** workbook tab — a step-by-step "what to type" for every phase and
   the options that matter, so the workbook is self-serve.
 - **`vulns --fast`** — a top-signal detection tier (skips the broad

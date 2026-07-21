@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from recce import ad, exploits, parser, scanner
 from recce import tracking as tr
 from recce import xlsx
-from recce.models import Account, Host, Port, Script
+from recce.models import Account, Host, Port, Script, Vuln
 from recce.report_excel import (build_workbook, read_workbook_tracking,
                                        update_workbook)
 from recce.store import Store
@@ -1925,6 +1925,54 @@ class StoreTrackingTest(unittest.TestCase):
             store.close()
 
 
+class PlaybookTest(unittest.TestCase):
+    def test_windows_seimpersonate_maps_to_potato(self):
+        from recce import playbook
+        e = playbook.for_text("Token holds SeImpersonate -> SYSTEM", "Windows")
+        self.assertIsNotNone(e)
+        self.assertIn("GodPotato", e["tool"])
+        self.assertIn("whoami", e["cmd"].lower())
+        self.assertIn("SYSTEM", e["validate"])
+
+    def test_finding_values_are_substituted_into_command(self):
+        from recce import playbook
+        # the SUID binary path from the finding is filled into the command
+        e = playbook.for_text("SUID /usr/bin/find - GTFOBins escalation candidate",
+                              "Linux")
+        self.assertIn("/usr/bin/find", e["cmd"])
+        # unquoted service path is extracted too
+        e2 = playbook.for_text(
+            r"Unquoted service path with a writable parent: C:\Program Files\X\s.exe",
+            "Windows")
+        self.assertIn(r"C:\Program Files\X\s.exe", e2["cmd"])
+
+    def test_no_match_returns_none(self):
+        from recce import playbook
+        self.assertIsNone(playbook.for_text("some benign http banner", "Linux"))
+        self.assertIsNone(playbook.for_text("", ""))
+
+    def test_confirmed_only_advisories_excluded(self):
+        # A 'potential' advisory vuln must NOT get an exploitation entry, even if
+        # its text would otherwise match.
+        from recce import playbook
+        h = Host(ip="10.0.0.5", os_family="Windows", vulns=[
+            Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="adv",
+                 title="SeImpersonate advisory", severity="high",
+                 source="version-db", confidence="potential")])
+        self.assertEqual(playbook.host_entries(h), [])
+        h.vulns[0].confidence = "confirmed"
+        self.assertEqual(len(playbook.host_entries(h)), 1)
+
+    def test_linux_writable_service_unit_does_not_get_windows_command(self):
+        # OS-distinct matching: a Linux systemd 'writable service unit' finding
+        # must not resolve to the Windows sc-config play.
+        from recce import playbook
+        e = playbook.for_text("Writable service unit: /etc/systemd/system/x.service",
+                              "Linux")
+        if e is not None:
+            self.assertNotIn("sc config", e["cmd"].lower())
+
+
 class ExploitRefTest(unittest.TestCase):
     def test_cve_exact_match(self):
         from recce.exploitref import proven_exploit_ref
@@ -1958,10 +2006,35 @@ class ExploitRefTest(unittest.TestCase):
         self.assertEqual(proven_exploit_ref(["CVE-2014-0160"]),
                          proven_exploit_ref([], "heartbleed"))
 
+    def test_windows_references_resolve(self):
+        from recce.exploitref import proven_exploit_ref
+        cases = [
+            (["CVE-2008-4250"], "ms08_067"),      # MS08-067
+            (["CVE-2017-0147"], "eternalblue"),   # EternalBlue variant CVE
+            (["CVE-2020-1472"], "zerologon"),     # ZeroLogon (module + PoC)
+            (["CVE-2020-0796"], "smbghost"),      # SMBGhost
+            (["CVE-2014-6324"], "ms14-068"),      # Kerberos PAC
+        ]
+        for cves, needle in cases:
+            self.assertIn(needle, (proven_exploit_ref(cves) or "").lower(), cves)
+
+    def test_token_privilege_maps_to_potato_tools(self):
+        # A confirmed SeImpersonate finding (no CVE) points at the existing Potato
+        # tools - a reference, not generated code.
+        from recce.exploitref import proven_exploit_ref
+        ref = proven_exploit_ref([], "Token holds SeImpersonate -> Potato -> SYSTEM")
+        self.assertIsNotNone(ref)
+        self.assertIn("godpotato", ref.lower())
+        self.assertIn("printspoofer", ref.lower())
+
     def test_keyword_table_values_are_real_exploit_entries(self):
-        # Integrity: every keyword ref must be one of the concrete CVE entries.
-        from recce.exploitref import PROVEN_EXPLOIT, PROVEN_KW
-        self.assertTrue(set(PROVEN_KW.values()) <= set(PROVEN_EXPLOIT.values()))
+        # Integrity: every keyword ref must be a real curated reference - either a
+        # concrete CVE entry, or the (CVE-less) token-privilege Potato reference.
+        # Catches a typo'd/dangling keyword value.
+        from recce.exploitref import PROVEN_EXPLOIT, PROVEN_KW, _POTATO
+        allowed = set(PROVEN_EXPLOIT.values()) | {_POTATO}
+        self.assertTrue(set(PROVEN_KW.values()) <= allowed)
+        self.assertTrue(all(v.strip() for v in PROVEN_KW.values()))
 
 
 if __name__ == "__main__":
