@@ -653,7 +653,7 @@ def _finding_body(doc: Document, f: Finding, fid: str,
     doc.field("Finding ID", fid, mono=True)
     doc.field("Severity", f.severity.upper(), value_color=_SEV_COLOR.get(sev))
     doc.field("Affected systems", ", ".join(
-        f"{ip}:{port}" + (f" ({hn})" if hn else "")
+        (f"{ip}:{port}" if port else ip) + (f" ({hn})" if hn else "")
         for ip, port, hn in f.affected), mono=True)
     doc.field("Vulnerability Type", vtype, placeholder="classify the vulnerability")
     doc.field("CWE Associated", "; ".join(cwe_label(c) for c in f.cwes),
@@ -677,7 +677,7 @@ def _finding_body(doc: Document, f: Finding, fid: str,
 
     doc.heading("Evidence", 2)
     for ip, port, out in f.evidence[:6]:
-        doc.para(f"{ip}:{port}", italic=True)
+        doc.para(f"{ip}:{port}" if port else ip, italic=True)
         doc.mono_block(out if len(out) < 1500 else out[:1500] + " ...")
 
     doc.heading("Technical Walkthrough with screenshots", 2)

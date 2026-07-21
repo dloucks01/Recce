@@ -1938,6 +1938,26 @@ class PlaybookTest(unittest.TestCase):
         self.assertNotIn("None", steps)
         self.assertNotIn("-p ,", steps)
 
+    def test_port_less_finding_writeup_has_no_none(self):
+        # The whole rendered write-up (Affected systems / Evidence / walkthrough)
+        # must never show "ip:None" for a host-level finding.
+        import zipfile
+        from recce.report_docx import build_writeups
+        h = Host(ip="10.0.20.5", os_family="Linux", vulns=[
+            Vuln(ip="10.0.20.5", port=None, protocol="tcp", script_id="local-enum",
+                 title="Sudo misconfiguration -> root", severity="high",
+                 source="local", confidence="confirmed",
+                 output="On-target enum: NOPASSWD sudo entries present")])
+        with tempfile.TemporaryDirectory() as d:
+            build_writeups([h], d, min_severity="low")
+            import glob
+            docs = glob.glob(os.path.join(d, "*.docx"))
+            self.assertTrue(docs)
+            for f in docs:
+                t = zipfile.ZipFile(f).read("word/document.xml").decode("utf-8", "replace")
+                self.assertNotIn(":None", t)
+                self.assertNotIn("-p None", t)
+
     def test_windows_seimpersonate_maps_to_potato(self):
         from recce import playbook
         e = playbook.for_text("Token holds SeImpersonate -> SYSTEM", "Windows")
