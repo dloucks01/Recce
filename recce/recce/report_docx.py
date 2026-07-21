@@ -17,6 +17,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from . import playbook as _pb
 from .docx import Document
 from .exploitref import proven_exploit_ref
 from .models import Host, Vuln
@@ -435,10 +436,16 @@ _NSE_CWE = {
     "rmi-dumpregistry": ["CWE-502"], "snmp-info": ["CWE-200"],
 }
 
-# Famous scripts whose id carries no CVE token - map to the CVE(s) directly.
+# Famous scripts whose id carries no CVE token - map to the CVE(s) directly, so
+# an NSE-only Windows finding still resolves to its published exploit reference.
 _NSE_CVE = {
-    "ms17-010": ["CVE-2017-0144"], "ms08-067": ["CVE-2008-4250"],
-    "ms12-020": ["CVE-2012-0002"], "vsftpd-backdoor": ["CVE-2011-2523"],
+    "ms17-010": ["CVE-2017-0144"], "double-pulsar": ["CVE-2017-0144"],
+    "ms08-067": ["CVE-2008-4250"], "conficker": ["CVE-2008-4250"],
+    "ms12-020": ["CVE-2012-0002"], "ms10-061": ["CVE-2010-2729"],
+    "ms06-025": ["CVE-2006-2370"], "ms07-029": ["CVE-2007-1748"],
+    "ms10-054": ["CVE-2010-2550"], "webexec": ["CVE-2018-15442"],
+    "regsvc-dos": ["CVE-2011-1002"],
+    "vsftpd-backdoor": ["CVE-2011-2523"], "proftpd-backdoor": ["CVE-2010-3867"],
     "shellshock": ["CVE-2014-6271"], "ssl-heartbleed": ["CVE-2014-0160"],
     "ssl-poodle": ["CVE-2014-3566"], "ssl-ccs-injection": ["CVE-2014-0224"],
 }
@@ -607,6 +614,16 @@ def _walkthrough_steps(f: Finding) -> list[str]:
                 steps.append(f"Proven public exploit available: {proven}. Validate "
                              f"it in a controlled manner within the rules of "
                              f"engagement.")
+        # Priv-esc findings: point at the exact EXISTING tool + command, with the
+        # finding's own values filled in (see the Exploitation sheet). Reference to
+        # vetted tooling, gated to confirmed findings - never for an advisory.
+        evidence = " ".join(o for _i, _p, o in f.evidence)
+        play = _pb.for_text(f"{f.title} {evidence}")
+        if play:
+            steps.append(
+                f"Escalate with existing tooling - {play['tool']}: {play['cmd']} "
+                f"(prerequisite: {play['prereq']}; confirm success by: "
+                f"{play['validate']}).")
 
     return steps
 
