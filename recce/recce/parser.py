@@ -322,9 +322,56 @@ def parse_nmap_xml(path: str) -> list[Host]:
                     host.vulns.append(vuln)
                 host.accounts.extend(_accounts_from_host_scripts(ip, script))
 
+        _infer_os(host)
         hosts.append(host)
 
     return hosts
+
+
+def _infer_os(host: Host) -> None:
+    """When nmap ran no OS-detection block, fall back to the OS stated by
+    smb-os-discovery or by service ostype / product fingerprints. Best-effort:
+    os_accuracy stays 0 so it reads as an inference, not a real fingerprint, and
+    a genuine osmatch (which sets os_family) always wins - this only fills a gap.
+    Populates os_family so the Overview counts, the priv-esc playbook, and the
+    OS-gated vuln signatures classify the host instead of treating it as unknown."""
+    if host.os_family:
+        return
+    # 1) smb-os-discovery is authoritative when present.
+    for sc in host.host_scripts:
+        if sc.id != "smb-os-discovery":
+            continue
+        osv = (sc.elements.get("os") if sc.elements else "") or ""
+        if not osv:
+            m = re.search(r"OS:\s*([^;\n]+)", sc.output or "")
+            osv = m.group(1).strip() if m else ""
+        low = osv.lower()
+        if "windows" in low:
+            host.os_name = host.os_name or osv
+            host.os_family = "Windows"
+            return
+        if "linux" in low or "unix" in low:
+            host.os_name = host.os_name or osv
+            host.os_family = "Linux"
+            return
+    # 2) majority ostype across ports, else product/service keywords.
+    win = lin = 0
+    for p in host.ports:
+        ot = (p.ostype or "").lower()
+        if "windows" in ot:
+            win += 1
+        elif "linux" in ot or "unix" in ot:
+            lin += 1
+    if not win and not lin:
+        blob = " ".join(f"{p.service} {p.product}" for p in host.ports).lower()
+        if any(k in blob for k in ("microsoft", "ms-wbt", "netbios-ssn", "microsoft-ds")):
+            win += 1
+        if any(k in blob for k in ("ubuntu", "debian", " linux", "openssh")):
+            lin += 1
+    if win > lin:
+        host.os_family, host.os_name = "Windows", host.os_name or "Windows"
+    elif lin > win:
+        host.os_family, host.os_name = "Linux", host.os_name or "Linux"
 
 
 def _split_product_version(s: str) -> tuple[str, str]:
@@ -388,7 +435,10 @@ def parse_gnmap(path: str) -> list[Host]:
             low = host.os_name.lower()
             host.os_family = ("Windows" if "windows" in low else
                               "Linux" if ("linux" in low or "unix" in low) else "")
-    return list(hosts.values())
+    result = list(hosts.values())
+    for h in result:
+        _infer_os(h)
+    return result
 
 
 _NORMAL_HOST = re.compile(
@@ -437,6 +487,8 @@ def parse_normal(path: str) -> list[Host]:
             low = cur.os_name.lower()
             cur.os_family = ("Windows" if "windows" in low else
                              "Linux" if ("linux" in low or "unix" in low) else "")
+    for h in hosts:
+        _infer_os(h)
     return hosts
 
 
