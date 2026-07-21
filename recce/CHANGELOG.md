@@ -5,6 +5,18 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **Per-service enumeration suite** (`recce/scripts/`) — Kali-side scripts that
+  take a service recce/nmap/masscan found and run the *right* enumeration for it,
+  flagging likely vulns and pointing at the existing tool that acts on each.
+  Covers 25 services (ftp, ssh, telnet, smtp, dns, finger, http, pop/imap,
+  rpc/nfs, msrpc, smb, kerberos, ldap, snmp, mssql, mysql, postgres, rdp, vnc,
+  redis, winrm, mongodb, oracle, ajp, elasticsearch). Read-only / safe by
+  default (banners, versions, anon/null checks, TLS, NSE `safe`, config
+  disclosure); intrusive checks (brute, nikto, dir-bust, user-enum spraying) are
+  gated behind `-a`. A `recce-service.sh from-nmap <scan.xml|.gnmap|.nmap>`
+  driver sweeps an entire scan — one enumeration per open port — and reads all
+  three nmap formats plus masscan/rustscan XML (point it at recce's own
+  `raw/*.xml`). Missing tools self-skip; nothing generates exploit code.
 - **`import` command** — build (or update) the workbook from **already-completed
   nmap scans** with no scanning. Accepts all three nmap formats — XML (`-oX`),
   grepable (`-oG`), and normal text (`-oN`) — plus nmap-compatible XML from tools
@@ -84,6 +96,12 @@ All notable changes to recce are documented here. Dates are UTC.
 - Removed the interactive authorization prompt and the `--yes` flag.
 
 ### Fixed
+- **`recce-enum.sh -o` now captures the COMPLETE run.** Previously only lines
+  that passed through the emit helper reached the report file; raw command dumps
+  (SUID/SGID lists, root processes, sockets, software inventory, interfaces, …)
+  were printed to the terminal but omitted from `report.txt`. The whole run is
+  now teed to the file, so the report matches the screen exactly. Also fixed the
+  bounded secret-grep swallowing its own matches.
 - credenum no longer reports a **missing tool** as an auth `FAIL`, and no longer
   runs `secretsdump` where the bind was rejected/errored.
 - `ingest --host` records the loot hostname; incoming rows dedupe against each

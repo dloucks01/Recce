@@ -33,9 +33,13 @@ while getopts "qo:th" opt; do
   esac
 done
 
-# --- output helpers (no colour if not a TTY, so piped/logged output is clean) ---
-if [ -t 1 ]; then C_H='\033[1;36m'; C_F='\033[1;33m'; C_R='\033[0m'; else C_H=''; C_F=''; C_R=''; fi
-_emit() { if [ -n "$OUT" ]; then printf '%b\n' "$1" | sed 's/\x1b\[[0-9;]*m//g' >>"$OUT"; fi; printf '%b\n' "$1"; }
+# --- output helpers ---
+# Colour only for an interactive terminal AND when NOT also writing a report.
+# With -o the entire run is teed to the file (see main() below), so we keep the
+# output plain everywhere - that captures 100% of it, including raw command
+# dumps, without embedding escape codes in the report.
+if [ -t 1 ] && [ -z "$OUT" ]; then C_H='\033[1;36m'; C_F='\033[1;33m'; C_R='\033[0m'; else C_H=''; C_F=''; C_R=''; fi
+_emit() { printf '%b\n' "$1"; }
 sec()  { _emit ""; _emit "${C_H}==== $* ====${C_R}"; }
 info() { [ "$QUIET" -eq 1 ] || _emit "$*"; }
 find_() { _emit "${C_F}[!] $*${C_R}"; }         # a finding worth attention
@@ -87,7 +91,10 @@ if [ "$SELFTEST" -eq 1 ]; then
   exit 0
 fi
 
-[ -n "$OUT" ] && : >"$OUT"
+# Everything the run prints is produced inside main() so a single tee at the end
+# captures ALL of it in the report - including raw command dumps, not just the
+# lines that pass through _emit. (This fixes the -o "missing output" bug.)
+main() {
 _emit "${C_H}recce-enum${C_R}  host=$(hostname 2>/dev/null)  user=$(id -un 2>/dev/null)  $(date 2>/dev/null)"
 _emit "read-only local enumeration - nothing on this host is modified"
 WHO=$(id -un 2>/dev/null)
@@ -326,8 +333,9 @@ for d in "$HOME/.aws" "$HOME/.config/gcloud" "$HOME/.azure" "$HOME/.kube" "$HOME
 done
 # Grep a bounded set of dirs for obvious secrets (fast, avoids whole-FS scan).
 info "Quick secret grep (bounded):"
-if grep -rniE 'password[[:space:]]*=|api[_-]?key|secret[[:space:]]*=|BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY' \
-  /etc /opt /var/www /srv 2>/dev/null | sed 's/^/    /' | head -30 | grep -q .; then flag SECRETS_FOUND "grep hit in /etc,/opt,/var/www,/srv"; fi
+_sec=$(grep -rniE 'password[[:space:]]*=|api[_-]?key|secret[[:space:]]*=|BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY' \
+  /etc /opt /var/www /srv 2>/dev/null | head -30)
+if [ -n "$_sec" ]; then printf '%s\n' "$_sec" | sed 's/^/    /'; flag SECRETS_FOUND "grep hit in /etc,/opt,/var/www,/srv"; fi
 
 # ============================================================ network
 sec "Network"
@@ -614,5 +622,15 @@ _emit "  line. Nothing here was executed for you."
 
 _emit ""
 _emit "${C_H}Done.${C_R} Review every ${C_F}[!]${C_R} line. Nothing was changed on this host."
-[ -n "$OUT" ] && _emit "Full report written to: $OUT"
+}
+
+# Run. With -o, tee the COMPLETE output (every section and every raw dump) to the
+# report while still streaming it live; without -o, print straight to terminal.
+if [ -n "$OUT" ]; then
+  : >"$OUT"
+  main | tee "$OUT"
+  echo "Full report written to: $OUT"
+else
+  main
+fi
 exit 0

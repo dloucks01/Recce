@@ -53,6 +53,12 @@ sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
 #    stdlib HTTP-header + TLS probes, and searchsploit exploit mapping.
 sudo ./bin/recce vulns -o eng
 
+# 3b) Deep per-service enumeration (SMB shares, HTTP paths/TLS, SNMP walk,
+#     anon FTP/LDAP, Redis unauth, ...). Runs the RIGHT tool per open port and
+#     flags likely vulns. Safe by default; -a adds brute/nikto/dir-busting.
+#     Sweep the whole engagement from recce's own nmap output:
+./scripts/recce-service.sh from-nmap eng/raw/*.xml       # or: smb 10.0.10.5
+
 # 4) Optional deeper phases (any time, on any subset)
 sudo ./bin/recce db -o eng                 # databases
 ./bin/recce      privesc -o eng            # priv-esc playbook
