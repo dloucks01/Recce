@@ -57,7 +57,9 @@ All notable changes to recce are documented here. Dates are UTC.
   back to `-Pn` (scan every target as up) when **zero** hosts answer the sweep,
   and hints to use `-Pn` when some don't respond. Added a `-Pn` alias for
   `--no-discovery` (matches nmap). This was the #1 real-engagement pain point:
-  firewalled / Windows / AD hosts block ping and were being skipped.
+  firewalled / Windows / AD hosts block ping and were being skipped. Under `-Pn`
+  the port sweep **fails fast on dead IPs** (`--max-retries 1`) while the per-host
+  `--host-timeout` cap and `--min-rate` floor keep the run bounded and moving.
 - **Friendlier first run.** Bare `recce` (no subcommand) prints a short quickstart
   instead of an argparse error; `enum`/`vulns` end with an explicit copy-paste
   `Next:` command.

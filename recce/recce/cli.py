@@ -267,6 +267,7 @@ def _apply_profile_overrides(profile, args) -> None:
     if g("version_intensity") is not None:
         profile.version_intensity = args.version_intensity
     profile.ping_discovery = not g("no_discovery", False)
+    profile.assume_up = not profile.ping_discovery   # -Pn: fail-fast on dead IPs
 
 
 def _creds_of(args) -> dict | None:
@@ -412,7 +413,10 @@ def _discover(args, profile, store, paths):
                       "blocking ping/probes.")
                 print("    Falling back to -Pn (scanning all targets as up) so you "
                       "don't miss firewalled hosts.")
+                print(f"    Per-host cap {profile.host_timeout}m + fail-fast keep it "
+                      "moving; for a large scope, --fast (masscan) sweeps in seconds.")
                 print("!" * 64)
+                profile.assume_up = True          # dead IPs get scanned -> fail fast
                 live_ips = hosts
             elif len(live_ips) < len(hosts):
                 missed = len(hosts) - len(live_ips)
@@ -422,6 +426,9 @@ def _discover(args, profile, store, paths):
             live_ips = hosts
             print(f"[*] -Pn: skipping discovery, scanning all {len(hosts)} target(s) "
                   "as up.")
+            print(f"    Each host is capped at {profile.host_timeout}m (--host-timeout) "
+                  "and dead IPs are abandoned fast; --fast (masscan) is quickest on a "
+                  "big scope.")
 
     if getattr(args, "resume", False):
         done = store.scanned_ips()

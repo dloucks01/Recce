@@ -645,6 +645,21 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("1.2.3.4", cmd)
         self.assertIsNotNone(calls[0][1])         # subprocess timeout set
 
+    def test_pn_scan_fails_fast_on_dead_hosts(self):
+        # -Pn scans dead IPs too; retry once (not twice) to abandon them faster,
+        # while the per-host --host-timeout ceiling still applies.
+        import copy
+        import recce.scanner as s
+        prof = copy.copy(s.PROFILES["standard"])
+        prof.assume_up = True
+        with tempfile.TemporaryDirectory() as d:
+            calls = self._capture(s.full_port_scan, "1.2.3.4",
+                                  os.path.join(d, "p.xml"), prof)
+        cmd = calls[0][0]
+        self.assertEqual(cmd[cmd.index("--max-retries") + 1], "1")   # fail-fast
+        self.assertIn("--host-timeout", cmd)                         # cap still applies
+        self.assertIn("--min-rate", cmd)                             # packet floor
+
     def test_enum_scan_flags(self):
         import recce.scanner as s
         with tempfile.TemporaryDirectory() as d:
