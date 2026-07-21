@@ -556,16 +556,22 @@ def _walkthrough_steps(f: Finding) -> list[str]:
     check, candidate exploit). The tester still adds the exploitation result and
     screenshots - that part is a placeholder."""
     ip, port, _hn = f.affected[0]
-    ports = sorted({p for _i, p, _h in f.affected})
+    ports = sorted({p for _i, p, _h in f.affected if p})
     portspec = ",".join(str(p) for p in ports)
     banner = f.services.get((ip, port), "")
     scripts = sorted(s for s in f.scripts if s and s != "version-db")
     steps: list[str] = []
 
-    # 1. Discovery / service identification.
-    ident = f"Enumerate the target service: nmap -sV -p {portspec} {ip}"
-    if banner:
-        ident += f"  -> identifies \"{banner}\" on {port}/tcp."
+    # 1. Discovery / service identification. Host-level findings (e.g. an
+    # on-target priv-esc finding) have no port - frame them as on-host context
+    # instead of an empty "nmap -p None".
+    if portspec:
+        ident = f"Enumerate the target service: nmap -sV -p {portspec} {ip}"
+        if banner:
+            ident += f"  -> identifies \"{banner}\" on {port}/tcp."
+    else:
+        ident = (f"From a shell on {ip}, confirm the local condition this finding "
+                 f"describes (see Evidence).")
     steps.append(ident)
 
     # 2. Confirmation, tailored to how recce detected it.
@@ -647,7 +653,7 @@ def _finding_body(doc: Document, f: Finding, fid: str,
     doc.field("Finding ID", fid, mono=True)
     doc.field("Severity", f.severity.upper(), value_color=_SEV_COLOR.get(sev))
     doc.field("Affected systems", ", ".join(
-        f"{ip}:{port}" + (f" ({hn})" if hn else "")
+        (f"{ip}:{port}" if port else ip) + (f" ({hn})" if hn else "")
         for ip, port, hn in f.affected), mono=True)
     doc.field("Vulnerability Type", vtype, placeholder="classify the vulnerability")
     doc.field("CWE Associated", "; ".join(cwe_label(c) for c in f.cwes),
@@ -671,7 +677,7 @@ def _finding_body(doc: Document, f: Finding, fid: str,
 
     doc.heading("Evidence", 2)
     for ip, port, out in f.evidence[:6]:
-        doc.para(f"{ip}:{port}", italic=True)
+        doc.para(f"{ip}:{port}" if port else ip, italic=True)
         doc.mono_block(out if len(out) < 1500 else out[:1500] + " ...")
 
     doc.heading("Technical Walkthrough with screenshots", 2)
