@@ -556,16 +556,22 @@ def _walkthrough_steps(f: Finding) -> list[str]:
     check, candidate exploit). The tester still adds the exploitation result and
     screenshots - that part is a placeholder."""
     ip, port, _hn = f.affected[0]
-    ports = sorted({p for _i, p, _h in f.affected})
+    ports = sorted({p for _i, p, _h in f.affected if p})
     portspec = ",".join(str(p) for p in ports)
     banner = f.services.get((ip, port), "")
     scripts = sorted(s for s in f.scripts if s and s != "version-db")
     steps: list[str] = []
 
-    # 1. Discovery / service identification.
-    ident = f"Enumerate the target service: nmap -sV -p {portspec} {ip}"
-    if banner:
-        ident += f"  -> identifies \"{banner}\" on {port}/tcp."
+    # 1. Discovery / service identification. Host-level findings (e.g. an
+    # on-target priv-esc finding) have no port - frame them as on-host context
+    # instead of an empty "nmap -p None".
+    if portspec:
+        ident = f"Enumerate the target service: nmap -sV -p {portspec} {ip}"
+        if banner:
+            ident += f"  -> identifies \"{banner}\" on {port}/tcp."
+    else:
+        ident = (f"From a shell on {ip}, confirm the local condition this finding "
+                 f"describes (see Evidence).")
     steps.append(ident)
 
     # 2. Confirmation, tailored to how recce detected it.

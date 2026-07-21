@@ -1926,6 +1926,18 @@ class StoreTrackingTest(unittest.TestCase):
 
 
 class PlaybookTest(unittest.TestCase):
+    def test_host_level_finding_walkthrough_has_no_bogus_port(self):
+        # A port-less (host-level) priv-esc finding must not render "nmap -p None".
+        from recce.report_docx import group_findings, _walkthrough_steps
+        h = Host(ip="10.0.20.5", os_family="Linux", vulns=[
+            Vuln(ip="10.0.20.5", port=None, protocol="tcp", script_id="local-enum",
+                 title="SUID GTFOBins escalation candidate", severity="high",
+                 source="local", confidence="confirmed",
+                 output="On-target enum: SUID /usr/bin/find - GTFOBins")])
+        steps = " ".join(_walkthrough_steps(group_findings([h])[0]))
+        self.assertNotIn("None", steps)
+        self.assertNotIn("-p ,", steps)
+
     def test_windows_seimpersonate_maps_to_potato(self):
         from recce import playbook
         e = playbook.for_text("Token holds SeImpersonate -> SYSTEM", "Windows")
