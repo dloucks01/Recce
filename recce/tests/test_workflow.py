@@ -1222,13 +1222,51 @@ class NmapImportTest(unittest.TestCase):
             self.assertEqual(ftp.version, "2.3.4")
             self.assertEqual(h.os_family, "Linux")
 
-    def test_parse_nmap_file_autodetects(self):
+    def test_parse_normal_text(self):
+        from recce import parser
+        normal = ("Nmap scan report for web02 (10.0.20.6)\n"
+                  "Host is up (0.00042s latency).\n"
+                  "PORT   STATE SERVICE VERSION\n"
+                  "21/tcp open  ftp     vsftpd 2.3.4\n"
+                  "80/tcp open  http    Apache httpd 2.4.49\n"
+                  "445/tcp closed microsoft-ds\n")
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.nmap")
+            with open(f, "w") as fh:
+                fh.write(normal)
+            hosts = parser.parse_normal(f)
+            self.assertEqual(len(hosts), 1)
+            h = hosts[0]
+            self.assertEqual(h.ip, "10.0.20.6")
+            self.assertIn("web02", h.hostnames)
+            self.assertEqual({p.portid for p in h.ports}, {21, 80})  # closed dropped
+            ftp = next(p for p in h.ports if p.portid == 21)
+            self.assertEqual((ftp.product, ftp.version), ("vsftpd", "2.3.4"))
+
+    def test_parse_normal_bare_ip(self):
         from recce import parser
         with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.nmap")
+            with open(f, "w") as fh:
+                fh.write("Nmap scan report for 10.0.0.9\n22/tcp open ssh\n")
+            hosts = parser.parse_normal(f)
+            self.assertEqual(hosts[0].ip, "10.0.0.9")
+            self.assertEqual(hosts[0].hostnames, [])
+
+    def test_parse_nmap_file_autodetects_all_formats(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            # grepable content, no extension -> sniffed
             g = os.path.join(d, "noext_grep")
             with open(g, "w") as fh:
                 fh.write(_GNMAP)
-            self.assertTrue(parser.parse_nmap_file(g))     # sniffed as gnmap
+            self.assertTrue(parser.parse_nmap_file(g))
+            # normal text, no extension -> sniffed
+            n = os.path.join(d, "noext_normal")
+            with open(n, "w") as fh:
+                fh.write("Nmap scan report for 1.2.3.9\n80/tcp open http\n")
+            self.assertEqual(parser.parse_nmap_file(n)[0].ip, "1.2.3.9")
+            # xml
             x = os.path.join(d, "s.xml")
             with open(x, "w") as fh:
                 fh.write('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
@@ -1236,6 +1274,38 @@ class NmapImportTest(unittest.TestCase):
                          '<port protocol="tcp" portid="80"><state state="open"/>'
                          '<service name="http"/></port></ports></host></nmaprun>')
             self.assertEqual(parser.parse_nmap_file(x)[0].ip, "1.2.3.4")
+
+    def test_masscan_xml_is_nmap_compatible(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "mass.xml")
+            with open(f, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun scanner="masscan"><host>'
+                         '<address addr="10.0.30.9" addrtype="ipv4"/><ports>'
+                         '<port protocol="tcp" portid="5432"><state state="open"/>'
+                         '<service name="postgresql"/></port></ports></host></nmaprun>')
+            hosts = parser.parse_nmap_file(f)
+            self.assertEqual(hosts[0].ip, "10.0.30.9")
+            self.assertEqual(hosts[0].open_ports[0].portid, 5432)
+
+    def test_oa_directory_imports_once_prefers_xml(self):
+        # A -oA set (base.xml + base.gnmap + base.nmap) must import once, from xml.
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            for ext, body in ((".gnmap", _GNMAP),
+                              (".nmap", "Nmap scan report for x (10.0.20.6)\n"
+                                        "21/tcp open ftp vsftpd 2.3.4\n"),
+                              (".xml", '<?xml version="1.0"?><nmaprun><host>'
+                                       '<status state="up"/><address addr="10.0.20.6" '
+                                       'addrtype="ipv4"/><ports><port protocol="tcp" '
+                                       'portid="21"><state state="open"/><service '
+                                       'name="ftp" product="vsftpd" version="2.3.4"/>'
+                                       '</port></ports></host></nmaprun>')):
+                with open(os.path.join(d, "scan" + ext), "w") as fh:
+                    fh.write(body)
+            files = cli._collect_scan_files([d])
+            self.assertEqual(len(files), 1)
+            self.assertTrue(files[0].endswith(".xml"))
 
     def test_import_builds_workbook_with_checkmarks_and_findings(self):
         from recce import cli

@@ -87,10 +87,19 @@ is separate and re-runnable (re-running never duplicates anything).
 **Already have an nmap scan?** Skip `enum` and `import` it — no scanning needed:
 
 ```bash
-recce import scan.xml -o eng          # nmap -oX output (richest)
-recce import scan.gnmap -o eng        # nmap -oG grepable
-recce import scans/ -o eng            # a whole directory (or a glob)
+recce import scan.xml -o eng                 # nmap -oX XML (richest)
+recce import scan.gnmap -o eng               # nmap -oG grepable
+recce import scan.nmap -o eng                # nmap -oN normal text
+recce import a.xml b.gnmap c.nmap -o eng     # multiple files at once (any mix)
+recce import scans/ -o eng                   # a whole directory (or a glob)
 ```
+
+**All three nmap output formats work** — XML (`-oX`), grepable (`-oG`), and normal
+(`-oN`) — auto-detected by extension or content, so you can point it at whatever
+you have. Tools that emit nmap-compatible XML (**masscan** `-oX`, rustscan, …)
+import too. A `-oA` set (`base.xml`/`.gnmap`/`.nmap`) is imported once, from the
+richest file. The normal (`-oN`) and grepable formats carry hosts + open ports +
+service/version; XML additionally carries NSE scripts and OS detection.
 
 `import` folds the hosts into the workbook, runs the same offline enrichment as
 `enum` (version→CVE/CWE database, AD role/DC identification, SMB signing), ticks
@@ -643,7 +652,7 @@ Every command takes targets as a single IP, several IPs, a range
 |---|---|---|
 | `doctor` | Verify the box (env + tools + real localhost self-scan) | `--no-self-scan` |
 | `demo` | Build reports from a bundled sample scan (no network) | — |
-| `import <files>` | Import an **existing** nmap scan (`-oX` XML / `-oG` grepable) → workbook, no scanning | `--enum-only`, `--searchsploit` |
+| `import <files>` | Import **existing** nmap scans (`-oX`/`-oG`/`-oN`, multiple files/dirs/globs, masscan XML) → workbook, no scanning | `--enum-only`, `--searchsploit` |
 | `enum <targets>` | Discover hosts, port sweep, service/OS/AD enum → sheet | `--fast` (masscan), `--all-ports`, `--top-ports N`, `--no-discovery`, `--no-ad`, `--no-os`, `--version-all`, `--version-intensity 0-9`, `--min-rate`, `--exclude`, `--resume` |
 | `vulns [targets]` | Vuln-scan open ports (safe detection + offline CVE/CWE DB + probes) | `--fast` (top-signal + progress/ETA), `--aggressive` (full NSE), `--only SVC`, `--unscanned`, `--offline`, `--no-searchsploit`, `--no-probes`, `--udp-top N` |
 | `scan <targets>` | `enum` then `vulns` in one shot | all of enum + vulns (`--fast` = fast sweep *and* fast vulns) |

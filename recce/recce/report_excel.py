@@ -709,9 +709,10 @@ def _build_runbook(wb, meta: dict) -> None:
 
     section("1. Enumerate - discover hosts, ports, services (fast, safe)",
             "Already have an nmap scan? Use `import` instead of `enum` (no scanning).")
-    cmd("import scan.xml -o eng", "Import an EXISTING nmap scan (-oX XML best, or "
-                                  "-oG .gnmap, a directory, or a glob). Runs the same "
-                                  "offline enrichment as enum; ticks Enumerated.")
+    cmd("import scan.xml [more...] -o eng",
+        "Import EXISTING nmap scans - XML (-oX, richest), grepable (-oG), or normal "
+        "(-oN); multiple files/dirs/globs; masscan XML too. Appends + merges (never "
+        "duplicates). Runs the same offline enrichment as enum; ticks Enumerated.")
     cmd("enum <targets> -o eng --title \"Client X\"",
         "Host discovery + full TCP + service/version/OS + deep service NSE. "
         "Fills Checklist, Services, Raw NSE.")

@@ -391,22 +391,75 @@ def parse_gnmap(path: str) -> list[Host]:
     return list(hosts.values())
 
 
+_NORMAL_HOST = re.compile(
+    r"Nmap scan report for (?:([^\s()]+)\s+\((\d{1,3}(?:\.\d{1,3}){3})\)"
+    r"|(\d{1,3}(?:\.\d{1,3}){3}))")
+_NORMAL_PORT = re.compile(
+    r"^(\d+)/(tcp|udp)\s+(open\S*)\s+(\S+)(?:\s+(.*\S))?\s*$")
+
+
+def parse_normal(path: str) -> list[Host]:
+    """Parse nmap normal output (-oN, the default human-readable .nmap file).
+
+    Reads the 'Nmap scan report for <host> (<ip>)' blocks and their PORT table
+    (open ports only, with service + version when -sV was used). Less structured
+    than XML - no NSE script data - but covers the format testers most often have
+    lying around. Never raises."""
+    try:
+        with open(path, "r", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    hosts: list[Host] = []
+    cur: Host | None = None
+    for raw in lines:
+        line = raw.rstrip("\n")
+        m = _NORMAL_HOST.search(line)
+        if m:
+            hostname, ip = (m.group(1) or ""), (m.group(2) or m.group(3))
+            cur = Host(ip=ip, state="up")
+            if hostname:
+                cur.hostnames.append(hostname)
+            hosts.append(cur)
+            continue
+        if cur is None:
+            continue
+        pm = _NORMAL_PORT.match(line.strip())
+        if pm and "open" in pm.group(3):
+            product, version = _split_product_version(pm.group(5) or "")
+            cur.ports.append(Port(portid=int(pm.group(1)), protocol=pm.group(2),
+                                  state="open", service=pm.group(4),
+                                  product=product, version=version))
+            continue
+        om = re.match(r"(?:OS details|Running|Service Info:\s*OS):\s*(.+)", line)
+        if om and not cur.os_name:
+            cur.os_name = om.group(1).split(";")[0].strip()
+            low = cur.os_name.lower()
+            cur.os_family = ("Windows" if "windows" in low else
+                             "Linux" if ("linux" in low or "unix" in low) else "")
+    return hosts
+
+
 def parse_nmap_file(path: str) -> list[Host]:
-    """Parse an already-completed nmap scan, auto-detecting the format: XML (-oX)
-    or grepable (-oG). Sniffs content when the extension is ambiguous. Returns []
-    for an unreadable file or the normal (-oN) text format (unparseable)."""
+    """Parse an already-completed nmap scan, auto-detecting the format: XML (-oX),
+    grepable (-oG), or normal text (-oN). Also handles masscan/other tools that
+    emit nmap-compatible XML. Sniffs content when the extension is ambiguous."""
     low = path.lower()
     if low.endswith(".xml"):
         return parse_nmap_xml(path)
     if low.endswith((".gnmap", ".grep")):
         return parse_gnmap(path)
+    if low.endswith(".nmap"):
+        return parse_normal(path)
     try:
         with open(path, "r", errors="replace") as fh:
-            head = fh.read(2048)
+            head = fh.read(4096)
     except OSError:
         return []
     if "<nmaprun" in head or head.lstrip().startswith("<?xml"):
         return parse_nmap_xml(path)
     if re.search(r"^Host:\s+\S+\s+\(", head, re.M):
         return parse_gnmap(path)
+    if "Nmap scan report for" in head:
+        return parse_normal(path)
     return []

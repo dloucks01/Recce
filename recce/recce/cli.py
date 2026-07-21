@@ -1322,27 +1322,31 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def _collect_scan_files(paths: list[str]) -> list[str]:
-    """Expand files / directories / globs into a list of nmap scan files. When a
-    scan was written with -oA (base.xml + base.gnmap), prefer the richer .xml and
-    drop the same-basename .gnmap so a scan isn't imported twice."""
+    """Expand files / directories / globs into a list of nmap scan files. For a
+    same-basename -oA set (base.xml + base.gnmap + base.nmap) keep only the richest
+    format (xml > grepable > normal) so one scan isn't imported three times."""
     import glob
     found: list[str] = []
     for p in paths:
         if os.path.isdir(p):
-            for pat in ("*.xml", "*.gnmap", "*.grep"):
+            for pat in ("*.xml", "*.gnmap", "*.grep", "*.nmap"):
                 found += sorted(glob.glob(os.path.join(p, pat)))
         elif os.path.exists(p):
             found.append(p)
         else:
             found += sorted(glob.glob(p))          # maybe a glob pattern
-    xml_bases = {os.path.splitext(f)[0] for f in found if f.lower().endswith(".xml")}
-    out: list[str] = []
+    rank = {".xml": 0, ".gnmap": 1, ".grep": 1, ".nmap": 2}
+    best: dict[str, tuple[int, str]] = {}
+    order: list[str] = []
     for f in found:
-        if f.lower().endswith((".gnmap", ".grep")) and os.path.splitext(f)[0] in xml_bases:
-            continue
-        if f not in out:
-            out.append(f)
-    return out
+        base, ext = os.path.splitext(f)
+        r = rank.get(ext.lower(), 3)
+        if base not in best:
+            best[base] = (r, f)
+            order.append(base)
+        elif r < best[base][0]:
+            best[base] = (r, f)
+    return [best[b][1] for b in order]
 
 
 def cmd_import(args: argparse.Namespace) -> int:
