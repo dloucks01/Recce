@@ -34,7 +34,12 @@ _LINUX_MARKERS = ("/etc/passwd", "/etc/shadow", "suid", "sudo", "uid=",
                   "gtfobins", "ld_preload", "docker", "/etc/sudoers", "capability")
 
 # Map a finding's section header to the short Priv-Esc "Category" tag.
+# New themed sections first so they win over generic needles (e.g. a "Persistence
+# footholds (writable ...)" header is persistence, not "writable").
 _SECTION_CATEGORY = [
+    ("lateral", "lateral"), ("pivot", "lateral"),
+    ("persistence", "persistence"),
+    ("restricted", "escape"), ("escape", "escape"),
     ("sudo", "sudo"), ("suid", "suid"), ("capab", "suid"),
     ("kernel", "kernel"), ("system", "kernel"),
     ("cron", "cron"), ("timer", "cron"),
@@ -232,6 +237,27 @@ _PROMOTE = [
     (r"cleartext|stored credential|autologon.*password", "high", ["CWE-256"],
      "Stored/cleartext credential on host",
      "Remove the stored secret; rotate it."),
+    # Lateral movement / AD (confirmed local observations of a reusable path).
+    (r"unconstrained-delegation", "high", ["CWE-266"],
+     "Unconstrained delegation host (TGT capture)",
+     "Remove unconstrained delegation; prefer constrained/RBCD."),
+    (r"kerberoastable", "medium", ["CWE-262", "CWE-522"],
+     "Kerberoastable service account (SPN set)",
+     "Use gMSA / long managed passwords; minimise SPNs."),
+    (r"as-rep roastable", "medium", ["CWE-262"],
+     "AS-REP roastable account (no Kerberos pre-auth)",
+     "Require Kerberos pre-authentication on the account."),
+    (r"ssh-agent socket live", "medium", ["CWE-522"],
+     "Live ssh-agent -> onward auth reuse",
+     "Avoid agent forwarding to untrusted hosts."),
+    (r"kubernetes service-account token|kubeconfig readable", "high", ["CWE-522"],
+     "Kubernetes credentials on host (cluster pivot)",
+     "Scope service-account RBAC; protect kubeconfig files."),
+    # Persistence / login-hook footholds.
+    (r"writable ~/.ssh/authorized_keys|writable login-time|writable powershell profile|"
+     r"writable hkcu com|accessibility hijack", "medium", ["CWE-732"],
+     "Writable auto-exec hook (persistence / escalation)",
+     "Fix ownership/permissions on the auto-run hook."),
 ]
 _PROMOTE = [(re.compile(rx, re.I), sev, cwes, title, rem)
             for rx, sev, cwes, title, rem in _PROMOTE]

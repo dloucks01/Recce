@@ -39,6 +39,32 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Added
+- **On-target enum scripts go well beyond privesc: lateral movement, shell
+  escape, persistence.** `recce-enum.sh` / `recce-enum.ps1` (run via `deploy` /
+  `ingest`) gained whole new read-only sections, and their findings flow through
+  the same parse → categorize → promote → playbook pipeline into the workbook:
+  - **Lateral movement & pivoting.** Linux: live ssh-agent sockets, SSH trust
+    graph (`known_hosts`/`config` ProxyJump), Kubernetes service-account tokens &
+    kubeconfigs, config-management inventories (Ansible/Salt/Puppet), dual-homed
+    detection, established-connection pivot leads, DB client creds. Windows:
+    mapped drives, WinRM/PSRemoting reach + TrustedHosts, and read-only LDAP for
+    the classic AD targets — **Kerberoastable** (SPN), **AS-REP roastable**, and
+    **unconstrained-delegation** hosts.
+  - **Restricted-shell / restricted-environment escape.** Linux: detects
+    rbash/lshell/git-shell/`$-` jails and lists candidate escape interpreters.
+    Windows: PowerShell **ConstrainedLanguage** mode, JEA session endpoints,
+    AppLocker effective policy.
+  - **Persistence footholds (read-only detection).** Writable login/boot hooks —
+    Linux `.bashrc`/`profile.d`/`update-motd.d`/`authorized_keys`/PAM; Windows
+    PowerShell profile, HKCU COM InprocServer32, WMI event subscriptions,
+    AppInit_DLLs, accessibility (sethc/utilman) debugger hijacks, netsh helpers.
+  - **Current-era kernel privesc.** nf_tables **CVE-2024-1086** range, plus
+    `ptrace_scope`, unprivileged-userns and LSM (SELinux/AppArmor) posture.
+  - Each new high-value finding is categorized (`lateral` / `escape` /
+    `persistence`), the strongest promote to first-class Vulnerabilities, and the
+    tailored **How-to-exploit** blocks + Exploitation-sheet plays reference only
+    EXISTING public tooling (Rubeus/impacket GetUserSPNs/GetNPUsers, GTFOBins,
+    kubectl, public PoCs). Still 100% read-only — no exploit code, no evasion.
 - **Better service detection — no more dead "unknown" ports.** nmap's `-sV` is
   still the primary identifier, but the ports it leaves as `unknown`/`tcpwrapped`
   (especially Windows RPC/ephemeral services like **5040 CDPSvc**, 5357 wsdapi,

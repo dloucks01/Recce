@@ -2368,6 +2368,64 @@ class PrivEscVerdictTest(unittest.TestCase):
         self.assertEqual(pe.all_rows([Host(ip="10.200.37.0")]), [])
 
 
+class LocalEnumEnrichmentTest(unittest.TestCase):
+    """The lateral-movement / shell-escape / persistence additions to the on-target
+    scripts must flow through parsing, categorization, promotion and the playbook."""
+
+    def test_new_sections_categorize(self):
+        from recce import ingest
+        loot = (
+            "recce-enum  host=WEB01  user=svc  now\n"
+            "==== Lateral movement & pivoting ====\n"
+            "[!] ssh-agent socket live (/tmp/ssh-x/agent.1) -> hijack to SSH onward\n"
+            "[!] Kerberoastable accounts (SPN set): svc_sql, svc_web\n"
+            "==== Restricted shell & shell escape ====\n"
+            "[!] Restricted shell (/bin/rbash) -> escape via an allowed interpreter\n"
+            "==== Persistence footholds (writable login/boot hooks) ====\n"
+            "[!] Writable login-time file: /etc/profile.d/init.sh\n")
+        parsed = ingest.parse_loot(loot)
+        cats = {f["text"][:12]: f["category"] for f in parsed["findings"]}
+        self.assertEqual(cats["ssh-agent so"], "lateral")
+        self.assertEqual(cats["Kerberoastab"], "lateral")
+        self.assertEqual(cats["Restricted s"], "escape")
+        self.assertEqual(cats["Writable log"], "persistence")
+
+    def test_high_value_lateral_findings_promote(self):
+        from recce import ingest
+        findings = [
+            {"vector": "Unconstrained-delegation hosts: SRV01 -> coerce auth + capture a TGT"},
+            {"vector": "Kerberoastable accounts (SPN set): svc_sql"},
+            {"vector": "Kubernetes service-account token readable (/var/run/secrets...)"},
+        ]
+        titles = {v.title for v in ingest.promote_to_vulns("10.0.0.9", findings)}
+        self.assertTrue(any("Unconstrained delegation" in t for t in titles))
+        self.assertTrue(any("Kerberoastable" in t for t in titles))
+        self.assertTrue(any("Kubernetes" in t for t in titles))
+
+    def test_playbook_maps_new_vectors(self):
+        from recce import playbook as pb
+        self.assertEqual(pb.for_text("Kerberoastable accounts (SPN set): svc",
+                                     "windows")["id"], "win-kerberoast")
+        self.assertEqual(pb.for_text("Unconstrained-delegation hosts: SRV01",
+                                     "windows")["id"], "win-delegation")
+        p = pb.for_text("ssh-agent socket live (/tmp/ssh-x/agent.1) -> hijack", "linux")
+        self.assertEqual(p["id"], "lin-ssh-agent")
+        self.assertIn("/tmp/ssh-x/agent.1", p["cmd"])          # {X} filled in
+        self.assertEqual(pb.for_text("Restricted shell (/bin/rbash) -> escape",
+                                     "linux")["id"], "lin-restricted-shell")
+
+    def test_shipped_linux_script_parses(self):
+        import shutil
+        import subprocess
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash not available")
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "recce", "local", "recce-enum.sh")
+        r = subprocess.run([bash, "-n", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 class CredentialsTest(unittest.TestCase):
     def _hosts(self):
         return [Host(ip="10.0.10.5", subnet="10.0.10.0/24", os_family="Windows",
