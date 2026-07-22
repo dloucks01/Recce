@@ -111,6 +111,46 @@ def parse_loot(text: str) -> dict:
             "os": _detect_os(text), "findings": findings}
 
 
+def extract_defenses(text: str) -> list[str]:
+    """Pull AV/EDR products and key defensive-posture signals out of recce-enum
+    output (mainly recce-enum.ps1). Detection only - this exists so the tester
+    KNOWS what's watching a host, not to evade it. Returns short labels, e.g.
+    'EDR/AV: CSFalcon (process)', 'Defender RTP=True', 'Sysmon present (logging)'."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(s: str) -> None:
+        s = s.strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    for raw in text.splitlines():
+        line = _ANSI.sub("", raw).strip()
+        if not line:
+            continue
+        m = re.search(r"\bAV product:\s*(.+)", line, re.I)
+        if m:
+            add(f"AV: {m.group(1).strip()}")
+        m = re.search(r"EDR/AV (process|service):\s*(.+)", line, re.I)
+        if m:
+            add(f"EDR/AV: {m.group(2).strip()} ({m.group(1).lower()})")
+        m = re.search(r"Defender:\s*RealTime=(\w+)\s+Tamper=(\w+)", line, re.I)
+        if m:
+            add(f"Defender RTP={m.group(1)} Tamper={m.group(2)}")
+        if re.search(r"\bSysmon\b.*present", line, re.I):
+            add("Sysmon present (logging)")
+        if re.search(r"RunAsPPL\)?\s*=\s*1", line):
+            add("LSASS protected (RunAsPPL)")
+        if re.search(r"AppLocker policy present", line, re.I):
+            add("AppLocker enforced")
+        if re.search(r"ScriptBlock(Logging)?\s*=\s*1", line, re.I):
+            add("PS script-block logging on")
+        if re.search(r"Credential/Device Guard running services:\s*\S", line, re.I):
+            add("Credential/Device Guard on")
+    return out
+
+
 def to_local_findings(parsed: dict, source: str) -> list[dict]:
     """Shape parsed findings into the dicts stored on Host.local_findings."""
     return [{"category": f["category"], "vector": f["text"],
@@ -195,6 +235,85 @@ _PROMOTE = [
 ]
 _PROMOTE = [(re.compile(rx, re.I), sev, cwes, title, rem)
             for rx, sev, cwes, title, rem in _PROMOTE]
+
+
+# --- per-service enumeration output (recce/scripts/recce-service.sh) -----------
+# The service scripts print one header per target - "==== SMB  ->  10.0.0.5:445 ===="
+# - then [!] findings under it. We fold those into the datastore as confirmed
+# service-enum vulns on that host:port. Advisory-phrased prompts ("Test/verify X")
+# are kept as low-confidence 'potential' so they don't inflate the findings report.
+_SVC_HDR = re.compile(r"^=+\s*(\S+)\s+->\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)\s*=+$")
+_SVC_SEV = [
+    (r"eternalblue|ms17-010|ms08-067|smbghost|bluekeep|backdoor|unauthenticated .*rce|"
+     r"remote root|-> rce", "critical"),
+    (r"anonymous .*(login|ftp)|null session|unauth|no auth|without auth|"
+     r"signing not required|cpassword|zone transfer allowed|community string works|"
+     r"is readable|is writable|writable|world-readable|open recursion|"
+     r"unauthenticated", "high"),
+    (r"cleartext|without starttls|no starttls|weak|sslv|tls1\.0|poodle|"
+     r"dangerous http methods|nla off", "medium"),
+]
+
+
+def _svc_sev(text: str) -> str:
+    low = text.lower()
+    for rx, sev in _SVC_SEV:
+        if re.search(rx, low):
+            return sev
+    return "medium"   # a flagged [!] line is worth attention by default
+
+
+def _svc_conf(text: str) -> str:
+    """Observed finding vs an advisory prompt. 'Test/verify/check X' phrasing is
+    kept 'potential' (off the default findings report); everything else is a real
+    observation (empty confidence == real)."""
+    if re.match(r"(test |verify |check |consider |still test)", text.strip().lower()):
+        return "potential"
+    return ""
+
+
+def parse_service_output(text: str) -> dict:
+    """Parse recce-service.sh output. Returns
+        {"is_service": bool, "findings": [{ip, port, service, text, ...}]}
+    Harvests the [!] lines under each "==== NAME -> ip:port ====" header; sub-section
+    headers keep the current host:port. Duplicates (ip, port, text) collapse."""
+    ip = ""
+    port = 0
+    service = ""
+    is_service = False
+    seen: set[tuple] = set()
+    findings: list[dict] = []
+    for raw in text.splitlines():
+        line = _ANSI.sub("", raw).strip()
+        if not line:
+            continue
+        h = _SVC_HDR.match(line)
+        if h:
+            is_service = True
+            service, ip, port = h.group(1).lower(), h.group(2), int(h.group(3))
+            continue
+        fm = _FIND.match(line)
+        if fm and ip:
+            t = fm.group(1).strip()
+            key = (ip, port, t)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append({"ip": ip, "port": port, "service": service, "text": t})
+    return {"is_service": is_service, "findings": findings}
+
+
+def service_findings_to_vulns(parsed: dict) -> list[Vuln]:
+    """Turn parsed per-service findings into confirmed service-enum Vulns."""
+    out: list[Vuln] = []
+    for f in parsed["findings"]:
+        out.append(Vuln(
+            ip=f["ip"], port=f["port"], protocol="tcp",
+            script_id=f"service-{f['service']}", state="finding",
+            title=f["text"][:120], severity=_svc_sev(f["text"]),
+            source="service-enum", confidence=_svc_conf(f["text"]),
+            output=f"recce-service.sh ({f['service']}): {f['text']}"))
+    return out
 
 
 def promote_to_vulns(ip: str, findings: list[dict]) -> list[Vuln]:
