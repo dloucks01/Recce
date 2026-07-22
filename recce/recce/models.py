@@ -35,6 +35,9 @@ class Port:
     cpe: list[str] = field(default_factory=list)
     scripts: list[Script] = field(default_factory=list)
     vuln_scanned: bool = False   # tool progress: a vuln pass has run on this port
+    servicefp: str = ""          # nmap's raw probe bytes when it couldn't match a signature
+    detect_source: str = ""      # how the service label was set: nmap / inferred / banner
+    banner: str = ""             # raw banner/response text captured by our own probe
 
     @property
     def service_banner(self) -> str:

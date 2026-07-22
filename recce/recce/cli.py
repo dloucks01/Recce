@@ -390,7 +390,7 @@ def _mkissue(scan_issue, phase: str) -> dict:
             "message": scan_issue.message}
 
 
-def _enum_worker(ip, profile, paths, creds, port_map, subnet_map):
+def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=True):
     """Returns (host|None, issues)."""
     issues: list[dict] = []
     truncated = False
@@ -431,6 +431,11 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map):
     host = _fold_host(ip, np.parse_nmap_xml(enum_xml), subnet_map)
     host.enumerated = True
     host.incomplete_scan = truncated
+    # Recover the services nmap left as unknown/blank: mine its kept fingerprint,
+    # fall back to the curated port map, then a stdlib banner grab (active) - so a
+    # port like 5040 becomes 'Windows CDPSvc', not a dead 'unknown'.
+    from . import svcdetect
+    svcdetect.enrich_host(host, active=active_probe)
     ad.identify_roles(host)
     ad.parse_signing_and_ntlm(host)
     from . import vulndb
@@ -522,13 +527,16 @@ def _discover(args, profile, store, paths):
 def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map) -> None:
     creds = _creds_of(args)
     workers = max(1, args.workers)
+    # --no-probes disables our active stdlib layer (banner grabs); the free passive
+    # layers (servicefp mining + curated port map) still run.
+    active_probe = not getattr(args, "no_probes", False)
     print(f"[*] Enumerating {len(live_ips)} host(s) with {workers} worker(s) "
           f"(ports + services) ...")
     completed = 0
     refresher = _Refresher(args)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_enum_worker, ip, profile, paths, creds, port_map,
-                             subnet_map): ip for ip in live_ips}
+                             subnet_map, active_probe): ip for ip in live_ips}
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
@@ -2444,7 +2452,9 @@ def _add_vuln_opts(pp) -> None:
     g.add_argument("--no-searchsploit", action="store_true",
                    help="skip offline exploit mapping via searchsploit")
     g.add_argument("--no-probes", action="store_true",
-                   help="skip the stdlib HTTP-header / TLS enrichment probes")
+                   help="skip the active stdlib probes (HTTP-header / TLS "
+                        "enrichment + the service-detection banner grabs); the free "
+                        "passive naming (servicefp mining + curated port map) stays on")
     g.add_argument("--udp-top", type=int, help="also scan top-N UDP ports")
 
 

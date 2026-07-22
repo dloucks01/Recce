@@ -2577,6 +2577,63 @@ class ServiceEnumTest(unittest.TestCase):
             self.assertEqual(rc, 0)
 
 
+class SvcDetectTest(unittest.TestCase):
+    def test_servicefp_mining_names_unknown_port(self):
+        from recce import svcdetect as sd
+        p = Port(portid=5900, service="unknown", servicefp="RFB 003.008\n")
+        self.assertTrue(sd.enrich_port("1.1.1.1", p, active=False))
+        self.assertEqual(p.service, "vnc")
+        self.assertEqual(p.detect_source, "inferred")
+
+    def test_curated_port_map_labels_windows_services(self):
+        from recce import svcdetect as sd
+        p = Port(portid=5040, service="unknown")
+        sd.enrich_port("1.1.1.1", p, active=False)
+        self.assertEqual(p.service, "cdpsvc")
+        self.assertIn("CDPSvc", p.extrainfo)
+        self.assertEqual(p.detect_source, "inferred")
+        # Dynamic MSRPC ephemeral range.
+        p2 = Port(portid=49664, service="")
+        sd.enrich_port("1.1.1.1", p2, active=False)
+        self.assertEqual(p2.service, "msrpc")
+
+    def test_nmap_named_port_is_never_overwritten(self):
+        from recce import svcdetect as sd
+        p = Port(portid=80, service="http", detect_source="nmap")
+        self.assertFalse(sd.enrich_port("1.1.1.1", p, active=False))
+        self.assertEqual(p.service, "http")
+
+    def test_banner_signature_matching(self):
+        from recce import svcdetect as sd
+        self.assertEqual(sd._match_signature("SSH-2.0-OpenSSH_8.9")[0], "ssh")
+        self.assertEqual(sd._match_signature("HTTP/1.1 200 OK")[0], "http")
+        self.assertEqual(sd._match_signature("+PONG\r\n")[0], "redis")
+        self.assertEqual(sd._match_signature("\x03\x00\x00\x13")[0], "ms-wbt-server")
+        self.assertIsNone(sd._match_signature("random noise"))
+
+    def test_suggest_command_only_for_still_unknown(self):
+        from recce import svcdetect as sd
+        unknown = Port(portid=1234, service="unknown")
+        self.assertIn("nmap -sV --version-all",
+                      sd.suggest_id_command("1.1.1.1", unknown))
+        named = Port(portid=1234, service="cdpsvc", detect_source="inferred")
+        self.assertEqual(sd.suggest_id_command("1.1.1.1", named), "")
+
+    def test_new_port_fields_round_trip_through_store(self):
+        # servicefp / detect_source / banner must survive a datastore round-trip.
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "r.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.9", subnet="10.0.0.0/24",
+                                ports=[Port(portid=5040, service="cdpsvc",
+                                            detect_source="inferred",
+                                            servicefp="fp", banner="b")]))
+            back = st.get_host("10.0.0.9")
+            st.close()
+            p = back.ports[0]
+            self.assertEqual((p.service, p.detect_source), ("cdpsvc", "inferred"))
+            self.assertEqual((p.servicefp, p.banner), ("fp", "b"))
+
+
 class ReportTest(unittest.TestCase):
     def test_workbook_builds_and_has_sheets(self):
         hosts = parser.parse_nmap_xml(SAMPLE)
