@@ -1901,8 +1901,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             print(f"[x] Could not read the Windows script: {e}")
             store.close()
             return 1
-        stager = Stager(lhost, files)
-        stager.__enter__()
+        try:
+            stager = Stager(lhost, files)
+            stager.__enter__()
+        except OSError as e:
+            print(f"[x] Could not start the HTTP stager on {lhost}: {e}")
+            store.close()
+            return 1
         print(f"[*] HTTP stager on http://{lhost}:{stager.port}/ (serving "
               "recce-enum.ps1 to Windows hosts, torn down when done).")
 
