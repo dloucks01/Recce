@@ -1368,6 +1368,76 @@ def cmd_exploitplan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _prove_run_safe_checks(store, paths, hosts, args) -> None:
+    """--run: re-run the NON-INTRUSIVE detection NSE for SMB findings so a verdict
+    can move from LIKELY to CONFIRMED / FALSE POSITIVE on real evidence. These are
+    detection scripts (smb-security-mode, smb-vuln-ms17-010), not exploits."""
+    from . import proofs
+    profile = scanner.PROFILES.get(getattr(args, "profile", "standard"),
+                                   scanner.PROFILES["standard"])
+    smb_scripts = ["smb-security-mode", "smb2-security-mode",
+                   "smb-vuln-ms17-010", "smb-enum-shares"]
+    smb_recipes = {"smb-signing-relay", "ms17-010", "smb-null-session"}
+    for h in hosts:
+        rids = {proofs.recipe_for(v)["id"] for v in h.vulns if proofs.recipe_for(v)}
+        if not (rids & smb_recipes) or not any(p.portid in (139, 445) for p in h.open_ports):
+            continue
+        print(f"[*] {h.ip}: re-running safe SMB detection NSE to prove/disprove ...")
+        out = os.path.join(paths["raw"], f"{h.ip}_prove.xml")
+        try:
+            _, iss = scanner.nse_scan(h.ip, [445], out, profile, smb_scripts)
+            if iss:
+                _record_issues(store, paths, h.ip, [_mkissue(iss, "prove")])
+            _merge_vuln_results(h, np.parse_nmap_xml(out))
+            ad.parse_signing_and_ntlm(h)          # refresh smb_signing from the NSE
+            _persist_host(store, paths, h.ip, "prove", h)
+        except Exception as e:  # noqa: BLE001 - one host's re-scan never aborts prove
+            print(f"    [!] {h.ip}: prove re-scan failed: {e}")
+
+
+def cmd_prove(args: argparse.Namespace) -> int:
+    """Prove out flagged findings: for the noisy types (ActiveMQ / SMB / MS17-010 /
+    SeImpersonate / …) render a verdict - CONFIRMED, LIKELY, FALSE POSITIVE or
+    INCONCLUSIVE - from the evidence recce already holds, plus the exact safe step
+    to finish proving. Nothing here exploits anything."""
+    from . import proofs
+    print(BANNER)
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    if getattr(args, "run", False):
+        _prove_run_safe_checks(store, paths, hosts, args)
+        hosts = _selected_hosts(store.all_hosts(), args)      # reload merged results
+    results = proofs.verify_hosts(hosts)
+    if not results:
+        print("[!] No proof-able findings matched (ActiveMQ / SMB signing / MS17-010 / "
+              "SeImpersonate / null-session / anon-FTP / weak-TLS).")
+        store.close()
+        return 0
+    icon = {proofs.CONFIRMED: "[+]", proofs.LIKELY: "[~]",
+            proofs.INCONCLUSIVE: "[?]", proofs.FALSE_POSITIVE: "[x]"}
+    for r in results:
+        print(f"\n  {icon.get(r['verdict'], '[?]')} {r['verdict']}  "
+              f"{r['ip']}:{r['port'] or '-'}  {r['vuln']}")
+        for e in r["evidence"]:
+            print(f"        - {e}")
+        if r["verdict"] in (proofs.CONFIRMED, proofs.LIKELY):
+            print(f"        finish: {r['finish']}")
+    c = proofs.summary(results)
+    print(f"\n[+] {c[proofs.CONFIRMED]} confirmed · {c[proofs.LIKELY]} likely · "
+          f"{c[proofs.INCONCLUSIVE]} inconclusive · {c[proofs.FALSE_POSITIVE]} false positive.")
+    _final_report(store, paths, store.get_meta("engagement") or args.title)
+    store.close()
+    print(f"    Full detail on the Verification tab in {paths['xlsx']}.")
+    return 0
+
+
 def cmd_attackpath(args: argparse.Namespace) -> int:
     """Chain the confirmed findings into a prioritised attack path (foothold ->
     priv-esc -> creds -> lateral -> domain), grounded in what recce found."""
@@ -2647,6 +2717,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="arm the Metasploit launch lines (default: check-only, safe). "
                          "Use ONLY within your rules of engagement.")
     ep.set_defaults(func=cmd_exploitplan)
+
+    # Proof / verification: is a flagged finding real or a false positive?
+    pv = sub.add_parser("prove",
+                        help="prove out findings - verdict (real / false-positive / "
+                             "needs-PoC) + the exact safe check, per finding")
+    pv.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    pv.add_argument("-o", "--output-dir", default="engagement")
+    pv.add_argument("--title", default="Recce Engagement")
+    pv.add_argument("--profile", choices=list(scanner.PROFILES), default="standard")
+    pv.add_argument("--run", action="store_true",
+                    help="also re-run the NON-INTRUSIVE detection NSE (SMB "
+                         "security-mode / ms17-010) to move verdicts from LIKELY to "
+                         "CONFIRMED / FALSE POSITIVE on real evidence")
+    pv.set_defaults(func=cmd_prove)
 
     # Attack-path synthesis: chain confirmed findings into a staged path.
     ap = sub.add_parser("attackpath",

@@ -75,7 +75,7 @@ _TAB_FIND, _TAB_INV, _TAB_RAW = "FFC00000", "FF548235", "FF7F7F7F"
 TAB_COLORS = {
     "Start Here": _TAB_GUIDE, "Runbook": _TAB_GUIDE, "Overview": _TAB_GUIDE,
     "Checklist": _TAB_WORK, "Services": _TAB_WORK,
-    "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND,
+    "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND, "Verification": _TAB_FIND,
     "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
     "Priv-Esc Playbook": _TAB_RAW, "Credentials": _TAB_FIND,
     "Exploitation": _TAB_FIND, "Attack Path": _TAB_FIND,
@@ -454,6 +454,40 @@ def _spec_privesc(hosts: list[Host]) -> SheetSpec:
     return SheetSpec("Priv-Esc", cols, rows, _styler_privesc, skip_if_empty=True)
 
 
+def _styler_verification(d: dict) -> dict:
+    v = d.get("Verdict")
+    if v == "CONFIRMED":
+        return {"Verdict": "sev_high"}          # proven real
+    if v == "LIKELY":
+        return {"Verdict": "sev_medium"}
+    if v == "FALSE POSITIVE":
+        return {"Verdict": "sev_info"}          # noise - dismiss
+    return {"Verdict": "sev_low"}               # inconclusive
+
+
+def _spec_verification(hosts: list[Host]) -> SheetSpec:
+    """Per-finding proof verdict: CONFIRMED / LIKELY / FALSE POSITIVE / INCONCLUSIVE,
+    with the evidence used, the preconditions, the exact safe command to finish
+    proving, and what a false positive looks like. Answers 'is this real?'."""
+    from . import proofs
+    cols = [
+        ("Verdict", "data", 15), ("IP", "data", 16), ("Port", "data", 7),
+        ("Vulnerability", "data", 34), ("Evidence (why this verdict)", "data", 72),
+        ("Preconditions", "data", 44), ("Finish proving (in ROE)", "data", 56),
+        ("False positive if…", "data", 40), ("Key", "key", 4),
+    ]
+    rows = []
+    for r in proofs.verify_hosts(hosts):
+        rows.append({"key": r["key"], "data": {
+            "Verdict": r["verdict"], "IP": r["ip"], "Port": r["port"] or "",
+            "Vulnerability": r["vuln"],
+            "Evidence (why this verdict)": "  •  ".join(r["evidence"]),
+            "Preconditions": "; ".join(r["preconditions"]),
+            "Finish proving (in ROE)": r["finish"],
+            "False positive if…": r["fp"]}})
+    return SheetSpec("Verification", cols, rows, _styler_verification, skip_if_empty=True)
+
+
 def _spec_privesc_playbook(hosts: list[Host]) -> SheetSpec:
     """Reference sheet: the generic Windows/Linux local-privesc checklist, listed
     once per OS in scope. Deliberately separate from Priv-Esc so that tab stays
@@ -762,6 +796,9 @@ def _build_guide(wb, meta: dict) -> None:
                      "port you work (incl. SMB, remote access, mail, SNMP)."),
         ("Vulnerabilities", "Findings by severity: CVE + remediation (offline engine)."),
         ("Exploits", "searchsploit matches (EDB-ID, type, CVEs, local path)."),
+        ("Verification", "Is it REAL? Per-finding verdict (CONFIRMED / LIKELY / "
+                         "FALSE POSITIVE / INCONCLUSIVE) with the evidence + the exact "
+                         "safe command to finish proving. Run `recce prove`."),
         ("Services by Product", "Who runs the same service+version (mass-patch pivot)."),
         ("Databases", "DB inventory: engine, version, auth, databases, users."),
         ("Active Directory", "Domains, DCs, password policy, trusts."),
@@ -1210,8 +1247,8 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
     Quick Wins by build_workbook, giving the final tab order:
 
         Start Here, Overview, Checklist, Services, Vulnerabilities, Exploits,
-        Services by Product, Databases, Active Directory, AD Quick Wins,
-        Users & Accounts, Priv-Esc, Priv-Esc Playbook, Raw NSE.
+        Verification, Services by Product, Databases, Active Directory,
+        AD Quick Wins, Users & Accounts, Priv-Esc, Priv-Esc Playbook, Raw NSE.
 
     Rationale for the pairings you flip between:
       * Checklist <-> Services  - host <-> its open ports (the working pair).
@@ -1221,7 +1258,8 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
       * Priv-Esc last - post-exploitation, reached after a foothold.
     """
     return [_spec_checklist(hosts), _spec_services(hosts), _spec_vulns(hosts),
-            _spec_exploits(hosts), _spec_services_by_product(hosts),
+            _spec_exploits(hosts), _spec_verification(hosts),
+            _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
            [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_credentials(hosts, creds_stored),
             _spec_privesc(hosts), _spec_privesc_playbook(hosts),

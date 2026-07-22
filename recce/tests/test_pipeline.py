@@ -2486,6 +2486,94 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertTrue(any("Writable service binary/registry" in t for t in titles))
 
 
+class ProofEngineTest(unittest.TestCase):
+    def _vuln(self, **kw):
+        base = dict(ip="10.0.0.5", port=None, protocol="tcp", script_id="s",
+                    title="", output="", source="nse")
+        base.update(kw)
+        return Vuln(**base)
+
+    def test_activemq_patched_is_false_positive(self):
+        from recce import proofs
+        h = Host(ip="10.0.0.5", ports=[Port(portid=61616, service="activemq",
+                                            product="Apache ActiveMQ", version="5.18.3",
+                                            state="open")])
+        h.vulns = [self._vuln(port=61616, title="Apache ActiveMQ 5.18.3",
+                              ids=["CVE-2023-46604"])]
+        r = proofs.verify_host(h)[0]
+        self.assertEqual(r["verdict"], proofs.FALSE_POSITIVE)
+
+    def test_activemq_old_with_openwire_is_likely(self):
+        from recce import proofs
+        h = Host(ip="10.0.0.5", ports=[Port(portid=61616, service="activemq",
+                                            product="Apache ActiveMQ", version="5.17.1",
+                                            state="open")])
+        h.vulns = [self._vuln(port=61616, title="Apache ActiveMQ 5.17.1",
+                              ids=["CVE-2023-46604"])]
+        r = proofs.verify_host(h)[0]
+        self.assertEqual(r["verdict"], proofs.LIKELY)
+        self.assertTrue(any("61616 is OPEN" in e for e in r["evidence"]))
+
+    def test_smb_signing_confirmed_vs_false_positive(self):
+        from recce import proofs
+        h = Host(ip="10.0.0.5", smb_signing="not required",
+                 ports=[Port(portid=445, service="microsoft-ds", state="open")])
+        h.vulns = [self._vuln(port=445, title="SMB signing not required",
+                              script_id="smb2-security-mode")]
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED)
+        h.smb_signing = "required"
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.FALSE_POSITIVE)
+
+    def test_ms17_010_nse_state_drives_verdict(self):
+        from recce import proofs
+        h = Host(ip="10.0.0.5", ports=[Port(portid=445, service="microsoft-ds", state="open")])
+        h.vulns = [self._vuln(port=445, script_id="smb-vuln-ms17-010",
+                              title="ms17-010", state="VULNERABLE", source="nse")]
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED)
+        h.vulns[0].state = "NOT VULNERABLE"
+        h.vulns[0].output = "NOT VULNERABLE (patched)"
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.FALSE_POSITIVE)
+
+    def test_seimpersonate_enabled_confirms_but_remote_only_inconclusive(self):
+        from recce import proofs
+        # On-target enum says Enabled -> CONFIRMED.
+        h = Host(ip="10.0.0.5", os_family="Windows",
+                 local_findings=[{"category": "token",
+                                  "vector": "SeImpersonate / SeAssignPrimaryToken held (Enabled) -> Potato"}])
+        h.vulns = [self._vuln(port=None, title="SeImpersonate -> Potato -> SYSTEM")]
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED)
+        # Remote inference only (no on-target confirmation) -> INCONCLUSIVE.
+        h2 = Host(ip="10.0.0.6", os_family="Windows",
+                  ports=[Port(portid=1433, service="ms-sql-s", state="open")])
+        h2.vulns = [self._vuln(ip="10.0.0.6", port=1433,
+                               title="MSSQL service - likely holds SeImpersonate")]
+        self.assertEqual(proofs.verify_host(h2)[0]["verdict"], proofs.INCONCLUSIVE)
+
+    def test_confirmed_sorts_before_false_positive(self):
+        from recce import proofs
+        h = Host(ip="10.0.0.5", smb_signing="not required",
+                 ports=[Port(portid=445, state="open"),
+                        Port(portid=61616, product="Apache ActiveMQ", version="5.18.5",
+                             state="open")])
+        h.vulns = [self._vuln(port=61616, title="ActiveMQ 5.18.5", ids=["CVE-2023-46604"]),
+                   self._vuln(port=445, title="SMB signing not required",
+                              script_id="smb2-security-mode")]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertEqual(verdicts[0], proofs.CONFIRMED)
+        self.assertEqual(verdicts[-1], proofs.FALSE_POSITIVE)
+
+    def test_verification_sheet_builds(self):
+        from recce.report_excel import _spec_verification
+        h = Host(ip="10.0.0.5", smb_signing="not required",
+                 ports=[Port(portid=445, state="open")])
+        h.vulns = [self._vuln(port=445, title="SMB signing not required",
+                              script_id="smb2-security-mode")]
+        spec = _spec_verification([h])
+        self.assertEqual(spec.title, "Verification")
+        self.assertTrue(spec.rows)
+        self.assertIn("Verdict", [c[0] for c in spec.cols])
+
+
 class CredentialsTest(unittest.TestCase):
     def _hosts(self):
         return [Host(ip="10.0.10.5", subnet="10.0.10.0/24", os_family="Windows",
