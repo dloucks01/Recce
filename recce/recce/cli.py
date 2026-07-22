@@ -138,6 +138,24 @@ def _record_issues(store: Store, paths: dict, ip: str, issues: list) -> None:
         print(f"    {marker} {ip}: {message}")
 
 
+def _persist_host(store: Store, paths: dict, ip: str, phase: str, host,
+                  clear_step: str | None = None) -> bool:
+    """Persist one host's results, isolating a datastore failure to that host so
+    a single problematic host can never abort the rest of the phase (the store
+    already retries locks via busy_timeout; this catches a lock that outlasts it
+    or any serialization edge). Returns True if the host was stored."""
+    try:
+        store.upsert_host(host)
+        if clear_step:
+            store.delete_tracking(tr.step_key(clear_step, ip))  # re-run clears override
+        return True
+    except Exception as e:  # noqa: BLE001
+        _record_issues(store, paths, ip,
+                       [{"phase": phase, "level": "error",
+                         "message": f"could not persist results: {e}"}])
+        return False
+
+
 def _resolve_domains(store: Store, hosts: list) -> list:
     domains = {d.name.lower(): d for d in ad.derive_domains(hosts)}
     for d in store.all_domains():
@@ -466,8 +484,8 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map) -> 
             _record_issues(store, paths, ip, issues)
             if host is None:
                 continue
-            store.upsert_host(host)   # durable immediately - crash-safe
-            store.delete_tracking(tr.step_key("enum", ip))  # re-run clears override
+            if not _persist_host(store, paths, ip, "enum", host, clear_step="enum"):
+                continue   # one host's persist failure never aborts the rest
             completed += 1
             extra = f" - {', '.join(host.roles)}" if host.roles else ""
             print(f"    [{completed}/{len(live_ips)}] {ip}: "
@@ -614,8 +632,9 @@ def _phase_vulns(store, paths, args, profile) -> None:
             _record_issues(store, paths, ip, issues)
             errs.extend((ip, i["message"]) for i in issues
                         if i.get("level") == "error")
-            store.upsert_host(host)   # durable immediately - crash-safe
-            store.delete_tracking(tr.step_key("vuln", ip))  # re-run clears override
+            if not _persist_host(store, paths, ip, "vuln-scan", host, clear_step="vuln"):
+                completed += 1
+                continue
             completed += 1
             bits = []
             if host.vulns:
@@ -679,8 +698,8 @@ def _phase_db(store, paths, args, profile) -> None:
                                  "message": f"db-scan crashed: {e}"}])
                 continue
             _record_issues(store, paths, ip, issues)
-            store.upsert_host(host)
-            store.delete_tracking(tr.step_key("db", ip))  # re-run clears override
+            if not _persist_host(store, paths, ip, "db", host, clear_step="db"):
+                continue
             completed += 1
             print(f"    [{completed}/{len(targets)}] {ip}: db-scanned")
             refresher.tick(store, paths, args.title)
@@ -730,7 +749,8 @@ def _phase_privesc(store, paths, args, profile) -> None:
                                  "message": f"privesc crashed: {e}"}])
                 continue
             _record_issues(store, paths, ip, issues)
-            store.upsert_host(host)
+            if not _persist_host(store, paths, ip, "privesc", host):
+                continue
             completed += 1
             refresher.tick(store, paths, args.title)
 
@@ -859,7 +879,9 @@ def _phase_credenum(store, paths, args) -> None:
                         if i.get("level") == "error")
             if auth:
                 auth_rows.append((ip, auth))
-            store.upsert_host(host)
+            if not _persist_host(store, paths, ip, "credenum", host):
+                completed += 1
+                continue
             completed += 1
             n_acct = sum(1 for a in host.accounts
                          if a.source in ("netexec", "impacket", "secretsdump"))
