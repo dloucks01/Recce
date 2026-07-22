@@ -2,9 +2,14 @@
 
 All notable changes to recce are documented here. Dates are UTC.
 
-## [0.2.0]
+## [0.2.0] - 2026-07-22
 
 ### Added
+- **Burn-package builder (`make_package.sh`).** Produces a self-contained
+  `dist/recce-<version>.tar.gz` (+ `.zip`) with `SHA256SUMS` — copy to a Kali box
+  or burn to disk, `tar xzf` and run `./bin/recce doctor`. Runtime stays
+  stdlib-only (no pip install). `pyproject` package-data now also ships the
+  `scripts/` per-service suite (was only `local/*`).
 - **Self-contained HTML report (`report.html`).** Every report run now also writes
   a single shareable `report.html` — inline CSS, **zero external assets**
   (airgapped-safe) — that a client can open in any browser: an executive summary +
