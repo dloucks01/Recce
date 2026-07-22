@@ -128,7 +128,8 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     cols = [
         ("Reviewed", "checkbox", 9), ("Subnet", "data", 16), ("IP", "data", 15),
         ("Hostname", "data", 22), ("OS", "data", 20), ("Hops", "data", 6),
-        ("Roles", "data", 22), ("Open ports", "data", 30), ("# Vulns", "data", 8),
+        ("Roles", "data", 22), ("Open ports", "data", 28), ("# Vulns", "data", 8),
+        ("AV / EDR", "data", 26),
         *step_cols,
         ("Notes", "notes", 28), ("Key", "key", 4),
     ]
@@ -142,7 +143,7 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
             "Subnet": h.subnet, "IP": h.ip, "Hostname": h.hostname, "OS": h.os_guess,
             "Hops": (str(h.distance) if h.distance else ""),
             "Roles": ", ".join(h.roles), "Open ports": open_ports,
-            "# Vulns": len(h.vulns)}})
+            "# Vulns": len(h.vulns), "AV / EDR": "; ".join(h.defenses)}})
     return SheetSpec(CHECKLIST_TITLE, cols, rows, _styler_checklist)
 
 
@@ -384,18 +385,20 @@ def _spec_exploitation(hosts: list[Host]) -> SheetSpec:
     from . import exploitplan as xp
     _KIND = {"remote-msf": "remote (msf)", "remote-tool": "remote (tool)",
              "post-shell": "post-shell"}
+    defenses = {h.ip: "; ".join(h.defenses) for h in hosts if h.defenses}
     cols = [
-        ("Done", "checkbox", 9), ("IP", "data", 15), ("Hostname", "data", 16),
-        ("Type", "data", 14), ("Finding", "data", 30), ("Existing tool", "data", 30),
-        ("Command (fill in your values)", "data", 62),
-        ("Prerequisite", "data", 30), ("Validate", "data", 24),
-        ("Notes", "notes", 22), ("Key", "key", 4),
+        ("Done", "checkbox", 9), ("IP", "data", 15), ("Hostname", "data", 15),
+        ("Type", "data", 13), ("Finding", "data", 28), ("Existing tool", "data", 28),
+        ("Command (fill in your values)", "data", 58),
+        ("Prerequisite", "data", 28), ("Validate", "data", 22),
+        ("Defenses (host)", "data", 26), ("Notes", "notes", 20), ("Key", "key", 4),
     ]
     rows = [{"key": a["key"], "data": {
         "IP": a["ip"], "Hostname": a["hostname"],
         "Type": _KIND.get(a["kind"], a["kind"]), "Finding": a["finding"],
         "Existing tool": a["tool"], "Command (fill in your values)": a["cmd"],
-        "Prerequisite": a["prereq"], "Validate": a["validate"]}}
+        "Prerequisite": a["prereq"], "Validate": a["validate"],
+        "Defenses (host)": defenses.get(a["ip"], "")}}
         for a in xp.all_actions(hosts)]
     return SheetSpec("Exploitation", cols, rows, skip_if_empty=True)
 
@@ -908,6 +911,7 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         ("NTLM relay targets", len(ad.relay_targets(hosts))),
         ("Kerberoastable / AS-REP", f"{len(ad.kerberoastable(hosts))} / "
                                     f"{len(ad.asrep_roastable(hosts))}"),
+        ("Hosts with AV / EDR seen", sum(1 for h in hosts if h.defenses)),
     ]:
         target = _links.get(label)
         if target in nav_set:

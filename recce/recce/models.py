@@ -157,6 +157,7 @@ class Host:
     roles: list[str] = field(default_factory=list)   # e.g. Domain Controller
     ntlm: dict[str, Any] = field(default_factory=dict)  # domain/fqdn/os from NTLM
     smb_signing: str = ""                            # required / not required / unknown
+    defenses: list[str] = field(default_factory=list)  # AV/EDR + posture (from recce-enum)
     enumerated: bool = False       # tool progress: service enumeration has run
     db_scanned: bool = False       # the `db` phase ran against this host
     privesc_checked: bool = False  # the `privesc` phase ran against this host

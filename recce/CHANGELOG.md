@@ -5,6 +5,18 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **AV/EDR awareness (detection, not evasion)** — when you `ingest` a
+  `recce-enum.ps1` run, recce now captures the host's **AV/EDR product + defensive
+  posture** (Defender real-time/tamper state, EDR agents like CrowdStrike/
+  SentinelOne, Sysmon logging, LSASS `RunAsPPL`, AppLocker, Credential Guard,
+  PowerShell script-block logging) and surfaces it where you decide what to run:
+  a new **AV / EDR** column on the Checklist, a **Defenses (host)** column on the
+  Exploitation sheet (right next to the GodPotato/PrintSpoofer/msf action), a
+  **Hosts with AV/EDR seen** total on the Overview, and a per-host banner in the
+  `exploit-plan` scripts. Every surface carries the **legitimate** guidance —
+  coordinate a scoped testing exclusion with the blue team (detection of your
+  tooling is a finding *for the defender*) or validate in a lab. recce flags what
+  is watching a host; **it does not evade AV/EDR**.
 - **`exploitplan` command** — turns each **confirmed** finding into a ready-to-run
   artifact that drives an **existing, published** tool/module with the parameters
   recce discovered already filled in: a Metasploit resource (`.rc`) script per

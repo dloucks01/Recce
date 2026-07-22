@@ -1552,6 +1552,13 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             have.add(key)
             added.append(r)
     host.local_findings.extend(added)
+    # AV/EDR + defensive posture the on-target sweep fingerprinted, so the tester
+    # knows what's watching this host (detection only - recce does not evade it).
+    known = set(host.defenses)
+    for d in ingest.extract_defenses(text):
+        if d not in known:
+            known.add(d)
+            host.defenses.append(d)
     # Promote the high-signal findings to first-class Vulns so they count toward
     # severity totals and get write-ups (deduped against existing vulns by key).
     have_v = {v.key for v in host.vulns}

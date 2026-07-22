@@ -111,6 +111,46 @@ def parse_loot(text: str) -> dict:
             "os": _detect_os(text), "findings": findings}
 
 
+def extract_defenses(text: str) -> list[str]:
+    """Pull AV/EDR products and key defensive-posture signals out of recce-enum
+    output (mainly recce-enum.ps1). Detection only - this exists so the tester
+    KNOWS what's watching a host, not to evade it. Returns short labels, e.g.
+    'EDR/AV: CSFalcon (process)', 'Defender RTP=True', 'Sysmon present (logging)'."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(s: str) -> None:
+        s = s.strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    for raw in text.splitlines():
+        line = _ANSI.sub("", raw).strip()
+        if not line:
+            continue
+        m = re.search(r"\bAV product:\s*(.+)", line, re.I)
+        if m:
+            add(f"AV: {m.group(1).strip()}")
+        m = re.search(r"EDR/AV (process|service):\s*(.+)", line, re.I)
+        if m:
+            add(f"EDR/AV: {m.group(2).strip()} ({m.group(1).lower()})")
+        m = re.search(r"Defender:\s*RealTime=(\w+)\s+Tamper=(\w+)", line, re.I)
+        if m:
+            add(f"Defender RTP={m.group(1)} Tamper={m.group(2)}")
+        if re.search(r"\bSysmon\b.*present", line, re.I):
+            add("Sysmon present (logging)")
+        if re.search(r"RunAsPPL\)?\s*=\s*1", line):
+            add("LSASS protected (RunAsPPL)")
+        if re.search(r"AppLocker policy present", line, re.I):
+            add("AppLocker enforced")
+        if re.search(r"ScriptBlock(Logging)?\s*=\s*1", line, re.I):
+            add("PS script-block logging on")
+        if re.search(r"Credential/Device Guard running services:\s*\S", line, re.I):
+            add("Credential/Device Guard on")
+    return out
+
+
 def to_local_findings(parsed: dict, source: str) -> list[dict]:
     """Shape parsed findings into the dicts stored on Host.local_findings."""
     return [{"category": f["category"], "vector": f["text"],

@@ -2093,6 +2093,85 @@ class IngestServiceTest(unittest.TestCase):
             self.assertTrue(any("signing" in t for t in titles))
 
 
+class AVAwarenessTest(unittest.TestCase):
+    LOOT = ("recce-enum  host=DC01  user=admin  now\n"
+            "==== AV / EDR detection ====\n"
+            "    AV product: Windows Defender\n"
+            "[!] EDR/AV process: CSFalcon\n"
+            "    EDR/AV service: CSAgent\n"
+            "==== OS hardening & defences ====\n"
+            "    Defender: RealTime=True Tamper=True\n"
+            "    LSA protection (RunAsPPL)=1\n"
+            "    Sysmon service present (activity is being logged)\n"
+            "    AppLocker policy present (review allowed paths)\n")
+
+    def test_extract_defenses(self):
+        from recce import ingest
+        j = " | ".join(ingest.extract_defenses(self.LOOT))
+        for expect in ("AV: Windows Defender", "CSFalcon (process)",
+                       "CSAgent (service)", "Defender RTP=True",
+                       "LSASS protected (RunAsPPL)", "Sysmon present (logging)",
+                       "AppLocker enforced"):
+            self.assertIn(expect, j)
+
+    def test_ingest_populates_defenses(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as dd:
+            db = os.path.join(dd, "results.sqlite")
+            st = Store(db)
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                os_family="Windows",
+                                ports=[Port(portid=445, service="microsoft-ds")]))
+            st.close()
+            loot = os.path.join(dd, "l.txt")
+            with open(loot, "w") as fh:
+                fh.write(self.LOOT)
+            cli.cmd_ingest(SimpleNamespace(output_dir=dd, loot=loot,
+                                           host="10.0.0.5", title="t"))
+            st = Store(db)
+            h = {x.ip: x for x in st.all_hosts()}["10.0.0.5"]
+            st.close()
+            self.assertTrue(any("CSFalcon" in x for x in h.defenses))
+
+    def test_checklist_and_exploitation_columns(self):
+        from recce.report_excel import _spec_checklist, _spec_exploitation
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.5", os_family="Windows",
+                 defenses=["EDR/AV: CSFalcon (process)"],
+                 ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                             script_id="local-enum",
+                             title="SeImpersonate -> Potato -> SYSTEM", severity="high",
+                             source="local", confidence="confirmed",
+                             output="SeImpersonate held")])
+        cl = _spec_checklist([h])
+        self.assertIn("AV / EDR", [c[0] for c in cl.cols])
+        self.assertEqual(cl.rows[0]["data"]["AV / EDR"], "EDR/AV: CSFalcon (process)")
+        ex = _spec_exploitation([h])
+        self.assertIn("Defenses (host)", [c[0] for c in ex.cols])
+        self.assertTrue(any("CSFalcon" in r["data"].get("Defenses (host)", "")
+                            for r in ex.rows))
+
+    def test_exploitplan_defenses_banner(self):
+        from recce import exploitplan as ep
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.5", os_family="Windows",
+                 defenses=["EDR/AV: CSFalcon (process)"],
+                 ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                             script_id="smb-vuln-ms17-010", title="smb-vuln-ms17-010",
+                             severity="high", source="nse", ids=["CVE-2017-0143"],
+                             output="VULNERABLE")])
+        with tempfile.TemporaryDirectory() as dd:
+            s = ep.build_plan([h], dd)
+            with open(os.path.join(s["dir"], "10.0.0.5.sh")) as fh:
+                sh = fh.read()
+        self.assertIn("DEFENSES on 10.0.0.5", sh)
+        self.assertIn("CSFalcon", sh)
+        self.assertIn("does not evade AV", sh)   # coordination, not evasion
+
+
 class ServiceEnumTest(unittest.TestCase):
     def test_script_mapping(self):
         from recce import serviceenum as se

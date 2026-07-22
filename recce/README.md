@@ -415,6 +415,17 @@ every action (remote msf / remote tool / post-shell, each with the command,
 prerequisite, and validation) — and in the Word write-ups, where a finding that
 maps to a module gets a ready-to-run *Exploit with the published module* step.
 
+**AV/EDR awareness (detection, not evasion).** When you `ingest` a `recce-enum.ps1`
+run, recce records the host's AV/EDR product and defensive posture (Defender
+real-time/tamper, EDR agents, Sysmon, LSASS `RunAsPPL`, AppLocker, Credential
+Guard) and shows it where it matters: an **AV / EDR** column on the Checklist, a
+**Defenses (host)** column on the Exploitation sheet next to each GodPotato/
+PrintSpoofer/msf action, a count on the Overview, and a banner in the exploit-plan
+scripts. The guidance is the legitimate one — coordinate a scoped testing
+exclusion with the blue team (your tooling being caught is a finding *for the
+defender*) or validate in a lab. recce flags what's watching a host; **it does not
+evade AV/EDR** (the bundled scripts likewise do no AMSI/Defender tampering).
+
 ## Credentialed enumeration (`credenum`)
 
 Once you have valid creds, `credenum` runs the *authenticated* checks nmap can't

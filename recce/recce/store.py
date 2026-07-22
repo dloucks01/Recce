@@ -150,6 +150,7 @@ class Store:
         merged.ntlm = {**new.ntlm, **old.ntlm}
         if new.smb_signing and new.smb_signing != "unknown":
             merged.smb_signing = new.smb_signing
+        merged.defenses = list(dict.fromkeys(old.defenses + new.defenses))
 
         # Vulns / exploits / accounts: dedup by natural key, accumulating the
         # seen-set so duplicates WITHIN one scan are collapsed too, not just
