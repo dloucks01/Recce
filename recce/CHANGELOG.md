@@ -43,8 +43,12 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   verification engine reasons over the evidence recce already collected (the exact
   version, the port state, the NSE detection result, the on-target privilege
   state) and returns a per-finding verdict for the noisy types testers can never
-  easily disposition — **ActiveMQ, SMB, SeImpersonate/GodPotato**, plus MS17-010,
-  SMBGhost, null-session, anonymous-FTP and weak-TLS:
+  easily disposition. Covered: **ActiveMQ (CVE-2023-46604), SMB signing / relay,
+  MS17-010, SMBGhost, SeImpersonate/GodPotato, PrintNightmare (CVE-2021-34527/1675),
+  BlueKeep (CVE-2019-0708), Heartbleed (CVE-2014-0160), Log4Shell (CVE-2021-44228),
+  ZeroLogon (CVE-2020-1472), Kerberoast / AS-REP, null-session, anonymous-FTP,
+  default-credentials and weak-TLS** — each with an OS/version/role/state gate so a
+  patched build, a non-DC, or a newer OS is called out as a false positive:
   - **CONFIRMED** — the evidence positively proves it (an NSE detection fired,
     signing really is off, the privilege really is *Enabled*, we negotiated the
     weak cipher ourselves).
