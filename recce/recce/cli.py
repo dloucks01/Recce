@@ -1790,11 +1790,13 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
-def _deploy_worker(host, ssh_creds, win_creds, timeout, loot_dir):
+def _deploy_worker(host, ssh_creds, win_creds, timeout, loot_dir,
+                   stager=None, authmap=None):
     """Run the on-target enum script on one host remotely, save the raw loot, fold
     it into the host. Returns (host, transport, added, promoted, error)."""
     from . import deploy
-    transport, out, err = deploy.deploy_one(host, ssh_creds, win_creds, timeout)
+    transport, out, err = deploy.deploy_one(host, ssh_creds, win_creds, timeout,
+                                            stager=stager, authmap=authmap)
     if not out:
         return host, transport, 0, 0, (err or "no output returned")
     try:
@@ -1834,7 +1836,23 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         return 1
 
     hosts = _selected_hosts(store.all_hosts(), args)
-    the_plan = deploy.plan(hosts, ssh_creds, win_creds)
+    # nxc precheck: which protocols do these creds ACTUALLY authenticate to? Deploy
+    # only where they truly work (and pick that transport), instead of guessing
+    # from open ports. Skipped with --no-validate or when nxc isn't installed.
+    authmap: dict = {}
+    if not getattr(args, "no_validate", False):
+        print("[*] Checking which hosts accept the creds (nxc smb/winrm/ssh) ...")
+        authmap = deploy.validate([h.ip for h in hosts], ssh_creds, win_creds)
+        if authmap:
+            n_win = sum(1 for a in authmap.values() if a.get("winrm"))
+            n_smb = sum(1 for a in authmap.values() if a.get("smb"))
+            n_ssh = sum(1 for a in authmap.values() if a.get("ssh"))
+            print(f"    creds valid on: {n_win} WinRM, {n_smb} SMB-admin, {n_ssh} SSH "
+                  "host(s).")
+        else:
+            print("    (nxc unavailable or no results - falling back to open-port "
+                  "selection.)")
+    the_plan = deploy.plan(hosts, ssh_creds, win_creds, authmap or None)
     deployable = [(h, t) for h, t in the_plan if t]
     skipped = [h for h, t in the_plan if not t]
     if not deployable:
@@ -1850,15 +1868,43 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     print(f"[*] Deploy plan: {len(deployable)} host(s) reachable "
           f"({', '.join(f'{n}×{t}' for t, n in sorted(by_t.items()))})"
           + (f"; {len(skipped)} skipped (no transport/creds)" if skipped else "") + ".")
-    print("    Scripts are READ-ONLY (recce-enum.sh/.ps1). SSH & WinRM run them "
-          "in memory (no artifact); SMB drops to %TEMP% and deletes after. Confirm "
-          "this is in your rules of engagement.")
+    use_stager = getattr(args, "stager", False)
+    if use_stager:
+        print("    Windows hosts fetch + run recce-enum.ps1 IN MEMORY from a local "
+              "HTTP stager (no temp file); falls back to the push path if a host "
+              "can't route back to you.")
+    else:
+        print("    Scripts are READ-ONLY (recce-enum.sh/.ps1). SSH & WinRM run in "
+              "memory (no artifact); SMB drops to %TEMP% and deletes after.")
+    print("    Confirm this is within your rules of engagement.")
     if getattr(args, "dry_run", False):
         for h, t in sorted(deployable, key=lambda ht: _ip_key(ht[0].ip)):
-            print(f"    {h.ip:<16} -> {t}")
+            print(f"    {h.ip:<16} -> {t}" + ("  (+http stager if reachable)"
+                                              if use_stager and t != "ssh" else ""))
         print("[*] Dry run - nothing was executed. Drop --dry-run to deploy.")
         store.close()
         return 0
+
+    # Optional HTTP stager for in-memory Windows exec.
+    stager = None
+    if use_stager:
+        from .stager import Stager, detect_lhost
+        lhost = getattr(args, "lhost", None) or detect_lhost()
+        if not lhost:
+            print("[x] --stager needs --lhost <your-ip that targets can reach>; "
+                  "could not autodetect one.")
+            store.close()
+            return 1
+        try:
+            files = {"recce-enum.ps1": open(deploy.WINDOWS_SCRIPT, "rb").read()}
+        except OSError as e:
+            print(f"[x] Could not read the Windows script: {e}")
+            store.close()
+            return 1
+        stager = Stager(lhost, files)
+        stager.__enter__()
+        print(f"[*] HTTP stager on http://{lhost}:{stager.port}/ (serving "
+              "recce-enum.ps1 to Windows hosts, torn down when done).")
 
     workers = max(1, args.workers)
     timeout = getattr(args, "timeout", None) or deploy.DEFAULT_TIMEOUT
@@ -1873,33 +1919,39 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     total = len(deployable)
     start = time.monotonic()
     errs: list[tuple[str, str]] = []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(_deploy_worker, h, ssh_creds, win_creds, timeout,
-                             loot_dir): h.ip for h, _t in deployable}
-        for fut in as_completed(futures):
-            ip = futures[fut]
-            try:
-                host, transport, added, promoted, err = fut.result()
-            except Exception as e:  # noqa: BLE001
-                _record_issues(store, paths, ip, [{"phase": "deploy", "level": "error",
-                               "message": f"deploy crashed: {e}"}])
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_deploy_worker, h, ssh_creds, win_creds, timeout,
+                                 loot_dir, stager, authmap or None): h.ip
+                       for h, _t in deployable}
+            for fut in as_completed(futures):
+                ip = futures[fut]
+                try:
+                    host, transport, added, promoted, err = fut.result()
+                except Exception as e:  # noqa: BLE001
+                    _record_issues(store, paths, ip, [{"phase": "deploy",
+                                   "level": "error", "message": f"deploy crashed: {e}"}])
+                    completed += 1
+                    errs.append((ip, f"crashed: {e}"))
+                    print(f"    [{completed}/{total}] {ip}: FAILED (crashed)"
+                          f"{_progress(completed, total, start)}")
+                    continue
                 completed += 1
-                errs.append((ip, f"crashed: {e}"))
-                print(f"    [{completed}/{total}] {ip}: FAILED (crashed)"
+                if err:
+                    _record_issues(store, paths, ip, [{"phase": "deploy",
+                                   "level": "warning",
+                                   "message": f"deploy via {transport or '?'}: {err}"}])
+                    errs.append((ip, err))
+                    print(f"    [{completed}/{total}] {ip}: {transport or '-'} FAILED "
+                          f"- {err}{_progress(completed, total, start)}")
+                    continue
+                _persist_host(store, paths, ip, "deploy", host)
+                bits = f"{added} finding(s)" + (f", {promoted} promoted" if promoted else "")
+                print(f"    [{completed}/{total}] {ip}: {transport} OK ({bits})"
                       f"{_progress(completed, total, start)}")
-                continue
-            completed += 1
-            if err:
-                _record_issues(store, paths, ip, [{"phase": "deploy", "level": "warning",
-                               "message": f"deploy via {transport or '?'}: {err}"}])
-                errs.append((ip, err))
-                print(f"    [{completed}/{total}] {ip}: {transport or '-'} FAILED "
-                      f"- {err}{_progress(completed, total, start)}")
-                continue
-            _persist_host(store, paths, ip, "deploy", host)
-            bits = f"{added} finding(s)" + (f", {promoted} promoted" if promoted else "")
-            print(f"    [{completed}/{total}] {ip}: {transport} OK ({bits})"
-                  f"{_progress(completed, total, start)}")
+    finally:
+        if stager is not None:
+            stager.__exit__(None, None, None)
     _final_report(store, paths, store.get_meta("engagement") or args.title)
     store.close()
     ok = total - len(errs)
@@ -2416,6 +2468,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     dp.add_argument("--ssh-pass", help="SSH password (needs sshpass on PATH)")
     dp.add_argument("--ssh-key", help="SSH private-key path")
     dp.add_argument("--hash", help="NTLM hash for pass-the-hash (SMB/WinRM), with -u")
+    dp.add_argument("--stager", action="store_true",
+                    help="Windows hosts fetch + run the script IN MEMORY from a "
+                         "short-lived local HTTP server (no temp file, any size); "
+                         "auto-falls-back to the push path if a host can't reach you")
+    dp.add_argument("--lhost", help="your IP that targets route back to (for "
+                                    "--stager; autodetected if omitted)")
+    dp.add_argument("--no-validate", action="store_true",
+                    help="skip the nxc credential precheck (select transport from "
+                         "open ports only)")
     dp.add_argument("--timeout", type=int, metavar="SEC",
                     help="per-host remote-exec ceiling (default 300s)")
     dp.add_argument("--dry-run", action="store_true",

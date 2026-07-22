@@ -115,7 +115,10 @@ FTP/LDAP, unauth Redis…). Safe by default; **`-a`** adds brute/nikto/dir-busti
 # ...or have creds? Run the local-enum + priv-esc scan on EVERY reachable host at once:
 ./bin/recce deploy --ssh-user root --ssh-key id_rsa -o eng           # all Linux via SSH
 ./bin/recce deploy -u admin -p 'Pw!' -d corp.local -o eng            # all Windows via WinRM/SMB
-#   picks SSH / WinRM / SMB per host, runs the script, folds results in. --dry-run to preview.
+./bin/recce deploy -u admin -p 'Pw!' -d corp.local --stager -o eng   # Windows: fetch+run in memory
+#   first checks (nxc) which hosts the creds actually work on, then picks SSH/WinRM/SMB per host,
+#   runs the read-only script, folds results in. --stager avoids the temp file (auto-falls-back).
+#   --dry-run previews the per-host transport plan.
 
 ./bin/recce exploitplan -o eng --lhost 10.10.14.7   # runnable msf .rc (--run to arm)
 ./bin/recce attackpath  -o eng                       # foothold → priv-esc → … → domain
