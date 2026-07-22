@@ -1464,6 +1464,52 @@ def _tag_host_os(host, parsed) -> None:
         host.os_family = parsed["os"].capitalize()
 
 
+def _ingest_service_output(svc: dict, paths: dict, args) -> int:
+    """Fold recce-service.sh per-service findings into the datastore as confirmed
+    service-enum Vulns on the matching host:port (creating a host entry if needed)."""
+    from . import ingest
+    from .models import Host, Port
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    vulns = ingest.service_findings_to_vulns(svc)
+    by_ip: dict[str, list] = {}
+    for v in vulns:
+        by_ip.setdefault(v.ip, []).append(v)
+    hosts_by_ip = {h.ip: h for h in store.all_hosts()}
+    added_total = created = touched = 0
+    for ip, vs in by_ip.items():
+        h = hosts_by_ip.get(ip)
+        if h is None:
+            h = Host(ip=ip, subnet=".".join(ip.split(".")[:3]) + ".0/24",
+                     enumerated=True)
+            for pnum in sorted({v.port for v in vs if v.port}):
+                h.ports.append(Port(portid=pnum, protocol="tcp", state="open",
+                                    vuln_scanned=True))
+            created += 1
+        have = {(x.title, x.port) for x in h.vulns}
+        added = [v for v in vs if (v.title, v.port) not in have]
+        if not added:
+            continue
+        h.vulns.extend(added)
+        aff = {v.port for v in added}
+        for p in h.ports:
+            if p.portid in aff:
+                p.vuln_scanned = True
+        store.upsert_host(h)
+        added_total += len(added)
+        touched += 1
+    print(f"[+] Ingested {added_total} service finding(s) across {touched} host(s)"
+          + (f" ({created} new host entry/entries)" if created else "") + ".")
+    print("    Source: recce-service.sh output -> Vulnerabilities sheet "
+          "(source 'service-enum'; advisory 'test X' lines kept as 'potential').")
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    return 0
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     from . import ingest
     paths = _open_paths(args.output_dir)
@@ -1478,6 +1524,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         text = fh.read()
     parsed = ingest.parse_loot(text)
     if not parsed["is_recce"]:
+        # Maybe it's per-service enumeration output (recce-service.sh) instead.
+        svc = ingest.parse_service_output(text)
+        if svc["is_service"] and svc["findings"]:
+            return _ingest_service_output(svc, paths, args)
         print("[!] This doesn't look like recce-enum.sh/.ps1 output (no "
               "'recce-enum host=...' banner). Parsing [!] lines anyway.")
     if not parsed["findings"]:

@@ -23,7 +23,6 @@ from typing import Callable
 
 from . import ad
 from . import db as dbmod
-from . import playbook as pb
 from . import privesc as pe
 from . import tracking as tr
 from . import xlsx
@@ -54,6 +53,7 @@ MONO_COLS = {
     "Port", "Proto", "Version", "CVE / refs", "CWE", "Scope", "CPE",
     "Extra info", "RID", "EDB-ID", "CVEs", "Hosts (ip:port)", "Open ports",
     "# Vulns", "# Hosts", "Script", "Path", "SPN", "Command (fill in your values)",
+    "Enum command",
 }
 
 
@@ -184,22 +184,26 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
     """One row per open port, grouped by IP. Each port has its own tri-state work
     Status (not started / in progress / done) and a Notes cell, so a tester can
     track exactly which ports they've looked at, are working, or haven't touched."""
+    from . import serviceenum as se
     cols = [
         ("Status", "status", 15), ("IP", "data", 16),
         ("Hostname", "data", 24), ("Port", "data", 7), ("Proto", "data", 6),
         ("Service", "data", 16), ("Product", "data", 22), ("Version", "data", 16),
-        ("Extra info", "data", 24), ("CPE", "data", 30), ("Notes", "notes", 30),
+        ("Extra info", "data", 24), ("CPE", "data", 28),
+        ("Enum command", "data", 42), ("Notes", "notes", 28),
         ("Key", "key", 4),
     ]
     rows = []
     for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
         for p in sorted(h.open_ports, key=lambda p: p.portid):
+            script = se.script_for(p.service, p.portid)
+            enum_cmd = f"{se.DRIVER} {script} {h.ip} {p.portid}" if script else ""
             rows.append({"key": tr.svc_key(h.ip, p.protocol, p.portid),
                          "group": h.ip, "data": {
                 "IP": h.ip, "Hostname": h.hostname, "Port": p.portid,
                 "Proto": p.protocol, "Service": p.service,
                 "Product": p.product, "Version": p.version, "Extra info": p.extrainfo,
-                "CPE": ", ".join(p.cpe)}})
+                "CPE": ", ".join(p.cpe), "Enum command": enum_cmd}})
     return SheetSpec("Services", cols, rows, group_by="IP")
 
 
@@ -370,22 +374,29 @@ def _spec_privesc(hosts: list[Host]) -> SheetSpec:
 
 
 def _spec_exploitation(hosts: list[Host]) -> SheetSpec:
-    """The finding -> run-this bridge: each CONFIRMED privesc finding mapped to the
-    exact EXISTING public tool, the command (with the finding's values filled in),
-    prerequisites, and how to validate. References vetted tools - not generated
-    exploit code. Empty (sheet skipped) until there are confirmed findings."""
+    """The finding -> run-this bridge for every CONFIRMED finding: remote exploits
+    (Metasploit modules, params filled in), remote tool actions (impacket / netexec
+    / GTFOBins), and post-shell priv-esc - each mapped to the exact EXISTING public
+    tool, the command with the finding's values filled in, the prerequisite, and how
+    to validate. References vetted tools - it does not generate exploit code. Empty
+    (sheet skipped) until there are confirmed findings. `exploitplan` writes the
+    same actions out as runnable .rc / .sh artifacts."""
+    from . import exploitplan as xp
+    _KIND = {"remote-msf": "remote (msf)", "remote-tool": "remote (tool)",
+             "post-shell": "post-shell"}
     cols = [
-        ("Done", "checkbox", 9), ("IP", "data", 15), ("Hostname", "data", 18),
-        ("Finding", "data", 34), ("Existing tool", "data", 34),
-        ("Command (fill in your values)", "data", 60),
-        ("Prerequisite", "data", 34), ("Validate", "data", 26),
-        ("Notes", "notes", 24), ("Key", "key", 4),
+        ("Done", "checkbox", 9), ("IP", "data", 15), ("Hostname", "data", 16),
+        ("Type", "data", 14), ("Finding", "data", 30), ("Existing tool", "data", 30),
+        ("Command (fill in your values)", "data", 62),
+        ("Prerequisite", "data", 30), ("Validate", "data", 24),
+        ("Notes", "notes", 22), ("Key", "key", 4),
     ]
-    rows = [{"key": e["key"], "data": {
-        "IP": e["ip"], "Hostname": e["hostname"], "Finding": e["finding"],
-        "Existing tool": e["tool"], "Command (fill in your values)": e["cmd"],
-        "Prerequisite": e["prereq"], "Validate": e["validate"]}}
-        for e in pb.all_entries(hosts)]
+    rows = [{"key": a["key"], "data": {
+        "IP": a["ip"], "Hostname": a["hostname"],
+        "Type": _KIND.get(a["kind"], a["kind"]), "Finding": a["finding"],
+        "Existing tool": a["tool"], "Command (fill in your values)": a["cmd"],
+        "Prerequisite": a["prereq"], "Validate": a["validate"]}}
+        for a in xp.all_actions(hosts)]
     return SheetSpec("Exploitation", cols, rows, skip_if_empty=True)
 
 

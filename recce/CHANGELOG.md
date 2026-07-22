@@ -16,7 +16,20 @@ All notable changes to recce are documented here. Dates are UTC.
   configures** published exploits against the specific targets — it authors no
   exploit code. Gated to confirmed findings (never "potential" version guesses).
   **Safe by default**: `.rc` launch lines are commented (a non-intrusive `check`
-  runs); `--run` arms them, `--lhost/--lport` set the callback.
+  runs); `--run` arms them, `--lhost/--lport` set the callback. The same actions
+  are surfaced **in the workbook** (the *Exploitation* sheet now unifies remote
+  exploits + remote tools + post-shell priv-esc) and **in the write-ups** (each
+  finding that maps to a module gets a ready-to-run *Exploit with the published
+  module* step).
+- **`ingest` now also folds in `recce-service.sh` output** — point `ingest` at a
+  saved per-service enumeration run and its `[!]` findings land on the
+  Vulnerabilities sheet (source `service-enum`) against the right host:port,
+  creating a host entry if needed. Observed findings are confirmed; advisory
+  "test/verify X" lines are kept low-confidence (`potential`, off the findings
+  report by default). Auto-detected — same command as recce-enum loot.
+- **Services sheet: an *Enum command* column** — every open-port row now shows the
+  exact `recce-service.sh` command to run for that service, so the next step is
+  visible where you already track ports.
 - **`services` command** — the bridge from recce's findings to the per-service
   suite. `recce services -o eng` prints the exact `recce-service.sh` command to
   run for **every open port** recce found, grouped by host (with roles and a

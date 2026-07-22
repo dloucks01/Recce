@@ -197,6 +197,85 @@ _PROMOTE = [(re.compile(rx, re.I), sev, cwes, title, rem)
             for rx, sev, cwes, title, rem in _PROMOTE]
 
 
+# --- per-service enumeration output (recce/scripts/recce-service.sh) -----------
+# The service scripts print one header per target - "==== SMB  ->  10.0.0.5:445 ===="
+# - then [!] findings under it. We fold those into the datastore as confirmed
+# service-enum vulns on that host:port. Advisory-phrased prompts ("Test/verify X")
+# are kept as low-confidence 'potential' so they don't inflate the findings report.
+_SVC_HDR = re.compile(r"^=+\s*(\S+)\s+->\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)\s*=+$")
+_SVC_SEV = [
+    (r"eternalblue|ms17-010|ms08-067|smbghost|bluekeep|backdoor|unauthenticated .*rce|"
+     r"remote root|-> rce", "critical"),
+    (r"anonymous .*(login|ftp)|null session|unauth|no auth|without auth|"
+     r"signing not required|cpassword|zone transfer allowed|community string works|"
+     r"is readable|is writable|writable|world-readable|open recursion|"
+     r"unauthenticated", "high"),
+    (r"cleartext|without starttls|no starttls|weak|sslv|tls1\.0|poodle|"
+     r"dangerous http methods|nla off", "medium"),
+]
+
+
+def _svc_sev(text: str) -> str:
+    low = text.lower()
+    for rx, sev in _SVC_SEV:
+        if re.search(rx, low):
+            return sev
+    return "medium"   # a flagged [!] line is worth attention by default
+
+
+def _svc_conf(text: str) -> str:
+    """Observed finding vs an advisory prompt. 'Test/verify/check X' phrasing is
+    kept 'potential' (off the default findings report); everything else is a real
+    observation (empty confidence == real)."""
+    if re.match(r"(test |verify |check |consider |still test)", text.strip().lower()):
+        return "potential"
+    return ""
+
+
+def parse_service_output(text: str) -> dict:
+    """Parse recce-service.sh output. Returns
+        {"is_service": bool, "findings": [{ip, port, service, text, ...}]}
+    Harvests the [!] lines under each "==== NAME -> ip:port ====" header; sub-section
+    headers keep the current host:port. Duplicates (ip, port, text) collapse."""
+    ip = ""
+    port = 0
+    service = ""
+    is_service = False
+    seen: set[tuple] = set()
+    findings: list[dict] = []
+    for raw in text.splitlines():
+        line = _ANSI.sub("", raw).strip()
+        if not line:
+            continue
+        h = _SVC_HDR.match(line)
+        if h:
+            is_service = True
+            service, ip, port = h.group(1).lower(), h.group(2), int(h.group(3))
+            continue
+        fm = _FIND.match(line)
+        if fm and ip:
+            t = fm.group(1).strip()
+            key = (ip, port, t)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append({"ip": ip, "port": port, "service": service, "text": t})
+    return {"is_service": is_service, "findings": findings}
+
+
+def service_findings_to_vulns(parsed: dict) -> list[Vuln]:
+    """Turn parsed per-service findings into confirmed service-enum Vulns."""
+    out: list[Vuln] = []
+    for f in parsed["findings"]:
+        out.append(Vuln(
+            ip=f["ip"], port=f["port"], protocol="tcp",
+            script_id=f"service-{f['service']}", state="finding",
+            title=f["text"][:120], severity=_svc_sev(f["text"]),
+            source="service-enum", confidence=_svc_conf(f["text"]),
+            output=f"recce-service.sh ({f['service']}): {f['text']}"))
+    return out
+
+
 def promote_to_vulns(ip: str, findings: list[dict]) -> list[Vuln]:
     """Turn the high-signal on-target findings into first-class Vulns (confirmed
     local observations), so they show up in severity totals and get write-ups.

@@ -2016,6 +2016,82 @@ class ExploitPlanTest(unittest.TestCase):
             s = ep.build_plan([h], d)
             self.assertEqual(s["plans"], [])            # nothing confirmed -> no plan
 
+    def test_actions_for_host_structured(self):
+        from recce import exploitplan as ep
+        dc = self._hosts()[0]                            # DC with ms17-010 + signing off
+        acts = ep.actions_for_host(dc, lhost="10.9.9.9")
+        kinds = {a["kind"] for a in acts}
+        self.assertIn("remote-msf", kinds)
+        self.assertIn("remote-tool", kinds)             # AS-REP/Kerberoast/relay
+        msf = next(a for a in acts if a["kind"] == "remote-msf")
+        self.assertIn("ms17_010_eternalblue", msf["cmd"])
+        self.assertIn("10.9.9.9", msf["cmd"])           # LHOST filled in
+
+    def test_exploitation_sheet_unifies_actions(self):
+        from recce.report_excel import _spec_exploitation
+        spec = _spec_exploitation(self._hosts())
+        types = {r["data"]["Type"] for r in spec.rows}
+        self.assertIn("remote (msf)", types)
+
+    def test_services_sheet_has_enum_command(self):
+        from recce.report_excel import _spec_services
+        spec = _spec_services(self._hosts())
+        self.assertIn("Enum command", [c[0] for c in spec.cols])
+        cmds = [r["data"].get("Enum command", "") for r in spec.rows]
+        self.assertTrue(any("recce-service.sh smb" in c for c in cmds))
+
+
+class IngestServiceTest(unittest.TestCase):
+    OUT = ("\n==== SMB  ->  10.0.0.5:445 ====\n"
+           "[+] 445/tcp is open\n"
+           "[!] SMB signing NOT required -> NTLM relay target\n"
+           "[!] Null session lists shares -> anonymous SMB access\n"
+           "[!] Test BlueKeep CVE-2019-0708 on legacy Windows\n"
+           "==== SNMP  ->  10.0.0.9:161 ====\n"
+           "[!] SNMP community string works: 'public' (v2c)\n")
+
+    def test_parse_service_output(self):
+        from recce import ingest
+        p = ingest.parse_service_output(self.OUT)
+        self.assertTrue(p["is_service"])
+        self.assertEqual(len(p["findings"]), 4)
+        self.assertEqual({f["ip"] for f in p["findings"]}, {"10.0.0.5", "10.0.0.9"})
+        smb = [f for f in p["findings"] if f["ip"] == "10.0.0.5"]
+        self.assertTrue(all(f["port"] == 445 for f in smb))
+
+    def test_service_vulns_confidence_and_source(self):
+        from recce import ingest
+        vulns = ingest.service_findings_to_vulns(ingest.parse_service_output(self.OUT))
+        adv = next(v for v in vulns if v.title.startswith("Test BlueKeep"))
+        self.assertEqual(adv.confidence, "potential")   # advisory -> off writeups
+        sign = next(v for v in vulns if "signing" in v.title)
+        self.assertEqual(sign.confidence, "")           # observed -> real
+        self.assertEqual(sign.source, "service-enum")
+        self.assertEqual(sign.port, 445)
+        self.assertEqual(sign.severity, "high")
+
+    def test_ingest_service_output_into_store(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "results.sqlite")
+            st = Store(db)
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                ports=[Port(portid=445, service="microsoft-ds")]))
+            st.close()
+            loot = os.path.join(d, "svc.txt")
+            with open(loot, "w") as fh:
+                fh.write(self.OUT)
+            rc = cli.cmd_ingest(SimpleNamespace(
+                output_dir=d, loot=loot, host=None, title="t"))
+            self.assertEqual(rc, 0)
+            st = Store(db)
+            hosts = {h.ip: h for h in st.all_hosts()}
+            st.close()
+            self.assertIn("10.0.0.9", hosts)            # new host created from output
+            titles = [v.title for v in hosts["10.0.0.5"].vulns]
+            self.assertTrue(any("signing" in t for t in titles))
+
 
 class ServiceEnumTest(unittest.TestCase):
     def test_script_mapping(self):

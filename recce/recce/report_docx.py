@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import playbook as _pb
+from . import exploitplan as _xp
 from .docx import Document
 from .exploitref import proven_exploit_ref
 from .models import Host, Vuln
@@ -704,6 +705,15 @@ def _walkthrough_steps(f: Finding) -> list[str]:
     # version), and never a speculative "go research one" - if nothing proven is
     # known, the tester's [TESTER: perform the exploitation] placeholder stands.
     if f.confidence != "potential":
+        # Remote exploit: if the finding maps to a published Metasploit module,
+        # cite the ready-to-run invocation (recce `exploitplan` writes it as a .rc).
+        msf = _xp._msf_for(f"{f.title} {' '.join(f.cves)} {' '.join(f.scripts)}")
+        if msf:
+            ip0, port0, _h0 = f.affected[0]
+            steps.append(
+                f"Exploit with the published module - {_xp._msf_cmd(msf, ip0, port0, '<LHOST>', 4444)} "
+                f"({msf['note']}). recce `exploitplan` writes this as a ready-to-run "
+                f".rc; run only within the rules of engagement.")
         if f.exploits:
             ids = ", ".join(f"EDB-{eid}" for eid, _t in f.exploits[:5] if eid)
             steps.append(f"Run the indexed public exploit(s) for this service: "

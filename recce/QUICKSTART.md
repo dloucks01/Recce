@@ -80,6 +80,9 @@ sudo ./bin/recce db -o eng                 # databases
 #       target$  ./recce-enum.sh -o loot.txt          # Linux  (-t self-tests first)
 #       target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
 ./bin/recce      ingest loot.txt -o eng    # matches the host by name (or --host IP)
+#     ingest also accepts recce-service.sh output - its [!] findings land on the
+#     Vulnerabilities sheet against the right host:port (auto-detected):
+#       ./scripts/recce-service.sh smb 10.0.10.5 > smb.txt  &&  ./bin/recce ingest smb.txt -o eng
 
 # 4b2) Turn confirmed findings into ready-to-run exploitation artifacts:
 #      Metasploit .rc scripts (params pre-filled) + parameterized impacket/GTFOBins
