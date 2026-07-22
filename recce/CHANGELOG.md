@@ -2,6 +2,25 @@
 
 All notable changes to recce are documented here. Dates are UTC.
 
+## [0.2.2] - 2026-07-22
+
+### Fixed
+- **Overview phase table now honors operator overrides.** The per-subnet
+  "Coverage by subnet" completion cells read only tool auto-progress, so an
+  operator who un-ticked a step on the Checklist (e.g. to flag a redo) saw the
+  Overview still count that host as done — the two tables could disagree. The
+  phase counts now consult the same tracking overrides the Checklist does
+  (`report_excel` Overview `phase()`).
+- **Accounts differing only by RID no longer collide.** The datastore keeps
+  accounts distinct by `(source, kind, name, domain, rid)`, but the workbook/
+  coverage key omitted `rid`, so two such accounts collapsed to one Users &
+  Accounts row and undercounted. `acct_key` now includes `rid` (appended only
+  when present, so existing rid-less keys stay stable).
+- **Product-only advisories reported on every affected port.** A product exposed
+  on two ports (e.g. Confluence on 8090 and 8091) was deduped by title alone, so
+  only the first port was flagged and the write-up's affected-port list was
+  short. Dedup is now per `(title, port)` (`vulndb.assess_host`).
+
 ## [0.2.1] - 2026-07-22
 
 ### Fixed

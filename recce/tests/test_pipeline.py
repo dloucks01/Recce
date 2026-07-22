@@ -1471,6 +1471,21 @@ class VulnDbTest(unittest.TestCase):
         vulndb.assess_host_inplace(h2)
         self.assertTrue(any("End-of-life MySQL" in v.title for v in h2.vulns))
 
+    def test_product_advisory_reported_on_every_matching_port(self):
+        """Regression: a product-only advisory exposed on two ports must yield a
+        finding per port (was deduped by title, dropping all but the first)."""
+        from recce import vulndb
+        from recce.report_docx import group_findings
+        h = Host(ip="10.0.0.5", ports=[
+            Port(portid=8090, service="http", product="Atlassian Confluence", version=""),
+            Port(portid=8091, service="http", product="Atlassian Confluence", version="")])
+        vulndb.assess_host_inplace(h)
+        conf = [v for v in h.vulns if "Confluence" in v.title]
+        self.assertEqual(sorted(v.port for v in conf), [8090, 8091])
+        # The grouped write-up lists both affected ports.
+        f = next(f for f in group_findings([h]) if "Confluence" in f.title)
+        self.assertEqual(sorted({a[1] for a in f.affected}), [8090, 8091])
+
     def test_exact_and_range_matches(self):
         from recce import vulndb
         h = Host(ip="10.0.0.9", os_name="Linux", ports=[
