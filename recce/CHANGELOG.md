@@ -5,6 +5,12 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **Self-contained HTML report (`report.html`).** Every report run now also writes
+  a single shareable `report.html` — inline CSS, **zero external assets**
+  (airgapped-safe) — that a client can open in any browser: an executive summary +
+  stat tiles, a severity rollup, the findings table, the synthesised attack path,
+  and a per-host table (with AV/EDR). Print-friendly. Built from the same data as
+  the workbook; stdlib-only.
 - **`creds` command — credential stacking + spray planning.** Accumulates every
   credential recce has seen — auto-harvested from AD accounts with a recovered
   secret, default/blank service logins, and autologon/stored creds in ingested

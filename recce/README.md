@@ -668,6 +668,7 @@ are color-flagged).
 | `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
+| `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |
 | `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) |
 | `recce.log`        | Scan errors / timeouts / incomplete hosts (also on the Overview tab) |
 | `results.sqlite`   | Normalized datastore (resume + re-report) |
@@ -781,6 +782,7 @@ recce/               the package (python -m recce)
   exploitplan.py     confirmed finding -> runnable msf .rc / tool cmd (existing tools)
   attackpath.py      confirmed findings -> staged attack path (the "so what")
   credentials.py     stack captured creds -> netexec/impacket spray plan
+  report_html.py     self-contained shareable HTML report (stdlib, no assets)
   serviceenum.py     open port -> per-service enum command (bridge to scripts/)
   screenshot.py      optional headless-browser web screenshots (tool-gated)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)

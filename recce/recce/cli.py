@@ -106,6 +106,7 @@ def _open_paths(out_dir: str) -> dict[str, str]:
         "xlsx": os.path.join(out_dir, "enumeration.xlsx"),
         "md": os.path.join(out_dir, "enumeration.md"),
         "csv": os.path.join(out_dir, "services.csv"),
+        "html": os.path.join(out_dir, "report.html"),
         "log": os.path.join(out_dir, "recce.log"),
     }
 
@@ -230,10 +231,14 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
                     credentials=store.all_credentials())
     build_markdown(hosts, paths["md"], title=title, domains=domains)
     build_csv(hosts, paths["csv"])
+    from .report_html import build_html
+    build_html(hosts, paths["html"], title=title, domains=domains,
+               credentials=store.all_credentials(), generated=_now())
     if not quiet:
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
-              f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}")
+              f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}"
+              f"\n    {paths['html']}")
         counts = store.count_issues()
         if counts.get("total"):
             print(f"[!] {counts['total']} scan issue(s) logged "

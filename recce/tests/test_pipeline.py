@@ -2095,6 +2095,44 @@ class IngestServiceTest(unittest.TestCase):
             self.assertTrue(any("signing" in t for t in titles))
 
 
+class HtmlReportTest(unittest.TestCase):
+    def _hosts(self):
+        from recce.models import Vuln
+        return [Host(ip="10.0.0.5", hostnames=["dc01"], os_family="Windows",
+                     roles=["Domain Controller"], defenses=["EDR/AV: CSFalcon (process)"],
+                     ports=[Port(portid=445, service="microsoft-ds")],
+                     vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                                 script_id="smb-vuln-ms17-010",
+                                 title="smb-vuln-ms17-010 <x>", severity="high",
+                                 source="nse", ids=["CVE-2017-0143"],
+                                 output="VULNERABLE")])]
+
+    def test_self_contained_and_escaped(self):
+        from recce import report_html
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "report.html")
+            report_html.build_html(self._hosts(), p, title="Client X",
+                                   generated="2026-01-01")
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("<!doctype html>", html)
+        # self-contained: no external resources at all.
+        for bad in ("http://", "https://", "src=", "<link"):
+            self.assertNotIn(bad, html)
+        self.assertIn("Client X", html)
+        for section in ("Executive summary", "Findings by severity", "Attack path",
+                        "Hosts", "CVE-2017-0143"):
+            self.assertIn(section, html)
+        self.assertIn("smb-vuln-ms17-010 &lt;x&gt;", html)   # HTML-escaped title
+
+    def test_empty_hosts_ok(self):
+        from recce import report_html
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html([], p, title="Empty")
+            self.assertTrue(os.path.exists(p))
+
+
 class PrivEscVerdictTest(unittest.TestCase):
     def test_verdict_orders_and_classifies(self):
         from recce import privesc as pe
