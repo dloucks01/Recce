@@ -2292,87 +2292,103 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 
 def _add_common(pp) -> None:
+    # The two flags almost every run actually uses stay in the default section so
+    # they're the first thing `-h` shows; the tuning knobs fold into a labelled
+    # group below so the help reads as "here's the one flag you need, advanced
+    # stuff is over there" instead of a flat wall.
     pp.add_argument("-o", "--output-dir", default="engagement",
                     help="output directory (default: ./engagement)")
     pp.add_argument("--title", default="Recce Engagement",
                     help="engagement title shown in reports")
-    pp.add_argument("--profile", choices=list(scanner.PROFILES), default="standard")
-    pp.add_argument("--workers", type=int, default=6,
-                    help="concurrent hosts to scan at once (default: 6)")
-    pp.add_argument("--refresh-every", type=int, default=10, metavar="N",
-                    help="regenerate reports every N hosts (0 to disable; default 10)")
-    pp.add_argument("--host-timeout", type=int, metavar="MIN",
-                    help="per-host time ceiling in minutes; nmap gives up on a "
-                         "host after this and moves on (0 = no limit)")
+    g = pp.add_argument_group("output & performance (optional)")
+    g.add_argument("--profile", choices=list(scanner.PROFILES), default="standard",
+                   help="scan depth preset (default: standard)")
+    g.add_argument("--workers", type=int, default=6,
+                   help="concurrent hosts to scan at once (default: 6)")
+    g.add_argument("--refresh-every", type=int, default=10, metavar="N",
+                   help="regenerate reports every N hosts (0 to disable; default 10)")
+    g.add_argument("--host-timeout", type=int, metavar="MIN",
+                   help="per-host time ceiling in minutes; nmap gives up on a "
+                        "host after this and moves on (0 = no limit)")
 
 
 def _add_creds(pp) -> None:
-    pp.add_argument("-u", "--username", help="low-priv/user account for authenticated SMB/LDAP")
-    pp.add_argument("-p", "--password", help="password for the user account")
-    pp.add_argument("-d", "--domain", help="AD domain (e.g. corp.local) for authentication")
-    pp.add_argument("--admin-user", dest="admin_username",
-                    help="privileged/superuser account: runs the admin-only checks "
-                         "(confirm local-admin reach, secretsdump hash dump)")
-    pp.add_argument("--admin-pass", dest="admin_password",
-                    help="password for the privileged account")
-    pp.add_argument("--admin-domain", dest="admin_domain",
-                    help="domain for the privileged account (defaults to -d)")
-    pp.add_argument("--ldap-enum", action="store_true",
-                    help="credentialed LDAP enumeration of discovered DCs")
-    pp.add_argument("--ldap-anon", action="store_true", help="attempt anonymous LDAP bind")
-    pp.add_argument("--ldap-ssl", action="store_true", help="use LDAPS (636)")
-    pp.add_argument("--dc-ip", help="target this DC IP for LDAP instead of auto-detect")
+    # The three you reach for (user / pass / domain) are grouped together; the
+    # privileged-account and LDAP-tuning flags fold into a second group so the
+    # simple credentialed run (`-u USER -p PASS -d DOMAIN`) isn't buried.
+    g = pp.add_argument_group("credentials")
+    g.add_argument("-u", "--username", help="low-priv/user account for authenticated SMB/LDAP")
+    g.add_argument("-p", "--password", help="password for the user account")
+    g.add_argument("-d", "--domain", help="AD domain (e.g. corp.local) for authentication")
+    a = pp.add_argument_group("privileged & LDAP (optional)")
+    a.add_argument("--admin-user", dest="admin_username",
+                   help="privileged/superuser account: runs the admin-only checks "
+                        "(confirm local-admin reach, secretsdump hash dump)")
+    a.add_argument("--admin-pass", dest="admin_password",
+                   help="password for the privileged account")
+    a.add_argument("--admin-domain", dest="admin_domain",
+                   help="domain for the privileged account (defaults to -d)")
+    a.add_argument("--ldap-enum", action="store_true",
+                   help="credentialed LDAP enumeration of discovered DCs")
+    a.add_argument("--ldap-anon", action="store_true", help="attempt anonymous LDAP bind")
+    a.add_argument("--ldap-ssl", action="store_true", help="use LDAPS (636)")
+    a.add_argument("--dc-ip", help="target this DC IP for LDAP instead of auto-detect")
 
 
 def _add_discovery(pp) -> None:
+    # `targets` plus the one or two flags a normal sweep uses (-Pn, --fast) sit up
+    # top; the rest are scan internals you only reach for on a difficult network,
+    # folded into a labelled group so `enum -h` opens with what you actually type.
     pp.add_argument("targets", nargs="+", help="CIDRs / ranges / IPs / hostnames, or @file")
-    pp.add_argument("--exclude", nargs="*", help="hosts/CIDRs to exclude")
-    pp.add_argument("--fast", action="store_true",
-                    help="go fast: masscan network-wide sweep instead of per-host "
-                         "nmap (and, in `scan`, top-signal vuln scripts only)")
-    pp.add_argument("--masscan", action="store_true", help="use masscan for port sweep")
-    pp.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
-    pp.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
-    pp.add_argument("--min-rate", type=int, help="nmap --min-rate override")
-    pp.add_argument("--max-retries", type=int, metavar="N",
-                    help="nmap --max-retries on the port sweep (default 3; raise for "
-                         "lossy links, lower for speed on clean ones)")
-    pp.add_argument("--no-verify", action="store_true",
-                    help="skip the confirmation re-scan of hosts that come back with "
-                         "0 open ports (faster; may trust a missed sweep)")
-    pp.add_argument("--verify-all", action="store_true",
-                    help="also re-verify 0-port hosts under -Pn (not just discovered-"
-                         "live ones) - catches every missed sweep, slower on dead-IP "
-                         "scopes")
-    pp.add_argument("--reliable", action="store_true",
-                    help="rate-limited / lossy network: drop the --min-rate floor, "
-                         "retry dropped probes more, let nmap's congestion control "
-                         "adapt (recce also switches to this automatically when it "
-                         "sees nmap dropping probes)")
     pp.add_argument("-Pn", "--no-discovery", action="store_true", dest="no_discovery",
                     help="skip the ping sweep and scan every target as if up (like "
                          "nmap -Pn). Use this when hosts block ping - common on "
                          "firewalled / Windows / AD networks.")
-    pp.add_argument("--no-ad", action="store_true", help="skip SMB/LDAP AD scripts")
-    pp.add_argument("--no-os", action="store_true", help="skip OS detection")
-    pp.add_argument("--version-all", action="store_true",
-                    help="max-effort service detection (--version-all: every probe)")
-    pp.add_argument("--version-intensity", type=int, metavar="0-9",
-                    help="nmap -sV probe intensity for service detection (default 8)")
-    pp.add_argument("--resume", action="store_true", help="skip hosts already in datastore")
+    pp.add_argument("--fast", action="store_true",
+                    help="go fast: masscan network-wide sweep instead of per-host "
+                         "nmap (and, in `scan`, top-signal vuln scripts only)")
+    g = pp.add_argument_group("scan tuning (optional)")
+    g.add_argument("--exclude", nargs="*", help="hosts/CIDRs to exclude")
+    g.add_argument("--masscan", action="store_true", help="use masscan for port sweep")
+    g.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
+    g.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
+    g.add_argument("--min-rate", type=int, help="nmap --min-rate override")
+    g.add_argument("--max-retries", type=int, metavar="N",
+                   help="nmap --max-retries on the port sweep (default 3; raise for "
+                        "lossy links, lower for speed on clean ones)")
+    g.add_argument("--no-verify", action="store_true",
+                   help="skip the confirmation re-scan of hosts that come back with "
+                        "0 open ports (faster; may trust a missed sweep)")
+    g.add_argument("--verify-all", action="store_true",
+                   help="also re-verify 0-port hosts under -Pn (not just discovered-"
+                        "live ones) - catches every missed sweep, slower on dead-IP "
+                        "scopes")
+    g.add_argument("--reliable", action="store_true",
+                   help="rate-limited / lossy network: drop the --min-rate floor, "
+                        "retry dropped probes more, let nmap's congestion control "
+                        "adapt (recce also switches to this automatically when it "
+                        "sees nmap dropping probes)")
+    g.add_argument("--no-ad", action="store_true", help="skip SMB/LDAP AD scripts")
+    g.add_argument("--no-os", action="store_true", help="skip OS detection")
+    g.add_argument("--version-all", action="store_true",
+                   help="max-effort service detection (--version-all: every probe)")
+    g.add_argument("--version-intensity", type=int, metavar="0-9",
+                   help="nmap -sV probe intensity for service detection (default 8)")
+    g.add_argument("--resume", action="store_true", help="skip hosts already in datastore")
 
 
 def _add_vuln_opts(pp) -> None:
-    pp.add_argument("--aggressive", action="store_true",
-                    help="run the full intrusive NSE 'vuln' category (can crash "
-                         "fragile services); default is deep safe detection")
-    pp.add_argument("--offline", action="store_true",
-                    help="airgapped: disable internet-dependent NSE (vulners)")
-    pp.add_argument("--no-searchsploit", action="store_true",
-                    help="skip offline exploit mapping via searchsploit")
-    pp.add_argument("--no-probes", action="store_true",
-                    help="skip the stdlib HTTP-header / TLS enrichment probes")
-    pp.add_argument("--udp-top", type=int, help="also scan top-N UDP ports")
+    g = pp.add_argument_group("vuln-scan tuning (optional)")
+    g.add_argument("--aggressive", action="store_true",
+                   help="run the full intrusive NSE 'vuln' category (can crash "
+                        "fragile services); default is deep safe detection")
+    g.add_argument("--offline", action="store_true",
+                   help="airgapped: disable internet-dependent NSE (vulners)")
+    g.add_argument("--no-searchsploit", action="store_true",
+                   help="skip offline exploit mapping via searchsploit")
+    g.add_argument("--no-probes", action="store_true",
+                   help="skip the stdlib HTTP-header / TLS enrichment probes")
+    g.add_argument("--udp-top", type=int, help="also scan top-N UDP ports")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -2469,22 +2485,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
     _add_common(dp)
     _add_creds(dp)
-    dp.add_argument("--ssh-user", help="username for SSH (Linux hosts)")
-    dp.add_argument("--ssh-pass", help="SSH password (needs sshpass on PATH)")
-    dp.add_argument("--ssh-key", help="SSH private-key path")
-    dp.add_argument("--hash", help="NTLM hash for pass-the-hash (SMB/WinRM), with -u")
-    dp.add_argument("--stager", action="store_true",
+    dg = dp.add_argument_group("deploy options (optional)")
+    dg.add_argument("--ssh-user", help="username for SSH (Linux hosts)")
+    dg.add_argument("--ssh-pass", help="SSH password (needs sshpass on PATH)")
+    dg.add_argument("--ssh-key", help="SSH private-key path")
+    dg.add_argument("--hash", help="NTLM hash for pass-the-hash (SMB/WinRM), with -u")
+    dg.add_argument("--stager", action="store_true",
                     help="Windows hosts fetch + run the script IN MEMORY from a "
                          "short-lived local HTTP server (no temp file, any size); "
                          "auto-falls-back to the push path if a host can't reach you")
-    dp.add_argument("--lhost", help="your IP that targets route back to (for "
+    dg.add_argument("--lhost", help="your IP that targets route back to (for "
                                     "--stager; autodetected if omitted)")
-    dp.add_argument("--no-validate", action="store_true",
+    dg.add_argument("--no-validate", action="store_true",
                     help="skip the nxc credential precheck (select transport from "
                          "open ports only)")
-    dp.add_argument("--timeout", type=int, metavar="SEC",
+    dg.add_argument("--timeout", type=int, metavar="SEC",
                     help="per-host remote-exec ceiling (default 300s)")
-    dp.add_argument("--dry-run", action="store_true",
+    dg.add_argument("--dry-run", action="store_true",
                     help="show the per-host transport plan and exit; run nothing")
     dp.set_defaults(func=cmd_deploy)
 
