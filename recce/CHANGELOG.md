@@ -21,6 +21,18 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   scripts are read-only and run no exploit code / no evasion. (The `ingest`
   folding logic is now shared via `_fold_loot`, so `deploy` and `ingest` fold
   identically.)
+  - **nxc credential precheck.** Before running, `deploy` uses netexec to see which
+    protocols the given creds actually authenticate to across the targets (SMB
+    admin / WinRM / SSH) and picks the transport *proven* to work per host, rather
+    than guessing from open ports — so it only runs where it truly can.
+    `--no-validate` skips it.
+  - **`--stager` (in-memory Windows exec over HTTP).** The 39 KB Windows script is
+    too big to inline over SMB and a bloated blob over WinRM; with `--stager`,
+    recce stands up a short-lived stdlib HTTP server (random token path, torn down
+    after the run) and Windows hosts fetch + run it **in memory** via a one-line
+    download cradle — no temp file, no size limit. **Auto-falls-back** to the push
+    path if a host can't route back to `--lhost` (autodetected if omitted). SSH is
+    unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Changed
 - **Port sweep is now completeness-first — it won't silently miss open ports.**
