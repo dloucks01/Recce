@@ -188,6 +188,8 @@ class Host:
     ntlm: dict[str, Any] = field(default_factory=dict)  # domain/fqdn/os from NTLM
     smb_signing: str = ""                            # required / not required / unknown
     defenses: list[str] = field(default_factory=list)  # AV/EDR + posture (from recce-enum)
+    incomplete_scan: bool = False  # the port sweep was truncated (host-timeout) -
+                                   # the open-port list is PARTIAL, not authoritative
     enumerated: bool = False       # tool progress: service enumeration has run
     db_scanned: bool = False       # the `db` phase ran against this host
     privesc_checked: bool = False  # the `privesc` phase ran against this host

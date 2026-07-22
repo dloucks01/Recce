@@ -94,6 +94,26 @@ Tune the trade-off:
   host instead of a fast pass *then* a re-scan), so it's often the faster choice
   overall on a network you already know rate-limits.
 
+**recce also self-checks the sweep** — a host that comes back with **0 ports** is
+automatically re-scanned adaptively before "no ports" is trusted (discovered-live
+hosts always; add `--verify-all` to also re-check every `-Pn` host). If the
+re-scan finds ports, recce uses them and notes that the first pass under-reported.
+Turn it off with `--no-verify`.
+
+### A host shows `⚠ PARTIAL (sweep timed out)` / `status` lists it as incomplete
+
+The full `-p-` sweep didn't finish within `--host-timeout`, so that host's port
+list is **partial** — real open ports beyond where nmap stopped are missing, and
+every later phase only sees the partial set. Fix it by giving the sweep room:
+
+```bash
+sudo recce enum <that-ip> -Pn --host-timeout 60 -o eng   # more time, or:
+sudo recce enum <that-ip> -Pn --top-ports 2000 -o eng    # smaller scope, finishes
+```
+
+Re-scanning **unions** with what's already stored (never loses prior ports), and a
+sweep that completes clears the `incomplete_scan` flag.
+
 ## 5. Scans are too slow
 
 For a time-boxed engagement, in rough order of impact:
