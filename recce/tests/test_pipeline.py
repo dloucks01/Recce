@@ -2095,6 +2095,33 @@ class IngestServiceTest(unittest.TestCase):
             self.assertTrue(any("signing" in t for t in titles))
 
 
+class CheckboxPersistenceTest(unittest.TestCase):
+    def test_every_checkbox_header_round_trips(self):
+        """Every column with the checkbox role must be recognised by the read-back
+        (CHECKBOX_HEADERS), or the operator's ticks are silently lost on regen."""
+        from recce import report_excel as rx
+        from recce.models import Vuln, Credential
+        hosts = [Host(ip="10.0.0.5", os_family="Windows", roles=["Domain Controller"],
+                      local_findings=[{"category": "sudo",
+                                       "vector": "NOPASSWD sudo: /usr/bin/find",
+                                       "section": "Sudo", "source": "recce-enum"}],
+                      accounts=[__import__("recce.models", fromlist=["Account"]).Account(
+                          ip="10.0.0.5", source="nse", kind="domain", domain="CORP")],
+                      ports=[Port(portid=445, service="microsoft-ds")],
+                      vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                                  script_id="smb-vuln-ms17-010", title="ms17-010",
+                                  severity="high", source="nse", ids=["CVE-2017-0143"],
+                                  output="VULNERABLE")])]
+        creds = [Credential(username="alice", secret="Pw!", domain="CORP")]
+        pre, post = rx._ordered_specs(hosts, None, creds)
+        for spec in pre + post:
+            cb = [h for h, role, _w in spec.cols if role == "checkbox"]
+            for header in cb:
+                self.assertIn(header, rx.CHECKBOX_HEADERS,
+                              f"{spec.title}: checkbox column {header!r} not in "
+                              "CHECKBOX_HEADERS -> ticks won't persist")
+
+
 class HtmlReportTest(unittest.TestCase):
     def _hosts(self):
         from recce.models import Vuln

@@ -191,6 +191,12 @@ All notable changes to recce are documented here. Dates are UTC.
 - Removed the interactive authorization prompt and the `--yes` flag.
 
 ### Fixed
+- **Checkbox ticks on the Exploitation, Attack Path, and Credentials sheets now
+  persist.** Their checkbox columns use the headers *Done* / *Worked*, which the
+  workbook read-back didn't recognise (only *Reviewed*/*Checked*/*Triaged*), so an
+  operator's ticks on those sheets were silently dropped on the next regenerate.
+  Added *Done*/*Worked* to the recognised set, plus a regression test that asserts
+  **every** checkbox column across all sheets round-trips.
 - **`recce-enum.sh -o` now captures the COMPLETE run.** Previously only lines
   that passed through the emit helper reached the report file; raw command dumps
   (SUID/SGID lists, root processes, sockets, software inventory, interfaces, …)

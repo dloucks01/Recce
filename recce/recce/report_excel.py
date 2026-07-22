@@ -29,7 +29,7 @@ from . import xlsx
 from .exploitref import proven_exploit_ref
 from .models import Domain, Host
 
-CHECKBOX_HEADERS = {"Reviewed", "Checked", "Triaged"}
+CHECKBOX_HEADERS = {"Reviewed", "Checked", "Triaged", "Done", "Worked"}
 CHECKLIST_TITLE = "Checklist"
 Tracking = dict  # {key: (reviewed_bool, notes_str)}
 
