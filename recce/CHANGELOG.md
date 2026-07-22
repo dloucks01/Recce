@@ -58,6 +58,31 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     scans, so a later complete sweep clears the flag.)
 
 ### Fixed
+- **Exploits / exploitation surface was misleading — overhauled.** The
+  Vulnerabilities "Proven exploit" column matched a searchsploit hit to a finding
+  by **port alone**, so every finding on a port inherited that port's exploit — a
+  weak-TLS finding claimed a Heartbleed exploit, "anonymous FTP login" claimed the
+  vsftpd backdoor, unrelated Apache advisories all claimed the same path-traversal
+  RCE. Now: (1) a searchsploit hit only links to a finding whose **CVEs actually
+  match**, and is shown as a labelled **"candidate — verify"**, never as proof;
+  (2) the column is renamed **"Exploit"** and only curated, named exploits
+  (`proven_exploit_ref`) count as *proven* (and toward the Overview tile);
+  (3) config/crypto-hardening findings (weak ciphers, old TLS, missing headers,
+  anon login) never carry a proven exploit even if a CVE leaked into their output;
+  (4) the **Exploits** sheet gains a **"Corroborates finding?"** column (which
+  confirmed finding a candidate's CVEs line up with, else "product/version guess")
+  and lists corroborated candidates first — leads to verify, not noise.
+- **Truncated sweep no longer counts as fully scanned.** A host with a partial
+  (host-timeout) port list is no longer auto-marked Enumerated/Vuln-scanned *done*
+  in the Checklist/Overview coverage — it stays outstanding, matching the
+  `⚠ PARTIAL` marker (the operator can still tick it).
+- **`deploy`: a rejected Windows login is no longer folded as a successful run.**
+  `run_winrm`/`run_smb` now require the on-target script's own banner in the output
+  before declaring success (as the stager path already did), and the auth-failure
+  markers are tightened — recognize nxc's bare `[-]` reject and impacket `STATUS_*`
+  codes, and **stop** matching a benign "Proxy Authentication Required" as an auth
+  failure (which had suppressed the push fallback). A stager bind failure no longer
+  leaks the open datastore.
 - **Port sweep missed open ports on rate-limiting / lossy networks.** The sweep
   pinned `nmap --min-rate 1500` (with `--max-retries` 1–2), which prevents nmap's
   congestion control from backing off; on a network that drops probes the SYNs to

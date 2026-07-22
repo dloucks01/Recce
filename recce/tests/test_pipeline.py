@@ -2899,6 +2899,44 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(deploy.transport_for(self._host("3", "Linux", [22]), ssh, win, amap), "ssh")
         self.assertIsNone(deploy.transport_for(self._host("4", "Windows", [445]), ssh, win, amap))
 
+    def test_rejected_winrm_login_not_folded_as_success(self):
+        """A rejected nxc WinRM login is a bare '[-]' banner with no STATUS keyword
+        and no script output - it must be reported as a failure, never folded as a
+        successful run with garbage loot."""
+        from recce import deploy
+        o_run, o_smb = deploy._run, deploy.smb_tool
+        deploy.smb_tool = lambda: "nxc"
+        deploy._run = lambda argv, timeout, stdin=None: (
+            0, "WINRM 10.0.0.5 5985 HOST [-] corp\\u:BadPw", "")
+        try:
+            out, err = deploy.run_winrm("10.0.0.5", {"username": "u", "password": "x"},
+                                        "SCRIPT", 60)
+        finally:
+            deploy._run, deploy.smb_tool = o_run, o_smb
+        self.assertIsNone(out)                          # not a success
+        self.assertIn("auth", err.lower())
+
+    def test_exploit_cell_needs_cve_match_not_just_port(self):
+        from recce.report_excel import _exploit_cell, _curated_exploit
+        from recce.models import Exploit
+        host = Host(ip="1.1.1.1", exploits=[
+            Exploit(ip="1.1.1.1", port=80, edb_id="99999", cves=["CVE-2099-9999"])])
+        # unrelated port-80 finding, no shared CVE -> NO exploit attached (was the bug)
+        risky = Vuln(ip="1.1.1.1", port=80, protocol="tcp", script_id="http-methods",
+                     title="Risky HTTP methods enabled", severity="low", confidence="likely")
+        self.assertEqual(_exploit_cell(host, risky), "")
+        # a finding sharing the EDB's CVE -> a clearly-labelled CANDIDATE, not proof
+        match = Vuln(ip="1.1.1.1", port=80, protocol="tcp", script_id="x", title="Some RCE",
+                     severity="high", confidence="likely", ids=["CVE-2099-9999"])
+        cell = _exploit_cell(host, match)
+        self.assertIn("EDB-99999", cell)
+        self.assertIn("candidate", cell.lower())
+        # a weak-TLS finding never claims a proven exploit, even with heartbleed's CVE
+        tls = Vuln(ip="1.1.1.1", port=443, protocol="tcp", script_id="ssl-enum-ciphers",
+                   title="Weak SSL/TLS ciphers or protocols", severity="medium",
+                   confidence="likely", ids=["CVE-2014-0160"])
+        self.assertEqual(_curated_exploit(tls), "")
+
     def test_impacket_engine_runs_stager_cradle_when_no_nxc(self):
         """With netexec absent but impacket present, the Windows path uses
         impacket wmiexec (which pairs cleanly with --stager: runs the cradle, no

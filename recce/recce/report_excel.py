@@ -241,7 +241,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         ("Triaged", "checkbox", 9), ("Severity", "data", 10), ("IP", "data", 16),
         ("Hostname", "data", 20), ("Port", "data", 6), ("Finding", "data", 44),
         ("Source", "data", 11), ("Conf.", "data", 10), ("CVE / refs", "data", 22),
-        ("CWE", "data", 16), ("Proven exploit", "data", 52),
+        ("CWE", "data", 16), ("Exploit", "data", 52),
         ("Remediation", "data", 44), ("Details", "data", 50),
         ("Notes", "notes", 26), ("Key", "key", 4),
     ]
@@ -256,39 +256,88 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
             "Severity": v.severity.upper(), "IP": h.ip, "Hostname": h.hostname,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
             "Source": v.source, "Conf.": v.confidence, "CVE / refs": ", ".join(v.ids),
-            "CWE": ", ".join(v.cwes), "Proven exploit": _proven_exploit_for(h, v),
+            "CWE": ", ".join(v.cwes), "Exploit": _exploit_cell(h, v),
             "Remediation": v.remediation, "Details": out}})
     return SheetSpec("Vulnerabilities", cols, rows, _styler_vulns)
 
 
-def _proven_exploit_for(host: Host, v) -> str:
-    """The verifiable, proven exploit for a vuln - same rule as the Word write-ups:
-    a searchsploit/EDB match on this port, or a curated known exploit, and never
-    for an unconfirmed advisory (confidence 'potential'). Empty string otherwise."""
-    if v.confidence == "potential":
+# Config / crypto-hardening weaknesses are never "run this exploit" findings,
+# even if the scanner mentioned an exploitable CVE in passing (a weak-cipher
+# finding must never claim a Heartbleed exploit).
+_HARDENING_KW = ("weak", "cipher", "sslv", "tlsv1", "tls 1.0", "tls 1.1",
+                 "deprecated", "self-signed", "self signed", "expired", "missing",
+                 " header", "risky http", "anonymous", "banner grab", "clickjack",
+                 "cookie", "renegotiation", "compression")
+
+
+def _is_hardening_finding(v) -> bool:
+    t = (v.title or "").lower()
+    if any(k in t for k in _HARDENING_KW):
+        return True
+    return bool({c.upper() for c in (v.cwes or [])} & {"CWE-326", "CWE-327", "CWE-1104"})
+
+
+def _curated_exploit(v) -> str:
+    """A genuinely PROVEN public exploit for this finding (curated CVE/keyword ->
+    named Metasploit module / PoC), or ''. Never for a config-hardening finding or
+    an unconfirmed advisory. This is the trustworthy 'proven' signal."""
+    if v.confidence == "potential" or _is_hardening_finding(v):
         return ""
-    edb = [e for e in host.exploits if e.port == v.port and e.edb_id]
-    if edb:
-        return "searchsploit: " + ", ".join(f"EDB-{e.edb_id}" for e in edb[:4])
     return proven_exploit_ref(v.ids, f"{v.title} {v.script_id}") or ""
 
 
+def _candidate_exploits(host: Host, v) -> list:
+    """searchsploit EDB hits whose CVEs ACTUALLY match this finding (not merely the
+    same port). Unverified leads to check, never presented as proof."""
+    vids = {c.upper() for c in (v.ids or [])}
+    if not vids or v.confidence == "potential":
+        return []
+    return [e for e in host.exploits
+            if e.edb_id and vids & {c.upper() for c in (e.cves or [])}]
+
+
+def _exploit_cell(host: Host, v) -> str:
+    """The Exploit column: a proven curated exploit if we have one, else a
+    CVE-matched searchsploit candidate (clearly labelled to verify), else ''."""
+    proven = _curated_exploit(v)
+    if proven:
+        return proven
+    cands = _candidate_exploits(host, v)
+    if cands:
+        return "candidate — verify: " + ", ".join(f"EDB-{e.edb_id}" for e in cands[:4])
+    return ""
+
+
 def _spec_exploits(hosts: list[Host]) -> SheetSpec:
+    """searchsploit candidates. These are LOOSE Exploit-DB text matches on product
+    name/version - leads to verify, not confirmed exploits. The 'Corroborates'
+    column says whether a candidate's CVEs actually line up with a confirmed
+    finding on the host (high-signal) or it's only a product/version guess."""
     cols = [
         ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 22),
         ("Port", "data", 6), ("Product", "data", 20), ("Version", "data", 16),
-        ("EDB-ID", "data", 9), ("Type", "data", 12), ("Title", "data", 60),
+        ("EDB-ID", "data", 9), ("Type", "data", 12),
+        ("Corroborates finding?", "data", 34), ("Title", "data", 54),
         ("CVEs", "data", 24), ("Path", "data", 40), ("Notes", "notes", 28),
         ("Key", "key", 4),
     ]
     rows = []
     for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
+        entries = []
         for e in h.exploits:
+            ecves = {c.upper() for c in (e.cves or [])}
+            hits = ([v.title or v.script_id for v in h.vulns
+                     if ecves & {c.upper() for c in (v.ids or [])}] if ecves else [])
+            corro = "; ".join(dict.fromkeys(hits)) if hits else \
+                    "no — product/version guess, verify"
+            entries.append((bool(hits), e, corro))
+        # Corroborated candidates first, then loose product-name guesses.
+        for _matched, e, corro in sorted(entries, key=lambda t: (not t[0], t[1].type)):
             rows.append({"key": tr.exploit_key(e.ip, e.port, e.edb_id), "data": {
                 "IP": e.ip, "Hostname": h.hostname, "Port": e.port or "",
                 "Product": e.product, "Version": e.version, "EDB-ID": e.edb_id,
-                "Type": e.type, "Title": e.title, "CVEs": ", ".join(e.cves),
-                "Path": e.path}})
+                "Type": e.type, "Corroborates finding?": corro, "Title": e.title,
+                "CVEs": ", ".join(e.cves), "Path": e.path}})
     return SheetSpec("Exploits", cols, rows, skip_if_empty=True)
 
 
@@ -922,7 +971,7 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     # --- Totals (several labels link straight to the relevant sheet) ---
     sh.write([("Totals", "header"), ("", "header")])
     nav_set = set(nav)
-    proven = sum(1 for h in hosts for v in h.vulns if _proven_exploit_for(h, v))
+    proven = sum(1 for h in hosts for v in h.vulns if _curated_exploit(v))
     _links = {
         "Live hosts": "Checklist", "Open service ports": "Services",
         "Vuln findings": "Vulnerabilities", "High / Critical findings": "Vulnerabilities",
