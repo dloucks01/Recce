@@ -2,20 +2,9 @@
 
 All notable changes to recce are documented here. Dates are UTC.
 
-## [0.2.5] - 2026-07-22
+## [Unreleased]
 
-### Fixed
-- **`doctor` LDAP check was a false negative.** It reported `ldapsearch` missing
-  when only the `ldap3` Python package was installed, even though LDAP
-  enumeration works fine via ldap3 (the runtime gate `ad.ldap_available()` accepts
-  either). The check now mirrors that gate and is labelled `ldap` (shows which
-  backend it found — `ldapsearch` or the `ldap3 package`). Companion to the 0.2.4
-  browser/summary fixes; an audit confirmed the remaining checks (nmap, masscan,
-  ssh, netexec, impacket, openpyxl) already match their runtime gates.
-- **`doctor` searchsploit check** now calls `exploits.available()` (the runtime
-  gate) instead of a standalone `which()`, so it can't drift from actual behavior.
-
-## [0.2.4] - 2026-07-22
+_Accumulating fixes since 0.2.3; folded into the next tagged release._
 
 ### Fixed
 - **Browser detection missed installed browsers off PATH.** `doctor` (and the
@@ -26,10 +15,18 @@ All notable changes to recce are documented here. Dates are UTC.
   back to scanning `/usr/bin`, `/usr/local/bin`, `/bin`, `/snap/bin`, `/opt/bin`
   and a shallow `/opt/*/…` glob when nothing is on PATH (the `RECCE_BROWSER`
   override still wins).
+- **`doctor` LDAP check was a false negative.** It reported `ldapsearch` missing
+  when only the `ldap3` Python package was installed, even though LDAP
+  enumeration works fine via ldap3 (the runtime gate `ad.ldap_available()` accepts
+  either). The check now mirrors that gate and is labelled `ldap` (shows which
+  backend it found — `ldapsearch` or the `ldap3 package`).
 - **`doctor` summary contradicted its own tool list.** The "Optional tools
-  missing" line recomputed presence with a naive `which()`, so `browser` and
-  `netexec` could show `OK` in the detailed list yet still be listed as missing
-  in the summary. The summary now reuses the same detection the list prints.
+  missing" line recomputed presence with a naive `which()`, so `browser`/`netexec`
+  could show `OK` in the detailed list yet still be listed as missing in the
+  summary. The summary now reuses the same detection the list prints, and
+  `searchsploit` is checked via its runtime gate (`exploits.available()`) too.
+  An audit confirmed the remaining checks (nmap, masscan, ssh, impacket,
+  openpyxl) already match their runtime gates.
 
 ## [0.2.3] - 2026-07-22
 
