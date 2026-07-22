@@ -2899,6 +2899,36 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(deploy.transport_for(self._host("3", "Linux", [22]), ssh, win, amap), "ssh")
         self.assertIsNone(deploy.transport_for(self._host("4", "Windows", [445]), ssh, win, amap))
 
+    def test_impacket_engine_runs_stager_cradle_when_no_nxc(self):
+        """With netexec absent but impacket present, the Windows path uses
+        impacket wmiexec (which pairs cleanly with --stager: runs the cradle, no
+        file push)."""
+        from recce import deploy
+        seen = []
+
+        def fake_run(argv, timeout, stdin=None):
+            seen.append(argv[0])
+            return 0, "recce-enum host=x\n[!] finding", ""
+
+        class FS:
+            def url(self, n):
+                return f"http://1.2.3.4:8000/t/{n}"
+        o_run, o_smb, o_imp = deploy._run, deploy.smb_tool, deploy.impacket_tool
+        deploy._run = fake_run
+        deploy.smb_tool = lambda: None                                  # no nxc
+        deploy.impacket_tool = lambda n: "impacket-wmiexec" if n == "wmiexec" else None
+        try:
+            self.assertEqual(deploy.win_engine(), ("impacket", "impacket-wmiexec"))
+            out, err, status = deploy.run_win_stager(
+                "10.0.0.9", {"username": "a", "password": "b", "domain": "d"},
+                "smb", FS(), 60)
+            self.assertEqual(status, "ok")
+            self.assertEqual(seen[0], "impacket-wmiexec")
+            self.assertEqual(deploy._impacket_target({"username": "a", "hash": "NT"}, "1.2.3.4"),
+                             "a@1.2.3.4")
+        finally:
+            deploy._run, deploy.smb_tool, deploy.impacket_tool = o_run, o_smb, o_imp
+
     def test_stager_unreachable_falls_back_to_push(self):
         from recce import deploy
         win = {"username": "a", "password": "b"}
