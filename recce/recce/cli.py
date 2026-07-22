@@ -1,11 +1,11 @@
 """Command-line entrypoint for recce.
 
-Subcommands:
-  scan     run enumeration across targets, store results, generate reports
-  report   (re)generate reports from an existing datastore (preserves tracking)
-  status   print live review-coverage from the datastore
-  review   mark hosts / services / items reviewed (or un-review) from the CLI
-  demo     build reports from a bundled sample nmap XML (no network needed)
+Subcommands (see `recce -h` for the full, authoritative list):
+  Scan/enumerate  enum, scan, vulns, db, privesc, credenum, services
+  Import/ingest   import (nmap -oX/-oG/-oN), ingest (on-target loot)
+  Post-exploit    exploitplan, attackpath, creds
+  Report/track    report, status, review, writeups, writeup
+  Utility         demo (bundled sample, no network), doctor (self-test)
 """
 
 from __future__ import annotations
@@ -1767,8 +1767,8 @@ def cmd_import(args: argparse.Namespace) -> int:
         print(f"    {os.path.basename(f)}: {len(hs)} host(s)")
         parsed.extend(hs)
     if not parsed:
-        print("[x] Nothing parsed. Use nmap XML (-oX) or grepable (-oG) output - "
-              "the normal (-oN) text format can't be parsed reliably.")
+        print("[x] Nothing parsed. Point at nmap XML (-oX, best), grepable "
+              "(-oG), or normal (-oN, .nmap) output.")
         return 1
 
     paths = _open_paths(args.output_dir)
@@ -2304,9 +2304,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Import an existing nmap scan (XML / grepable) -> workbook, no scanning.
     imp = sub.add_parser("import",
-                         help="import an existing nmap scan (-oX XML / -oG grepable) -> sheet")
+                         help="import an existing nmap scan (-oX / -oG / -oN) -> sheet")
     imp.add_argument("files", nargs="+",
-                     help="nmap .xml / .gnmap file(s), a directory, or a glob")
+                     help="nmap .xml / .gnmap / .nmap file(s), a directory, or a glob")
     imp.add_argument("-o", "--output-dir", default="engagement")
     imp.add_argument("--title", default="Recce Engagement",
                      help="engagement title (only used when starting a fresh datastore)")
