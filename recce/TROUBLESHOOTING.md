@@ -70,16 +70,29 @@ recce handles this two ways:
 
 - **Automatic:** when recce sees nmap dropping probes, it **re-scans that host
   congestion-adaptively** on its own — no `--min-rate` floor, more retries (`6`),
-  gentler `-T3` timing, more time — which is exactly how a manual nmap eventually
-  finds the ports. You'll see a `port-sweep: network rate-limiting detected …`
-  note on the host.
+  gentler `-T3` timing — which is exactly how a manual nmap eventually finds the
+  ports. You'll see a `port-sweep: network rate-limiting detected …` note on the
+  host.
 - **`--reliable`:** if you already know the network is lossy, force that mode from
   the first pass (skips the wasted fast attempt):
   ```bash
   sudo recce enum 10.0.10.0/24 -Pn --reliable -o eng
   ```
-  Pair with a larger **`--host-timeout`** if the adaptive scan needs more wall-clock
-  on a big `-p-` sweep.
+
+**Won't it take forever without `--min-rate`?** No — the adaptive scan is bounded
+by the **same `--host-timeout`** as every other host (20 min by default). nmap
+abandons a host when that fires and writes whatever it found, so it returns
+*partial* results, never "hours/days" — and partial beats the fast pass's zero.
+Tune the trade-off:
+
+- **Faster / bounded tighter:** lower `--host-timeout`, or set your own gentle
+  floor with `--min-rate 200` instead of `--reliable` (keeps a rate floor but well
+  below the 1500 default that triggered the drops).
+- **More complete:** raise `--host-timeout` so the adaptive `-p-` sweep has room to
+  finish, or narrow the scope (`--top-ports 1000`) so each host is quick.
+- **Big scope + lossy:** `--reliable` avoids the double scan (one adaptive pass per
+  host instead of a fast pass *then* a re-scan), so it's often the faster choice
+  overall on a network you already know rate-limits.
 
 ## 5. Scans are too slow
 

@@ -14,10 +14,13 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   ports" even though a manual nmap (which slows down — "increasing send delay due
   to dropped probes") found them. recce now **detects the drop condition in
   nmap's output and automatically re-scans that host congestion-adaptively** (no
-  `--min-rate` floor, `--max-retries 6`, `-T3`, more wall-clock), which is what
-  finds the ports. New `--reliable` flag forces that mode from the first pass for
-  networks you already know rate-limit. Clean scans are unaffected (no second
-  pass).
+  `--min-rate` floor, `--max-retries 6`, `-T3`), which is what finds the ports.
+  The adaptive re-scan stays bounded by the same `--host-timeout` as any host, so
+  it returns partial results rather than running for hours (raise `--host-timeout`
+  for more completeness, or set a gentle `--min-rate 200` floor to bound it more
+  tightly). New `--reliable` flag forces adaptive mode from the first pass for
+  networks you already know rate-limit (and avoids the double scan). Clean scans
+  are unaffected (no second pass).
 - **Browser detection missed installed browsers off PATH.** `doctor` (and the
   auto-screenshot feature) reported "browser not present" when Firefox/Chromium
   were installed but not on the PATH recce sees — common on Kali when scans run
