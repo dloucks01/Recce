@@ -53,7 +53,7 @@ MONO_COLS = {
     "Port", "Proto", "Version", "CVE / refs", "CWE", "Scope", "CPE",
     "Extra info", "RID", "EDB-ID", "CVEs", "Hosts (ip:port)", "Open ports",
     "# Vulns", "# Hosts", "Script", "Path", "SPN", "Command (fill in your values)",
-    "Enum command",
+    "Enum command", "Command",
 }
 
 
@@ -77,7 +77,7 @@ TAB_COLORS = {
     "Checklist": _TAB_WORK, "Services": _TAB_WORK,
     "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND,
     "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
-    "Exploitation": _TAB_FIND,
+    "Exploitation": _TAB_FIND, "Attack Path": _TAB_FIND,
     "Services by Product": _TAB_INV, "Databases": _TAB_INV,
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
     "Raw NSE": _TAB_RAW,
@@ -401,6 +401,25 @@ def _spec_exploitation(hosts: list[Host]) -> SheetSpec:
         "Defenses (host)": defenses.get(a["ip"], "")}}
         for a in xp.all_actions(hosts)]
     return SheetSpec("Exploitation", cols, rows, skip_if_empty=True)
+
+
+def _spec_attackpath(hosts: list[Host]) -> SheetSpec:
+    """The confirmed findings chained into a prioritised attack path (foothold ->
+    priv-esc -> creds -> lateral -> domain), grounded in what recce found. Empty
+    (sheet skipped) until there are confirmed, chainable findings."""
+    from . import attackpath as ap
+    cols = [
+        ("Done", "checkbox", 9), ("Stage", "data", 20), ("IP", "data", 22),
+        ("Hostname", "data", 16), ("Step", "data", 34), ("Existing tool", "data", 26),
+        ("Command", "data", 60), ("Why it matters", "data", 40),
+        ("Notes", "notes", 20), ("Key", "key", 4),
+    ]
+    rows = [{"key": s["key"], "data": {
+        "Stage": s["stage"], "IP": s["ip"], "Hostname": s["hostname"],
+        "Step": s["title"], "Existing tool": s["tool"], "Command": s["cmd"],
+        "Why it matters": s["why"]}}
+        for s in ap.build(hosts)]
+    return SheetSpec("Attack Path", cols, rows, skip_if_empty=True)
 
 
 def _spec_quick_wins(hosts: list[Host]) -> SheetSpec:
@@ -1079,7 +1098,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
             _spec_exploits(hosts), _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
            [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts),
-            _spec_exploitation(hosts), _spec_raw_nse(hosts)]
+            _spec_exploitation(hosts), _spec_attackpath(hosts), _spec_raw_nse(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,

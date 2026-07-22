@@ -1263,6 +1263,40 @@ def cmd_exploitplan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_attackpath(args: argparse.Namespace) -> int:
+    """Chain the confirmed findings into a prioritised attack path (foothold ->
+    priv-esc -> creds -> lateral -> domain), grounded in what recce found."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    store.close()
+    from . import attackpath as ap
+
+    steps = ap.build(hosts)
+    for line in ap.narrative(hosts, steps):
+        print(line)
+    if not steps:
+        return 0
+    print()
+    cur = None
+    for s in steps:
+        if s["stage"] != cur:
+            cur = s["stage"]
+            print(f"== {cur} ==")
+        tgt = s["ip"] + (f" ({s['hostname']})" if s["hostname"] else "")
+        print(f"  [{tgt}] {s['title']}")
+        print(f"       {s['tool']}:  {s['cmd']}")
+    print("\n  Full table on the Attack Path sheet; runnable artifacts via "
+          "`recce exploitplan`.")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check that this box can run the tool, and optionally prove it with a
     real localhost self-scan. Run this on any system before an engagement."""
@@ -2117,6 +2151,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="arm the Metasploit launch lines (default: check-only, safe). "
                          "Use ONLY within your rules of engagement.")
     ep.set_defaults(func=cmd_exploitplan)
+
+    # Attack-path synthesis: chain confirmed findings into a staged path.
+    ap = sub.add_parser("attackpath",
+                        help="chain confirmed findings into a prioritised attack path "
+                             "(foothold -> priv-esc -> creds -> lateral -> domain)")
+    ap.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    ap.add_argument("-o", "--output-dir", default="engagement")
+    ap.set_defaults(func=cmd_attackpath)
 
     # Convenience: enum + vulns in one shot.
     s = sub.add_parser("scan", help="run enum then vulns in one shot")

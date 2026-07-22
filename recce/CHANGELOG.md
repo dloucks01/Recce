@@ -5,6 +5,15 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **`attackpath` command + Attack Path sheet** — chains the **confirmed** findings
+  into a prioritised, client-ready attack path: *foothold → privilege escalation →
+  credential access → lateral movement → domain dominance*. Grounded entirely in
+  what recce found (it reuses the exploitation actions and stages them); every
+  step names the specific host and the existing tool, and a one-line narrative
+  summarises the likely chain (e.g. *foothold via vsftpd backdoor on X → harvest
+  creds → pivot to domain compromise on the DC*). It's the "so what" — how the
+  individual findings combine into an attacker's route. Empty until findings are
+  confirmed.
 - **AV/EDR awareness (detection, not evasion)** — when you `ingest` a
   `recce-enum.ps1` run, recce now captures the host's **AV/EDR product + defensive
   posture** (Defender real-time/tamper state, EDR agents like CrowdStrike/

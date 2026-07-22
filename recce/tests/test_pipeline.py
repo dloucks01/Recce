@@ -1925,6 +1925,7 @@ class CliSmokeTest(unittest.TestCase):
                      ["writeup", "F-007", "-o", "eng"],
                      ["services", "-o", "eng", "-a"],
                      ["exploitplan", "-o", "eng", "--lhost", "10.0.0.1", "--run"],
+                     ["attackpath", "-o", "eng"],
                      ["ingest", "loot.txt", "--host", "1.2.3.4"],
                      ["import", "scan.xml", "-o", "eng"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
@@ -2091,6 +2092,58 @@ class IngestServiceTest(unittest.TestCase):
             self.assertIn("10.0.0.9", hosts)            # new host created from output
             titles = [v.title for v in hosts["10.0.0.5"].vulns]
             self.assertTrue(any("signing" in t for t in titles))
+
+
+class AttackPathTest(unittest.TestCase):
+    def _hosts(self):
+        from recce.models import Vuln, Account
+        dc = Host(ip="10.0.10.5", hostnames=["dc01"], os_family="Windows",
+                  roles=["Domain Controller"], smb_signing="not required",
+                  accounts=[Account(ip="10.0.10.5", source="nse", kind="domain",
+                                    domain="CORP")],
+                  ports=[Port(portid=445, service="microsoft-ds"),
+                         Port(portid=5985, service="http")],
+                  vulns=[Vuln(ip="10.0.10.5", port=445, protocol="tcp",
+                              script_id="smb-vuln-ms17-010", title="smb-vuln-ms17-010",
+                              severity="high", source="nse", ids=["CVE-2017-0143"],
+                              output="VULNERABLE"),
+                         Vuln(ip="10.0.10.5", port=0, protocol="tcp",
+                              script_id="local-enum", title="SeImpersonate -> Potato",
+                              severity="high", source="local", confidence="confirmed",
+                              output="SeImpersonate held")])
+        return [dc]
+
+    def test_stages_and_ordering(self):
+        from recce import attackpath as ap
+        steps = ap.build(self._hosts())
+        stages = [s["stage"] for s in steps]
+        # ordered by STAGE_ORDER
+        idx = [ap.STAGE_ORDER.index(s) for s in stages]
+        self.assertEqual(idx, sorted(idx))
+        self.assertIn("Initial Access", stages)          # ms17-010
+        self.assertIn("Privilege Escalation", stages)    # SeImpersonate/Potato
+        self.assertIn("Domain Dominance", stages)        # AS-REP/Kerberoast/relay on DC
+        self.assertIn("Lateral Movement", stages)        # SMB/WinRM present
+
+    def test_narrative_grounded(self):
+        from recce import attackpath as ap
+        hosts = self._hosts()
+        text = " ".join(ap.narrative(hosts))
+        self.assertIn("Likely path", text)
+        self.assertIn("10.0.10.5", text)                 # names the real host
+
+    def test_attackpath_sheet(self):
+        from recce.report_excel import _spec_attackpath
+        spec = _spec_attackpath(self._hosts())
+        self.assertEqual(spec.title, "Attack Path")
+        self.assertIn("Stage", [c[0] for c in spec.cols])
+        self.assertTrue(spec.rows)
+
+    def test_empty_when_no_confirmed(self):
+        from recce import attackpath as ap
+        h = Host(ip="10.0.0.1", os_family="Linux",
+                 ports=[Port(portid=23, service="telnet")])
+        self.assertEqual(ap.build([h]), [])              # no confirmed findings
 
 
 class AVAwarenessTest(unittest.TestCase):
