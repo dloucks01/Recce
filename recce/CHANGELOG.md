@@ -38,6 +38,16 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     path if a host can't route back to `--lhost` (autodetected if omitted). SSH is
     unchanged (its stdin-pipe already runs in memory at any size).
 
+### Added
+- **Domain-qualified usernames are accepted anywhere creds are given.** `-u` now
+  takes the credential however AD hands it to you — `CORP\user`,
+  `corp.local/user`, or `user@corp.local` — and splits the domain out for you, so
+  `-d` becomes optional (an explicit `-d` still wins, keeping e.g. the FQDN form
+  over an embedded NetBIOS name). The domain flows through the whole authenticated
+  path: nxc (`-d`), impacket (`domain/user`), WinRM and SMB. Applies to every
+  credentialed command (`deploy`, `credenum`, `vulns`, `db`, `privesc`) and to the
+  privileged `--admin-user` account.
+
 ### Changed
 - **`deploy` now reports every host's outcome: succeeded / errored / unable.**
   Previously a host with no usable transport (no SSH/WinRM/SMB port, or creds that

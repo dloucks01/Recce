@@ -2821,6 +2821,31 @@ class DeployTest(unittest.TestCase):
                       deploy.skip_reason(self._host("4", "Windows", [445, 5985]),
                                          ssh, win, amap))
 
+    def test_domain_qualified_username_is_split(self):
+        from recce import cli
+
+        class A:
+            def __init__(self, u, d=None, p="Pw"):
+                self.username, self.domain, self.password = u, d, p
+        # NetBIOS backslash form.
+        c = cli._creds_of(A("CORP\\administrator"))
+        self.assertEqual((c["username"], c["domain"]), ("administrator", "CORP"))
+        # UPN @ form.
+        c = cli._creds_of(A("administrator@corp.local"))
+        self.assertEqual((c["username"], c["domain"]), ("administrator", "corp.local"))
+        # domain/user form.
+        c = cli._creds_of(A("corp.local/svc"))
+        self.assertEqual((c["username"], c["domain"]), ("svc", "corp.local"))
+        # Explicit -d wins over an embedded NetBIOS domain.
+        c = cli._creds_of(A("CORP\\administrator", d="corp.local"))
+        self.assertEqual((c["username"], c["domain"]), ("administrator", "corp.local"))
+        # Plain username, explicit domain - unchanged.
+        c = cli._creds_of(A("administrator", d="corp.local"))
+        self.assertEqual((c["username"], c["domain"]), ("administrator", "corp.local"))
+        # Plain username, no domain.
+        c = cli._creds_of(A("administrator"))
+        self.assertEqual((c["username"], c["domain"]), ("administrator", ""))
+
     def test_ps_payload_is_utf16le_base64(self):
         import base64
         from recce import deploy
