@@ -2562,6 +2562,55 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(verdicts[0], proofs.CONFIRMED)
         self.assertEqual(verdicts[-1], proofs.FALSE_POSITIVE)
 
+    def test_printnightmare_verdicts(self):
+        from recce import proofs
+        # On-target LPE precondition present -> LIKELY.
+        h = Host(ip="10.0.0.5", os_family="Windows", local_findings=[{"category": "hardening",
+                 "vector": "PrintNightmare surface: Spooler running + PointAndPrint "
+                           "NoWarningNoElevationOnInstall=1 (CVE-2021-34527)"}])
+        h.vulns = [self._vuln(title="PrintNightmare surface", script_id="local")]
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.LIKELY)
+        # Non-Windows host flagged -> FALSE POSITIVE.
+        h2 = Host(ip="10.0.0.6", os_family="Linux")
+        h2.vulns = [self._vuln(ip="10.0.0.6", title="printnightmare (CVE-2021-34527)")]
+        self.assertEqual(proofs.verify_host(h2)[0]["verdict"], proofs.FALSE_POSITIVE)
+
+    def test_bluekeep_os_gating(self):
+        from recce import proofs
+        old = Host(ip="10.0.0.5", os_name="Windows 7 Professional",
+                   ports=[Port(portid=3389, service="ms-wbt-server", state="open")])
+        old.vulns = [self._vuln(port=3389, title="BlueKeep", ids=["CVE-2019-0708"])]
+        self.assertEqual(proofs.verify_host(old)[0]["verdict"], proofs.LIKELY)
+        new = Host(ip="10.0.0.6", os_name="Windows Server 2019",
+                   ports=[Port(portid=3389, service="ms-wbt-server", state="open")])
+        new.vulns = [self._vuln(ip="10.0.0.6", port=3389, title="BlueKeep",
+                                ids=["CVE-2019-0708"])]
+        self.assertEqual(proofs.verify_host(new)[0]["verdict"], proofs.FALSE_POSITIVE)
+
+    def test_zerologon_only_on_dcs(self):
+        from recce import proofs
+        dc = Host(ip="10.0.0.5", os_family="Windows",
+                  ports=[Port(portid=88, service="kerberos", state="open"),
+                         Port(portid=389, service="ldap", state="open")])
+        dc.vulns = [self._vuln(port=None, title="ZeroLogon", ids=["CVE-2020-1472"])]
+        self.assertEqual(proofs.verify_host(dc)[0]["verdict"], proofs.LIKELY)
+        member = Host(ip="10.0.0.6", os_family="Windows",
+                      ports=[Port(portid=445, service="microsoft-ds", state="open")])
+        member.vulns = [self._vuln(ip="10.0.0.6", title="ZeroLogon", ids=["CVE-2020-1472"])]
+        self.assertEqual(proofs.verify_host(member)[0]["verdict"], proofs.FALSE_POSITIVE)
+
+    def test_heartbleed_and_kerberoast(self):
+        from recce import proofs
+        h = Host(ip="10.0.0.5", ports=[Port(portid=443, service="https", state="open")])
+        h.vulns = [self._vuln(port=443, script_id="ssl-heartbleed", title="heartbleed",
+                              state="VULNERABLE", source="nse")]
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED)
+        k = Host(ip="10.0.0.7", os_family="Windows",
+                 local_findings=[{"category": "lateral",
+                                  "vector": "Kerberoastable accounts (SPN set): svc_sql"}])
+        k.vulns = [self._vuln(ip="10.0.0.7", title="Kerberoastable accounts (SPN set): svc_sql")]
+        self.assertEqual(proofs.verify_host(k)[0]["verdict"], proofs.CONFIRMED)
+
     def test_verification_sheet_builds(self):
         from recce.report_excel import _spec_verification
         h = Host(ip="10.0.0.5", smb_signing="not required",

@@ -74,6 +74,17 @@ def _local(host: Host, pattern: str) -> str | None:
     return None
 
 
+def _os_blob(host: Host) -> str:
+    return f"{host.os_name} {host.os_family}".lower()
+
+
+def _is_dc(host: Host) -> bool:
+    if any("domain controller" in r.lower() or "directory" in r.lower()
+           for r in getattr(host, "roles", []) or []):
+        return True
+    return any(p.portid in {88, 389, 636, 3268, 3269, 464} for p in host.open_ports)
+
+
 # --- per-type verdict functions -------------------------------------------------
 
 def _v_activemq(host, port, vuln):
@@ -173,6 +184,93 @@ def _v_weak_tls(host, port, vuln):
                        "<ip>:<port> -tls1 (a successful handshake confirms it)."]
 
 
+def _v_printnightmare(host, port, vuln):
+    if "windows" not in _os_blob(host) and host.os_family:
+        return FALSE_POSITIVE, ["PrintNightmare is Windows-only; this host isn't Windows -> dismiss."]
+    surface = _local(host, r"printnightmare surface|nowarningnoelevation")
+    if surface:
+        return LIKELY, [f"On-target enum confirms the LPE precondition: {surface}",
+                        "Spooler is running and Point-and-Print allows non-admin driver installs -> the "
+                        "CVE-2021-34527 surface is present. Exploitability is patch-dependent."]
+    return INCONCLUSIVE, ["Flagged, but the Spooler state/config isn't confirmed on-target.",
+                          "Confirm non-intrusively: rpcdump.py @<ip> | egrep 'MS-RPRN|MS-PAR' (the print RPC "
+                          "interface). Present + unpatched -> real; interface absent / Spooler disabled -> FP."]
+
+
+def _v_bluekeep(host, port, vuln):
+    osn = _os_blob(host)
+    rdp = _port_open(host, 3389)
+    newer = re.search(r"windows (8|8\.1|10|11)|server 20(12|16|19|22)|windows 20(12|16|19|22)", osn)
+    older = re.search(r"windows (xp|vista|7)\b|server 200[38]|2008 r2|windows 200[38]", osn)
+    if newer and not older:
+        return FALSE_POSITIVE, [f"OS ({host.os_name or host.os_family}) is Windows 8 / Server 2012 or newer "
+                                "-> not affected by BlueKeep (CVE-2019-0708). Dismiss."]
+    if older:
+        ev = ["OS is in the BlueKeep pre-auth RCE range (XP/2003/Vista/7/2008/2008R2)."]
+        ev.append("RDP (3389) is open -> reachable." if rdp
+                  else "RDP 3389 not seen open - confirm it's reachable first.")
+        return LIKELY, ev
+    return INCONCLUSIVE, ["Exact Windows version unknown; only XP/2003/Vista/7/2008(R2) are affected. "
+                          "Collect it (nmap -O / smb-os-discovery)."]
+
+
+def _v_heartbleed(host, port, vuln):
+    nse = _nse_vulnerable(vuln)
+    if nse is True:
+        return CONFIRMED, ["nmap ssl-heartbleed reports VULNERABLE - a detection that reads a small leaked "
+                           "chunk (non-destructive) -> CONFIRMED."]
+    if nse is False:
+        return FALSE_POSITIVE, ["The ssl-heartbleed check reports NOT VULNERABLE (patched OpenSSL) -> dismiss."]
+    prod, ver = _pv(host, vuln)
+    if ver and "openssl" in prod.lower() and _cmp(ver, "1.0.1") >= 0 and _cmp(ver, "1.0.1g") < 0:
+        return LIKELY, [f"OpenSSL {ver} is in the Heartbleed range (1.0.1-1.0.1f)."]
+    return LIKELY, ["Prove non-intrusively: nmap --script ssl-heartbleed -p<port> <ip> (VULNERABLE = real, "
+                    "NOT VULNERABLE = FP)."]
+
+
+def _v_log4shell(host, port, vuln):
+    return LIKELY, ["Log4Shell can't be proven from a banner - it depends on the app's bundled log4j version.",
+                    "Prove non-intrusively with an out-of-band callback: inject ${jndi:ldap://<your-listener>/x} "
+                    "into every input (User-Agent, X-Forwarded-For, form fields, search boxes) and watch a DNS/"
+                    "LDAP listener you control (interactsh / your own DNS). A callback = CONFIRMED.",
+                    "It's just a DNS lookup - no exploitation. No callback from any input -> not vulnerable / "
+                    "egress-filtered."]
+
+
+def _v_zerologon(host, port, vuln):
+    if not _is_dc(host):
+        return FALSE_POSITIVE, ["ZeroLogon (CVE-2020-1472) only affects Domain Controllers; this host isn't a "
+                                "DC (no AD/LDAP/Kerberos ports, no DC role) -> dismiss."]
+    return LIKELY, ["Host is a Domain Controller -> in scope for ZeroLogon.",
+                    "Prove with the DETECTION-ONLY checker (it stops before changing anything): "
+                    "zerologon_tester.py <DC-netbios-name> <ip>.",
+                    "WARNING: the full exploit resets the DC machine-account password and can break AD - "
+                    "detection-only unless you have a password-restore plan and explicit ROE."]
+
+
+def _v_kerberoast(host, port, vuln):
+    return CONFIRMED, ["The account carrying an SPN exists (the AD query returned it) -> the roasting TARGET "
+                       "is real and confirmed.",
+                       "Requesting its service ticket is a normal, non-destructive Kerberos operation; whether "
+                       "it cracks depends on the password strength.",
+                       "Prove end-to-end: impacket-GetUserSPNs <dom>/<user>:<pw> -request (or Rubeus kerberoast) "
+                       "-> hashcat -m 13100 <hashes> <wordlist>."]
+
+
+def _v_asrep(host, port, vuln):
+    return CONFIRMED, ["The account has Kerberos pre-auth disabled (the AD query returned it) -> AS-REP "
+                       "roastable, confirmed.",
+                       "Requesting the AS-REP needs no credentials and is non-destructive.",
+                       "Prove: impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass -> hashcat -m 18200."]
+
+
+def _v_default_creds(host, port, vuln):
+    return LIKELY, ["Default/weak credentials are only proven by trying them (mind account-lockout policy so "
+                    "you don't lock the account).",
+                    "Prove: nxc <proto> <ip> -u <default-user> -p <default-pass> (or the product's documented "
+                    "default login). A successful auth = CONFIRMED; failures across the known defaults = FP."]
+
+
 # --- recipe registry ------------------------------------------------------------
 # match: regex over (title + script_id + CVEs + output). fn: the verdict function.
 
@@ -234,6 +332,65 @@ _RECIPES: list[dict] = [
                "handshake on the weak protocol confirms it).",
      "fp": "Rarely a FP - it is a direct observation. Judge business impact, not existence.",
      "fn": _v_weak_tls},
+    {"id": "printnightmare", "match": r"printnightmare|cve-2021-34527|cve-2021-1675|spooler.*rce|"
+                                      r"rpcaddprinterdriver",
+     "name": "PrintNightmare (CVE-2021-34527 / 1675, Print Spooler)",
+     "pre": ["Print Spooler service running", "Point-and-Print allows non-admin driver install "
+             "(NoWarningNoElevationOnInstall=1) OR the host is unpatched"],
+     "finish": "rpcdump.py @<ip> | egrep 'MS-RPRN|MS-PAR' to confirm the interface; then the public PoC "
+               "(cube0x0 CVE-2021-1675.py for RCE via a share, or Benjamin Delpy's for the LPE) - in ROE.",
+     "fp": "Spooler disabled/stopped, or fully patched (Aug-2021+ with Point-and-Print locked down), or "
+           "not a Windows host.",
+     "fn": _v_printnightmare},
+    {"id": "bluekeep", "match": r"bluekeep|cve-2019-0708|rdp.*(pre-?auth|remote code)",
+     "name": "BlueKeep RDP pre-auth RCE (CVE-2019-0708)",
+     "pre": ["RDP (3389) reachable", "OS is XP/2003/Vista/7/2008/2008R2"],
+     "finish": "rdpscan <ip> (safe check mode) or msf auxiliary/scanner/rdp/cve_2019_0708_bluekeep (CHECK) "
+               "to confirm; the exploit can bugcheck the host -> lab / ROE with a restore plan.",
+     "fp": "Windows 8 / Server 2012 or newer (not affected), or RDP not reachable.",
+     "fn": _v_bluekeep},
+    {"id": "heartbleed", "match": r"heartbleed|cve-2014-0160|ssl-heartbleed",
+     "name": "Heartbleed OpenSSL memory disclosure (CVE-2014-0160)",
+     "pre": ["TLS service using OpenSSL 1.0.1 - 1.0.1f"],
+     "finish": "nmap --script ssl-heartbleed -p<port> <ip> (non-intrusive; VULNERABLE = real). It leaks a "
+               "small memory chunk - safe to run, and the leaked bytes are the proof.",
+     "fp": "The NSE check says NOT VULNERABLE (patched OpenSSL, or not OpenSSL).",
+     "fn": _v_heartbleed},
+    {"id": "log4shell", "match": r"log4shell|log4j|cve-2021-44228|cve-2021-45046|jndi",
+     "name": "Log4Shell JNDI RCE (CVE-2021-44228)",
+     "pre": ["A Java app that logs attacker-controlled input via a vulnerable log4j (2.0-2.14.1)"],
+     "finish": "inject ${jndi:ldap://<your-oob-listener>/x} into every input and watch a DNS/LDAP listener "
+               "you own (interactsh) for a callback; then the public PoC to escalate a confirmed hit - in ROE.",
+     "fp": "No OOB callback from any injection point -> not vulnerable or egress-filtered.",
+     "fn": _v_log4shell},
+    {"id": "zerologon", "match": r"zerologon|cve-2020-1472|netlogon.*(privilege|elevation)",
+     "name": "ZeroLogon Netlogon privilege escalation (CVE-2020-1472)",
+     "pre": ["Target is a Domain Controller", "DC unpatched (pre Aug-2020)"],
+     "finish": "zerologon_tester.py <DC-netbios-name> <ip> (DETECTION-only - it stops before changing "
+               "anything). Full PoC resets the machine-account password: lab / ROE with a restore plan only.",
+     "fp": "Not a Domain Controller, or the DC is patched.",
+     "fn": _v_zerologon},
+    {"id": "kerberoast", "match": r"kerberoast",
+     "name": "Kerberoastable service account (SPN)",
+     "pre": ["A domain account with a servicePrincipalName", "Any valid domain credential to request the TGS"],
+     "finish": "impacket-GetUserSPNs <dom>/<user>:<pass> -request  ->  hashcat -m 13100.",
+     "fp": "Existence is confirmed by the query; the only question is whether the ticket cracks "
+           "(strong / gMSA passwords won't).",
+     "fn": _v_kerberoast},
+    {"id": "asrep", "match": r"as-?rep roast",
+     "name": "AS-REP roastable account (no pre-auth)",
+     "pre": ["A domain account with Kerberos pre-authentication disabled"],
+     "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
+     "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
+     "fn": _v_asrep},
+    {"id": "default-creds", "match": r"default (credential|password|login)|weak credential|"
+                                     r"default (user|account)",
+     "name": "Default / weak credentials",
+     "pre": ["A service reachable with a known default or weak credential"],
+     "finish": "nxc <proto> <ip> -u <default-user> -p <default-pass> (respect account-lockout), or the "
+               "product's documented default login.",
+     "fp": "The known defaults all fail to authenticate.",
+     "fn": _v_default_creds},
 ]
 _COMPILED = [(re.compile(r["match"], re.I), r) for r in _RECIPES]
 
