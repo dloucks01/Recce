@@ -1222,6 +1222,47 @@ def cmd_services(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_exploitplan(args: argparse.Namespace) -> int:
+    """Generate a per-finding exploitation PLAN: ready-to-run artifacts that drive
+    EXISTING published tools/modules with the discovered parameters filled in.
+    Confirmed findings only; safe by default (msf launch lines commented)."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    store.close()
+    from . import exploitplan
+
+    summary = exploitplan.build_plan(hosts, args.output_dir, lhost=args.lhost,
+                                     lport=args.lport, run=args.run)
+    if not summary["plans"]:
+        print("[!] No confirmed findings map to a published exploit/tool yet.")
+        print("    Plans cover CONFIRMED findings only (not 'potential' version "
+              "guesses). Run `vulns` for deeper detection, or `ingest` on-target loot.")
+        return 0
+    print(f"[+] Exploitation plan -> {summary['dir']}/")
+    print(f"    {summary['host_scripts']} per-host plan script(s), "
+          f"{summary['rc_files']} Metasploit resource (.rc) file(s), "
+          f"{summary['actions']} action(s) across {len(summary['plans'])} host(s).")
+    print("    Each artifact configures an EXISTING published tool/module with the")
+    print("    target's own parameters. recce authors no exploit code.")
+    if args.lhost == "<LHOST>":
+        print("    ! Set your callback with --lhost <IP> (payloads currently show "
+              "<LHOST>).")
+    if args.run:
+        print("    ! --run: Metasploit launch lines are ARMED. Rules of engagement only.")
+    else:
+        print("    Safe mode: .rc files run `check` only; edit them (or use --run) "
+              "to launch.")
+    print(f"    Review:  cat {summary['dir']}/README.txt")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check that this box can run the tool, and optionally prove it with a
     real localhost self-scan. Run this on any system before an engagement."""
@@ -2003,6 +2044,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sv.add_argument("-a", "--aggressive", action="store_true",
                     help="append -a to each command (enable the intrusive checks)")
     sv.set_defaults(func=cmd_services)
+
+    # Per-finding exploitation plan: runnable artifacts driving existing tools.
+    ep = sub.add_parser("exploitplan",
+                        help="generate ready-to-run exploitation artifacts (msf .rc + "
+                             "tool commands) for confirmed findings, params pre-filled")
+    ep.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    ep.add_argument("-o", "--output-dir", default="engagement")
+    ep.add_argument("--lhost", default="<LHOST>",
+                    help="your callback IP for reverse payloads (fills LHOST in the "
+                         ".rc files)")
+    ep.add_argument("--lport", type=int, default=4444, help="callback port (default 4444)")
+    ep.add_argument("--run", action="store_true",
+                    help="arm the Metasploit launch lines (default: check-only, safe). "
+                         "Use ONLY within your rules of engagement.")
+    ep.set_defaults(func=cmd_exploitplan)
 
     # Convenience: enum + vulns in one shot.
     s = sub.add_parser("scan", help="run enum then vulns in one shot")

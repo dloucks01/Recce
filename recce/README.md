@@ -387,6 +387,29 @@ Only confirmed findings get an entry — advisories / unconfirmed version matche
 never get a "run this" line, matching the proven-exploit gating. The same guidance
 appears in each finding's Word write-up as an *Escalate with existing tooling* step.
 
+### Exploitation plan (`exploitplan`)
+
+`recce exploitplan -o eng --lhost <IP>` takes that a step further: for each
+**confirmed** finding it writes **ready-to-run artifacts** into `eng/exploit-plan/`,
+with the parameters recce discovered already filled in:
+
+- a **Metasploit resource script** (`.rc`) for every finding that maps to a
+  published module — `ms17_010_eternalblue`, `vsftpd_234_backdoor`,
+  `is_known_pipename` (SambaCry), `tomcat_ghostcat`, … — with `RHOSTS`, `RPORT`,
+  `PAYLOAD`, `LHOST`/`LPORT` set. Run it with `msfconsole -q -r <file>`.
+- **parameterized invocations of existing tools** — `impacket-GetNPUsers` /
+  `GetUserSPNs` (with the domain + DC IP filled in), `ntlmrelayx` for an
+  unsigned-SMB relay target, anonymous-FTP mirror, unauth-Redis write, … —
+- a per-host **`<ip>.sh`** that chains the remote steps and lists the post-shell
+  priv-esc steps (from the playbook) for reference.
+
+It **selects and configures published exploits** against the specific hosts recce
+found — **it authors no exploit code**; the exploit logic lives in the referenced
+tool/module. It's gated to confirmed findings, and **safe by default**: the
+Metasploit *launch* line in each `.rc` is commented out (only a non-intrusive
+`check` runs) until you pass `--run`. Everything is to be used strictly within
+your rules of engagement.
+
 ## Credentialed enumeration (`credenum`)
 
 Once you have valid creds, `credenum` runs the *authenticated* checks nmap can't
@@ -677,6 +700,7 @@ Every command takes targets as a single IP, several IPs, a range
 | `writeups [targets]` | One Word write-up per **real** finding + combined report | `--include-potential`, `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
 | `writeup <selector>` | **One** finding's write-up, pre-filled with looted/obtained evidence (F-id / CVE / IP / title; omit to list) | `--no-screenshots`, `--overwrite` |
 | `services [targets]` | Print the per-service enum command (`recce/scripts/`) for every open port found | `-a` (append the intrusive flag) |
+| `exploitplan [targets]` | Ready-to-run artifacts (msf `.rc` + tool commands) for **confirmed** findings, params pre-filled | `--lhost`, `--lport`, `--run` |
 | `report` | Rebuild the workbook/reports from the datastore | — |
 | `status` | Print live coverage + suggested next command | — |
 | `review` | Mark hosts/services/items reviewed from the CLI | `--host`, `--service IP:PORT`, `--key`, `--cascade`, `--note`, `--undo` |
@@ -736,6 +760,7 @@ recce/               the package (python -m recce)
   credenum.py        credentialed enum via netexec / impacket / ssh (tool-gated)
   ingest.py          on-target loot -> Priv-Esc rows + promoted Vulnerabilities
   playbook.py        confirmed finding -> exact existing tool + command + validate
+  exploitplan.py     confirmed finding -> runnable msf .rc / tool cmd (existing tools)
   serviceenum.py     open port -> per-service enum command (bridge to scripts/)
   screenshot.py      optional headless-browser web screenshots (tool-gated)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)

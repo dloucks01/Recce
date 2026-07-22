@@ -81,6 +81,11 @@ sudo ./bin/recce db -o eng                 # databases
 #       target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
 ./bin/recce      ingest loot.txt -o eng    # matches the host by name (or --host IP)
 
+# 4b2) Turn confirmed findings into ready-to-run exploitation artifacts:
+#      Metasploit .rc scripts (params pre-filled) + parameterized impacket/GTFOBins
+#      commands + a per-host plan. Drives EXISTING tools; safe by default (check-only).
+./bin/recce      exploitplan -o eng --lhost 10.10.14.7   # add --run to arm msf launch
+
 # 4c) Generate Word (.docx) write-ups, then finish each in Word
 ./bin/recce      writeups -o eng           # one per REAL finding (+ combined report)
 #    --include-potential also writes up low-confidence version-inferred guesses.

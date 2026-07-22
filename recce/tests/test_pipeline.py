@@ -1924,6 +1924,7 @@ class CliSmokeTest(unittest.TestCase):
                      ["writeups", "--include-potential"],
                      ["writeup", "F-007", "-o", "eng"],
                      ["services", "-o", "eng", "-a"],
+                     ["exploitplan", "-o", "eng", "--lhost", "10.0.0.1", "--run"],
                      ["ingest", "loot.txt", "--host", "1.2.3.4"],
                      ["import", "scan.xml", "-o", "eng"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
@@ -1935,6 +1936,85 @@ class CliSmokeTest(unittest.TestCase):
         from recce import cli
         rc = cli.cmd_doctor(SimpleNamespace(no_self_scan=True))
         self.assertIn(rc, (0, 1))  # 0 if nmap present, 1 if not - never raises
+
+
+class ExploitPlanTest(unittest.TestCase):
+    @staticmethod
+    def _read(*parts):
+        with open(os.path.join(*parts)) as fh:
+            return fh.read()
+
+    def _hosts(self):
+        from recce.models import Vuln, Account
+        dc = Host(ip="10.0.10.5", hostnames=["dc01"], os_family="Windows",
+                  roles=["Domain Controller"], smb_signing="not required",
+                  accounts=[Account(ip="10.0.10.5", source="nse", kind="domain",
+                                    domain="CORP")],
+                  ports=[Port(portid=445, service="microsoft-ds")],
+                  vulns=[Vuln(ip="10.0.10.5", port=445, protocol="tcp",
+                              script_id="smb-vuln-ms17-010", title="smb-vuln-ms17-010",
+                              severity="high", source="nse", ids=["CVE-2017-0143"],
+                              output="VULNERABLE")])
+        ftp = Host(ip="10.0.10.30", os_family="Linux",
+                   ports=[Port(portid=21, service="ftp")],
+                   vulns=[Vuln(ip="10.0.10.30", port=21, protocol="tcp",
+                               script_id="version-db", title="vsftpd 2.3.4 backdoor",
+                               severity="critical", source="version-db",
+                               confidence="likely", ids=["CVE-2011-2523"]),
+                          # a 'potential' guess must NOT get a plan
+                          Vuln(ip="10.0.10.30", port=23, protocol="tcp",
+                               script_id="version-db", title="Telnet cleartext",
+                               severity="medium", source="version-db",
+                               confidence="potential")])
+        return [dc, ftp]
+
+    def test_msf_mapping(self):
+        from recce import exploitplan as ep
+        self.assertEqual(ep._msf_for("smb-vuln-ms17-010 CVE-2017-0143")["module"],
+                         "exploit/windows/smb/ms17_010_eternalblue")
+        self.assertEqual(ep._msf_for("vsftpd 2.3.4 backdoor")["module"],
+                         "exploit/unix/ftp/vsftpd_234_backdoor")
+        self.assertIsNone(ep._msf_for("telnet cleartext credentials"))
+
+    def test_build_plan_safe_default(self):
+        from recce import exploitplan as ep
+        with tempfile.TemporaryDirectory() as d:
+            s = ep.build_plan(self._hosts(), d, lhost="10.9.9.9")
+            self.assertEqual(sorted(s["plans"]), ["10.0.10.30", "10.0.10.5"])
+            self.assertEqual(s["rc_files"], 2)          # ms17-010 + vsftpd
+            pd = s["dir"]
+            eb = next(f for f in os.listdir(pd) if "eternalblue" in f)
+            rc = self._read(pd, eb)
+            self.assertIn("set RHOSTS 10.0.10.5", rc)
+            self.assertIn("set LHOST 10.9.9.9", rc)
+            self.assertIn("check", rc)
+            self.assertIn("# exploit -j", rc)           # launch commented (safe)
+            # DC gets AS-REP + Kerberoast + relay actions with the domain filled in.
+            dc_sh = self._read(pd, "10.0.10.5.sh")
+            self.assertIn("impacket-GetNPUsers CORP/", dc_sh)
+            self.assertIn("impacket-GetUserSPNs CORP/", dc_sh)
+            self.assertIn("ntlmrelayx", dc_sh)
+
+    def test_run_arms_launch(self):
+        from recce import exploitplan as ep
+        with tempfile.TemporaryDirectory() as d:
+            s = ep.build_plan(self._hosts(), d, lhost="10.9.9.9", run=True)
+            eb = next(f for f in os.listdir(s["dir"]) if "eternalblue" in f)
+            rc = self._read(s["dir"], eb)
+            self.assertRegex(rc, r"(?m)^exploit -j$")   # active, not commented
+
+    def test_potential_findings_get_no_plan(self):
+        from recce import exploitplan as ep
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.9", os_family="Linux",
+                 ports=[Port(portid=23, service="telnet")],
+                 vulns=[Vuln(ip="10.0.0.9", port=23, protocol="tcp",
+                             script_id="version-db", title="Telnet cleartext",
+                             severity="medium", source="version-db",
+                             confidence="potential")])
+        with tempfile.TemporaryDirectory() as d:
+            s = ep.build_plan([h], d)
+            self.assertEqual(s["plans"], [])            # nothing confirmed -> no plan
 
 
 class ServiceEnumTest(unittest.TestCase):

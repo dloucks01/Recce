@@ -5,6 +5,18 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **`exploitplan` command** — turns each **confirmed** finding into a ready-to-run
+  artifact that drives an **existing, published** tool/module with the parameters
+  recce discovered already filled in: a Metasploit resource (`.rc`) script per
+  finding that maps to a module (EternalBlue, vsftpd backdoor, SambaCry, Ghostcat,
+  …) with `RHOSTS`/`RPORT`/`PAYLOAD`/`LHOST` set; parameterized impacket/netexec/
+  GTFOBins invocations (AS-REP roast, Kerberoast, ntlmrelayx, secretsdump, …) with
+  the domain/DC/host filled in; and a per-host `exploit-plan.sh` chaining the
+  remote steps plus a post-shell priv-esc reference section. It **selects and
+  configures** published exploits against the specific targets — it authors no
+  exploit code. Gated to confirmed findings (never "potential" version guesses).
+  **Safe by default**: `.rc` launch lines are commented (a non-intrusive `check`
+  runs); `--run` arms them, `--lhost/--lport` set the callback.
 - **`services` command** — the bridge from recce's findings to the per-service
   suite. `recce services -o eng` prints the exact `recce-service.sh` command to
   run for **every open port** recce found, grouped by host (with roles and a
