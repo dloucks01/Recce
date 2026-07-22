@@ -6,6 +6,22 @@ All notable changes to recce are documented here. Dates are UTC.
 
 _Accumulating fixes since 0.2.3; folded into the next tagged release._
 
+### Added
+- **`deploy` — credentialed mass local-enum & priv-esc.** Hand recce credentials
+  and it runs the read-only on-target enum scripts (`recce-enum.sh`/`.ps1`) across
+  every host it can reach, in parallel, and folds the results straight into the
+  report — no more per-box copy/run/`ingest` by hand. Transport is auto-selected
+  per host from its open ports + OS: **SSH** (script piped over stdin, nothing
+  written to disk), **WinRM** (run in-memory via `nxc winrm -X powershell
+  -EncodedCommand`), or **SMB** (pushed to `%TEMP%`, run, deleted). Shells out to
+  the same `ssh`/`sshpass` and `netexec`/`nxc` `credenum` already uses. Creds:
+  `--ssh-user/--ssh-pass/--ssh-key` for Linux, `-u/-p/-d` or `--hash` (pass-the-
+  hash) for Windows. `--dry-run` previews the per-host transport plan; per-host
+  failures are isolated and logged; loot is saved to `eng/loot/<ip>.txt`. The
+  scripts are read-only and run no exploit code / no evasion. (The `ingest`
+  folding logic is now shared via `_fold_loot`, so `deploy` and `ingest` fold
+  identically.)
+
 ### Changed
 - **Port sweep is now completeness-first — it won't silently miss open ports.**
   The sweep is the foundation every later phase keys off, so three ways an open

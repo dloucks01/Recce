@@ -3,7 +3,7 @@
 Subcommands (see `recce -h` for the full, authoritative list):
   Scan/enumerate  enum, scan, vulns, db, privesc, credenum, services
   Import/ingest   import (nmap -oX/-oG/-oN), ingest (on-target loot)
-  Post-exploit    exploitplan, attackpath, creds
+  Post-exploit    exploitplan, attackpath, creds, deploy (mass local-enum)
   Report/track    report, status, review, writeups, writeup
   Utility         demo (bundled sample, no network), doctor (self-test)
 """
@@ -1712,6 +1712,35 @@ def _ingest_service_output(svc: dict, paths: dict, args) -> int:
     return 0
 
 
+def _fold_loot(host, text: str, source: str) -> tuple[int, int, int]:
+    """Fold recce-enum.sh/.ps1 output text into a host: local findings (deduped by
+    category/vector), AV/EDR defenses, and high-signal findings promoted to Vulns.
+    Sets privesc_checked. Returns (added, total_rows, promoted). Shared by the
+    `ingest` command and the `deploy` orchestrator so both fold identically."""
+    from . import ingest
+    parsed = ingest.parse_loot(text)
+    new_rows = ingest.to_local_findings(parsed, source)
+    have = {(f.get("category"), f.get("vector")) for f in host.local_findings}
+    added = []
+    for r in new_rows:
+        key = (r["category"], r["vector"])
+        if key not in have:
+            have.add(key)
+            added.append(r)
+    host.local_findings.extend(added)
+    known = set(host.defenses)
+    for d in ingest.extract_defenses(text):
+        if d not in known:
+            known.add(d)
+            host.defenses.append(d)
+    have_v = {v.key for v in host.vulns}
+    promoted = [v for v in ingest.promote_to_vulns(host.ip, host.local_findings)
+                if v.key not in have_v]
+    host.vulns.extend(promoted)
+    host.privesc_checked = True
+    return len(added), len(new_rows), len(promoted)
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     from . import ingest
     paths = _open_paths(args.output_dir)
@@ -1737,52 +1766,149 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         return 0
 
     source = os.path.basename(args.loot)
-    new_rows = ingest.to_local_findings(parsed, source)
     store = _open_store(paths["db"])
     if store is None:
         return 1
     _import_excel_tracking(store, paths)
     host, existed = _resolve_ingest_host(store, parsed, args)
-    # Merge, de-duplicating against anything already ingested for this host AND
-    # against each other (two sections can map to the same category, so distinct
-    # parsed findings may collapse to the same (category, vector) key).
-    have = {(f.get("category"), f.get("vector")) for f in host.local_findings}
-    added = []
-    for r in new_rows:
-        key = (r["category"], r["vector"])
-        if key not in have:
-            have.add(key)
-            added.append(r)
-    host.local_findings.extend(added)
-    # AV/EDR + defensive posture the on-target sweep fingerprinted, so the tester
-    # knows what's watching this host (detection only - recce does not evade it).
-    known = set(host.defenses)
-    for d in ingest.extract_defenses(text):
-        if d not in known:
-            known.add(d)
-            host.defenses.append(d)
-    # Promote the high-signal findings to first-class Vulns so they count toward
-    # severity totals and get write-ups (deduped against existing vulns by key).
-    have_v = {v.key for v in host.vulns}
-    promoted = [v for v in ingest.promote_to_vulns(host.ip, host.local_findings)
-                if v.key not in have_v]
-    host.vulns.extend(promoted)
-    host.privesc_checked = True
+    added, total, promoted = _fold_loot(host, text, source)
     store.upsert_host(host)
     where = "existing host" if existed else "new host entry"
     hn = f" ({parsed['hostname']})" if parsed["hostname"] else ""
-    print(f"[+] Ingested {len(added)} finding(s) from {source} into {where} "
+    print(f"[+] Ingested {added} finding(s) from {source} into {where} "
           f"{host.ip}{hn}"
-          + (f"; {len(new_rows) - len(added)} already present" if added != new_rows else "")
+          + (f"; {total - added} already present" if total != added else "")
           + ".")
     if promoted:
-        print(f"    Promoted {len(promoted)} high-signal finding(s) to the "
+        print(f"    Promoted {promoted} high-signal finding(s) to the "
               "Vulnerabilities sheet.")
     print(f"    OS: {host.os_family or 'unknown'}. See the Priv-Esc tab "
           "(rows tagged 'on-target finding').")
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
+    return 0
+
+
+def _deploy_worker(host, ssh_creds, win_creds, timeout, loot_dir):
+    """Run the on-target enum script on one host remotely, save the raw loot, fold
+    it into the host. Returns (host, transport, added, promoted, error)."""
+    from . import deploy
+    transport, out, err = deploy.deploy_one(host, ssh_creds, win_creds, timeout)
+    if not out:
+        return host, transport, 0, 0, (err or "no output returned")
+    try:
+        with open(os.path.join(loot_dir, f"{host.ip}.txt"), "w", errors="replace") as fh:
+            fh.write(out)
+    except OSError:
+        pass
+    added, _total, promoted = _fold_loot(host, out, f"deploy:{transport or 'remote'}")
+    return host, transport, added, promoted, None
+
+
+def cmd_deploy(args: argparse.Namespace) -> int:
+    """Push + run recce's read-only local-enum / priv-esc scripts across every host
+    we have credentials for (SSH / WinRM / SMB), then fold the results in."""
+    from . import deploy
+    print(BANNER)
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum` first so there are "
+              "hosts to deploy to.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    ssh_creds = _ssh_creds_of(args)
+    win_creds = _creds_of(args)
+    if win_creds and getattr(args, "hash", None):
+        win_creds["hash"] = args.hash          # pass-the-hash for SMB/WinRM
+    if not ssh_creds and not win_creds:
+        print("\n" + "!" * 64)
+        print("[x] deploy needs credentials. Give --ssh-user (+ --ssh-pass/--ssh-key) "
+              "for Linux,")
+        print("    and/or -u/-p (+ -d domain, or --hash) for Windows WinRM/SMB.")
+        print("!" * 64)
+        store.close()
+        return 1
+
+    hosts = _selected_hosts(store.all_hosts(), args)
+    the_plan = deploy.plan(hosts, ssh_creds, win_creds)
+    deployable = [(h, t) for h, t in the_plan if t]
+    skipped = [h for h, t in the_plan if not t]
+    if not deployable:
+        print("[!] No hosts have a usable transport + matching credentials.")
+        print("    Need an open SSH (22) / WinRM (5985) / SMB (445) port and the "
+              "matching cred set. Run `enum` first, or widen your creds.")
+        store.close()
+        return 1
+
+    by_t: dict[str, int] = {}
+    for _h, t in deployable:
+        by_t[t] = by_t.get(t, 0) + 1
+    print(f"[*] Deploy plan: {len(deployable)} host(s) reachable "
+          f"({', '.join(f'{n}×{t}' for t, n in sorted(by_t.items()))})"
+          + (f"; {len(skipped)} skipped (no transport/creds)" if skipped else "") + ".")
+    print("    Scripts are READ-ONLY (recce-enum.sh/.ps1). SSH & WinRM run them "
+          "in memory (no artifact); SMB drops to %TEMP% and deletes after. Confirm "
+          "this is in your rules of engagement.")
+    if getattr(args, "dry_run", False):
+        for h, t in sorted(deployable, key=lambda ht: _ip_key(ht[0].ip)):
+            print(f"    {h.ip:<16} -> {t}")
+        print("[*] Dry run - nothing was executed. Drop --dry-run to deploy.")
+        store.close()
+        return 0
+
+    workers = max(1, args.workers)
+    timeout = getattr(args, "timeout", None) or deploy.DEFAULT_TIMEOUT
+    loot_dir = os.path.join(args.output_dir, "loot")
+    try:
+        os.makedirs(loot_dir, exist_ok=True)
+    except OSError:
+        loot_dir = paths["raw"]
+    print(f"[*] Deploying to {len(deployable)} host(s) with {workers} worker(s); "
+          f"loot -> {loot_dir}/ ...")
+    completed = 0
+    total = len(deployable)
+    start = time.monotonic()
+    errs: list[tuple[str, str]] = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_deploy_worker, h, ssh_creds, win_creds, timeout,
+                             loot_dir): h.ip for h, _t in deployable}
+        for fut in as_completed(futures):
+            ip = futures[fut]
+            try:
+                host, transport, added, promoted, err = fut.result()
+            except Exception as e:  # noqa: BLE001
+                _record_issues(store, paths, ip, [{"phase": "deploy", "level": "error",
+                               "message": f"deploy crashed: {e}"}])
+                completed += 1
+                errs.append((ip, f"crashed: {e}"))
+                print(f"    [{completed}/{total}] {ip}: FAILED (crashed)"
+                      f"{_progress(completed, total, start)}")
+                continue
+            completed += 1
+            if err:
+                _record_issues(store, paths, ip, [{"phase": "deploy", "level": "warning",
+                               "message": f"deploy via {transport or '?'}: {err}"}])
+                errs.append((ip, err))
+                print(f"    [{completed}/{total}] {ip}: {transport or '-'} FAILED "
+                      f"- {err}{_progress(completed, total, start)}")
+                continue
+            _persist_host(store, paths, ip, "deploy", host)
+            bits = f"{added} finding(s)" + (f", {promoted} promoted" if promoted else "")
+            print(f"    [{completed}/{total}] {ip}: {transport} OK ({bits})"
+                  f"{_progress(completed, total, start)}")
+    _final_report(store, paths, store.get_meta("engagement") or args.title)
+    store.close()
+    ok = total - len(errs)
+    print(f"\n[+] Local-enum deployed to {ok}/{total} host(s); loot saved in {loot_dir}/.")
+    if errs:
+        print(f"[!] {len(errs)} host(s) failed (bad creds / not permitted / "
+              "unreachable) - see the Overview issues tab or the run log.")
+    print("    Findings folded into local_findings + the Priv-Esc tab. Next: "
+          f"recce attackpath -o {args.output_dir}  (or writeups).")
     return 0
 
 
@@ -2276,6 +2402,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cep.add_argument("--aggressive", action="store_true",
                      help="also dump hashes with secretsdump (needs admin/DA)")
     cep.set_defaults(func=cmd_credenum)
+
+    # deploy: push + run the read-only local-enum / priv-esc scripts across every
+    # host we have creds for (SSH / WinRM / SMB), then fold the results in.
+    dp = sub.add_parser("deploy",
+                        help="mass local-enum + priv-esc: run recce-enum.sh/.ps1 on "
+                             "every host you have creds for (SSH/WinRM/SMB)")
+    dp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    _add_common(dp)
+    _add_creds(dp)
+    dp.add_argument("--ssh-user", help="username for SSH (Linux hosts)")
+    dp.add_argument("--ssh-pass", help="SSH password (needs sshpass on PATH)")
+    dp.add_argument("--ssh-key", help="SSH private-key path")
+    dp.add_argument("--hash", help="NTLM hash for pass-the-hash (SMB/WinRM), with -u")
+    dp.add_argument("--timeout", type=int, metavar="SEC",
+                    help="per-host remote-exec ceiling (default 300s)")
+    dp.add_argument("--dry-run", action="store_true",
+                    help="show the per-host transport plan and exit; run nothing")
+    dp.set_defaults(func=cmd_deploy)
 
     # Reporting: per-finding Word write-ups from the template.
     wu = sub.add_parser("writeups",

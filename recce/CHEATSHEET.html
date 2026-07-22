@@ -123,6 +123,7 @@ footer{color:var(--mut);font-size:11.5px;margin-top:26px;text-align:center}
         <tr><td>Priv-esc</td><td class="cmd"><code>./bin/recce privesc -o eng</code></td><td>per-host escalation playbook</td></tr>
         <tr><td>Credentialed</td><td class="cmd"><code>./bin/recce credenum -u U -p P -d dom -o eng</code></td><td>authed SMB/AD/SSH enum</td></tr>
         <tr><td>On-target loot</td><td class="cmd"><code>./bin/recce ingest loot.txt -o eng</code></td><td>fold <code>recce-enum.sh/.ps1</code> findings in</td></tr>
+        <tr><td>Mass local-enum</td><td class="cmd"><code>./bin/recce deploy -u U -p P -o eng</code></td><td>run local-enum + priv-esc on every host you have creds for (SSH/WinRM/SMB); <code>--dry-run</code> to preview</td></tr>
         <tr><td>Exploit plan</td><td class="cmd"><code>./bin/recce exploitplan -o eng --lhost &lt;ip&gt;</code></td><td>runnable msf <code>.rc</code> + tool commands</td></tr>
         <tr><td>Attack path</td><td class="cmd"><code>./bin/recce attackpath -o eng</code></td><td>chains findings → domain compromise</td></tr>
         <tr><td>Credentials</td><td class="cmd"><code>./bin/recce creds --add 'dom\u:p' -o eng</code></td><td>stack creds → spray plan (<code>--plan</code>)</td></tr>

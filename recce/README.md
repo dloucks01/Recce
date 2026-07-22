@@ -695,6 +695,7 @@ are color-flagged).
 | `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) — after `writeups` |
 | `exploit-plan/*`   | Ready-to-run msf `.rc` + per-host plans — after `exploitplan` |
 | `creds/*.txt`      | `users.txt` / `passwords.txt` / `nthashes.txt` for the spray plan — after `creds --plan` |
+| `loot/<ip>.txt`    | raw on-target enum output per host — after `deploy` |
 | `recce.log`        | Scan errors / timeouts / incomplete hosts (also on the Overview tab) |
 | `results.sqlite`   | Normalized datastore (resume + re-report) |
 | `raw/*.xml`        | Every raw nmap XML, for auditing / re-parsing |

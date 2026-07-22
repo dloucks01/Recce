@@ -2785,5 +2785,110 @@ class ExploitRefTest(unittest.TestCase):
         self.assertTrue(all(v.strip() for v in PROVEN_KW.values()))
 
 
+class DeployTest(unittest.TestCase):
+    def _host(self, ip, os_, ports):
+        return Host(ip=ip, os_family=os_,
+                    ports=[Port(portid=p, state="open") for p in ports])
+
+    def test_transport_selection(self):
+        from recce import deploy
+        ssh = {"username": "u", "password": "p"}
+        win = {"username": "a", "password": "b"}
+        self.assertEqual(deploy.transport_for(self._host("1", "Linux", [22, 80]), ssh, win), "ssh")
+        self.assertEqual(deploy.transport_for(self._host("2", "Windows", [445, 5985]), ssh, win), "winrm")
+        self.assertEqual(deploy.transport_for(self._host("3", "Windows", [445]), ssh, win), "smb")
+        # Windows box but we only have SSH creds and it runs sshd -> ssh
+        self.assertEqual(deploy.transport_for(self._host("4", "Windows", [22, 445]), ssh, None), "ssh")
+        self.assertIsNone(deploy.transport_for(self._host("5", "Linux", [80]), ssh, win))   # no exec port
+        self.assertIsNone(deploy.transport_for(self._host("6", "Linux", [22]), None, None))  # no creds
+
+    def test_ps_payload_is_utf16le_base64(self):
+        import base64
+        from recce import deploy
+        b = deploy._b64_ps("Write-Host hi")
+        self.assertEqual(base64.b64decode(b).decode("utf-16-le"), "Write-Host hi")
+
+    def test_ssh_key_auth_pipes_script_no_disk_artifact(self):
+        from recce import deploy
+        calls = {}
+
+        def fake_run(argv, timeout, stdin=None):
+            calls["argv"], calls["stdin"] = argv, stdin
+            return 0, "recce-enum host=x\n[!] finding", ""
+        orig = deploy._run
+        deploy._run = fake_run
+        try:
+            out, err = deploy.run_ssh("1.2.3.4", {"username": "u", "key": "/k"}, "SCRIPT", 60)
+        finally:
+            deploy._run = orig
+        self.assertIsNone(err)
+        self.assertEqual(calls["stdin"], "SCRIPT")            # script piped over stdin
+        self.assertIn("bash -s -- -q", calls["argv"])         # not written to disk
+        self.assertNotEqual(calls["argv"][0], "sshpass")      # key auth, no sshpass
+        self.assertIn("/k", calls["argv"])
+
+    def test_winrm_and_smb_run_encoded_powershell(self):
+        from recce import deploy
+        seen = {}
+
+        def fake_run(argv, timeout, stdin=None):
+            seen.setdefault("argvs", []).append(argv)
+            return 0, "recce-enum host=x\n[!] x", ""
+        o_run, o_tool = deploy._run, deploy.smb_tool
+        deploy._run, deploy.smb_tool = fake_run, (lambda: "nxc")
+        try:
+            _, e1 = deploy.run_winrm("1.2.3.4", {"username": "a", "password": "b"}, "S", 60)
+            _, e2 = deploy.run_smb("1.2.3.4", {"username": "a", "password": "b"}, "/tmp/x.ps1", 60)
+        finally:
+            deploy._run, deploy.smb_tool = o_run, o_tool
+        self.assertIsNone(e1)
+        winrm = seen["argvs"][0]
+        self.assertIn("winrm", winrm)
+        self.assertIn("EncodedCommand", " ".join(winrm))
+        self.assertIn("--put-file", " ".join(seen["argvs"][1]))   # smb pushes the script
+
+    def test_deploy_dry_run_executes_nothing(self):
+        from recce import cli, deploy
+        called = {"n": 0}
+        orig = deploy.deploy_one
+        deploy.deploy_one = lambda *a, **k: (called.__setitem__("n", called["n"] + 1)
+                                             or ("ssh", "x", None))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                paths = cli._open_paths(d)
+                st = cli._open_store(paths["db"])
+                st.upsert_host(self._host("10.0.0.5", "Linux", [22]))
+                st.close()
+                args = SimpleNamespace(output_dir=d, workers=2, title="t", dry_run=True,
+                                       ssh_user="u", ssh_pass=None, ssh_key="/k",
+                                       username=None, password=None, domain=None,
+                                       hash=None, targets=[], host=None)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.cmd_deploy(args)
+                self.assertEqual(rc, 0)
+                self.assertEqual(called["n"], 0)   # dry-run ran nothing on the target
+        finally:
+            deploy.deploy_one = orig
+
+    def test_deploy_worker_folds_recce_enum_output(self):
+        from recce import cli, deploy
+        sample = ("recce-enum host=web01 os=linux\n"
+                  "[!] sudo: NOPASSWD entry - run a root command via sudo\n")
+        orig = deploy.deploy_one
+        deploy.deploy_one = lambda host, s, w, timeout: ("ssh", sample, None)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                host, transport, added, promoted, err = cli._deploy_worker(
+                    self._host("10.0.0.5", "Linux", [22]), {"username": "u"}, None, 60, d)
+                self.assertIsNone(err)
+                self.assertEqual(transport, "ssh")
+                self.assertGreaterEqual(added, 1)              # finding folded in
+                self.assertTrue(host.local_findings)
+                self.assertTrue(host.privesc_checked)
+                self.assertTrue(os.path.exists(os.path.join(d, "10.0.0.5.txt")))  # loot saved
+        finally:
+            deploy.deploy_one = orig
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
