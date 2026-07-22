@@ -71,6 +71,11 @@ sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
 > **Hosts showing zero ports?** They block ping (firewalled / Windows / AD). Add
 > **`-Pn`** to scan every target as up: `sudo ./bin/recce enum 10.0.10.0/24 -Pn -o eng`.
 > recce also auto-falls-back to `-Pn` when discovery gets zero responses.
+>
+> Still zero ports under `-Pn` but a manual `nmap` finds them (and prints
+> *"increasing send delay … dropped probes"*)? The network is **rate-limiting**.
+> recce auto-detects that and re-scans adaptively; add **`--reliable`** to force it
+> from the start.
 
 Already have an nmap scan? Skip enum and **import** it (XML best; `.gnmap`, a dir, or a glob):
 ```bash
@@ -187,6 +192,7 @@ Run **`recce doctor`** first — it self-tests the whole pipeline on this box.
 | `nmap … not found` | Install nmap — the only hard requirement. |
 | weak scan / "not root" | Run with `sudo` (`sudo ./bin/recce …` so PATH survives). |
 | **zero ports / few live** | They block ping — add **`-Pn`**. |
+| zero ports but manual nmap finds them | Network rate-limiting — add **`--reliable`** (recce also auto-detects dropped probes). |
 | too slow | `--fast`, `--workers N`, `--profile quick`, `--host-timeout`. |
 | crashed / interrupted | Re-run with `--resume`, or `report -o eng`. `RECCE_DEBUG=1` for the traceback. |
 | "No open ports match" | Run `enum` first; `--unscanned` is empty once all is scanned. |
