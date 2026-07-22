@@ -79,8 +79,12 @@ sudo ./bin/recce db -o eng                 # databases
 #       target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
 ./bin/recce      ingest loot.txt -o eng    # matches the host by name (or --host IP)
 
-# 4c) Generate a Word (.docx) write-up per finding, then finish each in Word
-./bin/recce      writeups -o eng           # auto-fills fields + web screenshots
+# 4c) Generate Word (.docx) write-ups, then finish each in Word
+./bin/recce      writeups -o eng           # one per REAL finding (+ combined report)
+#    --include-potential also writes up low-confidence version-inferred guesses.
+#    Just want ONE finding, pre-filled with what you've already looted/obtained?
+./bin/recce      writeup -o eng            # list findings to pick from
+./bin/recce      writeup F-007 -o eng      # or by CVE / IP / a word from the title
 
 # 5) See what's left (prints progress + the suggested next command)
 ./bin/recce status -o eng

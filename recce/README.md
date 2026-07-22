@@ -429,6 +429,20 @@ matching a walkthrough template. Findings are grouped by title across hosts, so
 one issue spanning many systems is a single write-up listing every affected
 `IP:port`.
 
+By default it writes up **real findings only** — those confirmed by an actual
+check or observation (an NSE script that reported `VULNERABLE`, a config/probe
+observation, an ingested on-target finding). Low-confidence, version-inferred
+**"potential"** guesses are skipped (with a one-line count); add
+`--include-potential` to write them up too.
+
+**One finding at a time.** `recce writeup <selector>` writes up a **single**
+finding, **pre-filled with what you've already looted or obtained** on the
+affected host(s) — ingested on-target findings and harvested accounts/creds land
+in an *Obtained Access / Looted Evidence* section. Pick it by F-id (`F-007`),
+CVE, IP, `IP:port`, or a word from the title; run `recce writeup` with no
+selector to list every finding. F-ids are stable across the bulk run, the
+combined report, and single write-ups.
+
 recce **auto-fills** everything it knows — Finding ID, title, affected systems,
 severity, CWE, CVE, tools/techniques used, a drafted vulnerability type and
 (CIA) security aspect, recommendations (from the offline KB), a plain-language
@@ -660,7 +674,8 @@ Every command takes targets as a single IP, several IPs, a range
 | `privesc [targets]` | Per-host priv-esc playbook | `--scan` (remote NSE checks), `--aggressive` |
 | `credenum [targets]` | Authenticated SMB/AD/SSH enum | `-u/-p/-d`, `--admin-user/--admin-pass/--admin-domain`, `--ssh-user/--ssh-pass/--ssh-key`, `--ldap-enum`, `--ldap-anon`, `--ldap-ssl`, `--dc-ip`, `--aggressive` |
 | `ingest <loot>` | Fold on-target `recce-enum.sh`/`.ps1` findings into Priv-Esc | `--host IP` |
-| `writeups [targets]` | One Word write-up per finding + combined report | `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
+| `writeups [targets]` | One Word write-up per **real** finding + combined report | `--include-potential`, `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
+| `writeup <selector>` | **One** finding's write-up, pre-filled with looted/obtained evidence (F-id / CVE / IP / title; omit to list) | `--no-screenshots`, `--overwrite` |
 | `report` | Rebuild the workbook/reports from the datastore | — |
 | `status` | Print live coverage + suggested next command | — |
 | `review` | Mark hosts/services/items reviewed from the CLI | `--host`, `--service IP:PORT`, `--key`, `--cascade`, `--note`, `--undo` |

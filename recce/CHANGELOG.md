@@ -5,6 +5,14 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **Single-finding write-up** — `recce writeup <selector>` generates one Word
+  (.docx) report for a chosen finding, **pre-filled with what's already been
+  looted or obtained** on the affected host(s): ingested on-target (recce-enum)
+  findings and harvested accounts/credentials go into a new *Obtained Access /
+  Looted Evidence* section. Select by F-id (`F-007` / `7`), CVE, IP, `IP:port`,
+  or a word from the title; run with no selector to list every finding to pick
+  from. Ambiguous selectors list the candidates. F-ids are stable and match the
+  bulk write-ups and the combined report.
 - **Per-service enumeration suite** (`recce/scripts/`) — Kali-side scripts that
   take a service recce/nmap/masscan found and run the *right* enumeration for it,
   flagging likely vulns and pointing at the existing tool that acts on each.
@@ -76,6 +84,12 @@ All notable changes to recce are documented here. Dates are UTC.
   in-workbook troubleshooting section on the **Runbook** tab.
 
 ### Changed
+- **Write-ups now cover REAL findings by default.** `recce writeups` generates a
+  document only for findings backed by an actual check/observation (an NSE script
+  that reported VULNERABLE, a config/probe observation, or an ingested on-target
+  finding); low-confidence, version-inferred **"potential"** guesses are skipped
+  (and counted in a one-line note). Pass `--include-potential` to write them up
+  too. The combined `findings_report.docx` follows the same default.
 - **Ping-blocking networks no longer come back empty.** Discovery now auto-falls
   back to `-Pn` (scan every target as up) when **zero** hosts answer the sweep,
   and hints to use `-Pn` when some don't respond. Added a `-Pn` alias for

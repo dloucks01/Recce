@@ -1064,6 +1064,7 @@ def cmd_writeups(args: argparse.Namespace) -> int:
                     shots[h.ip] = grabbed
                     print(f"    [+] {h.ip}: {len(grabbed)} screenshot(s)")
     summary = build_writeups(hosts, out_dir, min_severity=args.min_severity,
+                             include_potential=args.include_potential,
                              screenshots=shots, overwrite=args.overwrite)
     title = store.get_meta("engagement") or args.title
     combined_path = None
@@ -1071,17 +1072,100 @@ def cmd_writeups(args: argparse.Namespace) -> int:
         from .report_docx import build_combined
         combined_path = os.path.join(out_dir, "findings_report.docx")
         build_combined(hosts, combined_path, title=f"{title} - Findings Report",
-                       min_severity=args.min_severity, screenshots=shots)
+                       min_severity=args.min_severity,
+                       include_potential=args.include_potential, screenshots=shots)
     store.close()
+    scope = "all" if args.include_potential else "real"
     print(f"\n[+] Finding write-ups: {len(summary['written'])} generated, "
           f"{len(summary['skipped'])} kept (already edited), "
-          f"{summary['total']} finding(s) total.")
+          f"{summary['total']} {scope} finding(s) total.")
     print(f"    -> {out_dir}/  (open each .docx in Word to finish it)")
     if combined_path:
         print(f"[+] Combined report (summary table + all findings): {combined_path}")
+    if summary.get("dropped_potential"):
+        print(f"    ({summary['dropped_potential']} low-confidence 'potential' "
+              f"finding(s) skipped; add --include-potential to write them up too)")
     if summary["skipped"]:
         print("    (use --overwrite to regenerate the kept ones - loses edits)")
     return 0
+
+
+def cmd_writeup(args: argparse.Namespace) -> int:
+    """Write up a SINGLE finding, pre-filled with looted/obtained evidence. With
+    no selector, list the findings so the tester can pick one."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = store.all_hosts()
+    from .report_docx import list_findings, build_one_writeup
+
+    if not args.selector:
+        findings = list_findings(hosts, min_severity="info")
+        if not findings:
+            print("[!] No findings yet. Run `vulns` (or `import`/`ingest`) first.")
+            store.close()
+            return 0
+        print(f"Findings ({len(findings)}) - pick one:  recce writeup <id|CVE|IP|word> "
+              f"-o {args.output_dir}\n")
+        for row in findings:
+            tag = "" if row["real"] else "  (potential)"
+            aff = ", ".join(row["affected"][:4]) + ("..." if len(row["affected"]) > 4 else "")
+            cve = f"  {row['cves'][0]}" if row["cves"] else ""
+            print(f"  {row['id']}  {row['severity'].upper():<8} {row['title']}{cve}")
+            print(f"          affected: {aff}{tag}")
+        store.close()
+        return 0
+
+    out_dir = os.path.join(args.output_dir, "writeups")
+    shots: dict = {}
+    if not args.no_screenshots:
+        from . import screenshot
+        if screenshot.available():
+            res = _match_one_host(hosts, args.selector)
+            for h in res:
+                grabbed = screenshot.capture_for_host(h)
+                if grabbed:
+                    shots[h.ip] = grabbed
+    result = build_one_writeup(hosts, out_dir, args.selector,
+                               screenshots=shots, overwrite=args.overwrite)
+    store.close()
+    if result["written"]:
+        m = result["matched"][0]
+        print(f"[+] Wrote {m['id']} ({m['severity'].upper()}): {m['title']}")
+        print(f"    -> {result['written']}")
+        if result.get("looted"):
+            print(f"    pre-filled with {result['looted']} looted/obtained item(s) "
+                  f"for the affected host(s).")
+        if not result.get("real", True):
+            print("    note: this is a low-confidence 'potential' (version-inferred) finding.")
+        print("    Open it in Word to finish the narrative, impact, and screenshots.")
+        return 0
+    # No single match: help the tester narrow it.
+    if result["reason"] == "exists":
+        print(f"[!] Write-up already exists: {result['path']}")
+        print("    Use --overwrite to regenerate it (loses any edits).")
+        return 0
+    cand = result["matched"]
+    if not cand:
+        print(f"[x] No finding matches '{args.selector}'. "
+              f"Run `recce writeup -o {args.output_dir}` to list them.")
+        return 1
+    print(f"[!] '{args.selector}' matches {len(cand)} findings - be more specific:")
+    for m in cand:
+        print(f"    {m['id']}  {m['severity'].upper():<8} {m['title']}  "
+              f"[{', '.join(m['affected'][:3])}]")
+    return 1
+
+
+def _match_one_host(hosts, selector):
+    """Best-effort: the host(s) an IP/IP:port selector points at (for screenshots)."""
+    sel = (selector or "").split(":")[0].strip()
+    return [h for h in hosts if h.ip == sel] if sel else []
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1829,6 +1913,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     choices=["critical", "high", "medium", "low", "info"],
                     help="only findings at or above this severity (default: low - "
                          "excludes informational items; use 'info' to include them)")
+    wu.add_argument("--include-potential", action="store_true",
+                    help="also write up low-confidence, version-inferred 'potential' "
+                         "findings (default: real findings only - those confirmed by "
+                         "an actual check/observation)")
     wu.add_argument("--no-screenshots", action="store_true",
                     help="don't auto-capture web screenshots (add them in Word)")
     wu.add_argument("--no-combined", action="store_true",
@@ -1836,6 +1924,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wu.add_argument("--overwrite", action="store_true",
                     help="regenerate even where a write-up exists (loses tester edits)")
     wu.set_defaults(func=cmd_writeups)
+
+    # Single-finding write-up, pre-filled with what's already looted/obtained.
+    w1 = sub.add_parser("writeup",
+                        help="write up ONE finding (pre-filled with looted/obtained "
+                             "evidence); run with no selector to list findings")
+    w1.add_argument("selector", nargs="?",
+                    help="which finding: an F-id (F-007 / 7), a CVE, an IP or IP:port, "
+                         "or a word from its title. Omit to list all findings.")
+    w1.add_argument("-o", "--output-dir", default="engagement")
+    w1.add_argument("--no-screenshots", action="store_true",
+                    help="don't auto-capture web screenshots (add them in Word)")
+    w1.add_argument("--overwrite", action="store_true",
+                    help="regenerate even if this write-up already exists")
+    w1.set_defaults(func=cmd_writeup)
 
     # Convenience: enum + vulns in one shot.
     s = sub.add_parser("scan", help="run enum then vulns in one shot")

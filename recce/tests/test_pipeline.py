@@ -561,6 +561,77 @@ class WriteupTest(unittest.TestCase):
             summary = build_writeups(self._hosts(), out, min_severity="high")
             self.assertEqual(summary["total"], 1)   # only the critical
 
+    def _hosts_potential_and_loot(self):
+        from recce.models import Vuln
+        return [Host(ip="10.0.30.5", hostnames=["box"],
+                     ports=[Port(portid=23, service="telnet"),
+                            Port(portid=445, service="microsoft-ds")],
+                     local_findings=[{"section": "Sudo", "category": "sudo",
+                                      "vector": "NOPASSWD find",
+                                      "text": "NOPASSWD sudo: /usr/bin/find",
+                                      "source": "recce-enum"}],
+                     vulns=[
+                         Vuln(ip="10.0.30.5", port=23, protocol="tcp",
+                              script_id="version-db", title="Telnet cleartext",
+                              severity="medium", source="version-db",
+                              confidence="potential", cwes=["CWE-319"]),
+                         Vuln(ip="10.0.30.5", port=445, protocol="tcp",
+                              script_id="smb-vuln-ms17-010", title="smb-vuln-ms17-010",
+                              severity="high", source="nse", ids=["CVE-2017-0143"],
+                              output="VULNERABLE"),
+                     ])]
+
+    def test_potential_excluded_by_default_included_on_flag(self):
+        from recce.report_docx import build_writeups
+        hosts = self._hosts_potential_and_loot()
+        with tempfile.TemporaryDirectory() as d:
+            real = build_writeups(hosts, os.path.join(d, "r"))
+            self.assertEqual(real["total"], 1)                 # only the nse ms17-010
+            self.assertEqual(real["dropped_potential"], 1)     # telnet guess skipped
+            allf = build_writeups(hosts, os.path.join(d, "a"), include_potential=True)
+            self.assertEqual(allf["total"], 2)                 # both
+
+    def test_list_findings_flags_real(self):
+        from recce.report_docx import list_findings
+        rows = list_findings(self._hosts_potential_and_loot())
+        by_title = {r["title"]: r for r in rows}
+        self.assertFalse(by_title["Telnet cleartext"]["real"])
+        self.assertTrue(by_title["smb-vuln-ms17-010"]["real"])
+        # stable ids: high sorts before the medium
+        self.assertEqual(by_title["smb-vuln-ms17-010"]["id"], "F-001")
+
+    def test_single_writeup_prefills_looted(self):
+        from recce.report_docx import build_one_writeup
+        hosts = self._hosts_potential_and_loot()
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "writeups")
+            res = build_one_writeup(hosts, out, "ms17")
+            self.assertTrue(res["written"])
+            self.assertEqual(res["looted"], 1)
+            text, _ = _docx_text(res["written"])
+            self.assertIn("Obtained Access / Looted Evidence", text)
+            self.assertIn("NOPASSWD sudo: /usr/bin/find", text)
+
+    def test_single_writeup_selectors(self):
+        from recce.report_docx import build_one_writeup
+        hosts = self._hosts_potential_and_loot()
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "w")
+            # by F-id
+            self.assertTrue(build_one_writeup(hosts, out, "F-001")["written"])
+            # by CVE
+            self.assertTrue(build_one_writeup(hosts, out, "CVE-2017-0143",
+                                              overwrite=True)["written"])
+            # ambiguous IP -> lists candidates, writes nothing
+            amb = build_one_writeup(hosts, out, "10.0.30.5")
+            self.assertIsNone(amb["written"])
+            self.assertEqual(amb["reason"], "ambiguous")
+            self.assertEqual(len(amb["matched"]), 2)
+            # unmatched
+            none = build_one_writeup(hosts, out, "zzz-nope")
+            self.assertIsNone(none["written"])
+            self.assertEqual(none["reason"], "none")
+
     def test_auto_walkthrough_steps(self):
         from recce.report_docx import group_findings, _walkthrough_steps
         findings = group_findings(self._hosts())
