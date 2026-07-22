@@ -49,6 +49,7 @@ cd recce
 | **Priv-esc** | `./bin/recce privesc -o eng` | per-host escalation playbook |
 | **Credentialed** | `./bin/recce credenum -u U -p P -d dom -o eng` | authed SMB/AD/SSH enum |
 | **On-target loot** | `./bin/recce ingest loot.txt -o eng` | fold `recce-enum.sh/.ps1` findings in |
+| **Mass local-enum** | `./bin/recce deploy -u U -p P -o eng` | run the local-enum + priv-esc scan on every host you have creds for (SSH/WinRM/SMB) |
 | **Exploit plan** | `./bin/recce exploitplan -o eng --lhost <ip>` | runnable msf `.rc` + tool commands |
 | **Attack path** | `./bin/recce attackpath -o eng` | chains findings → domain compromise |
 | **Credentials** | `./bin/recce creds --add 'dom\u:p' -o eng` | stack creds → spray plan (`--plan`) |
@@ -110,6 +111,11 @@ FTP/LDAP, unauth Redis…). Safe by default; **`-a`** adds brute/nikto/dir-busti
 #   target$  ./recce-enum.sh -o loot.txt                                   # Linux (-t self-test)
 #   target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
 ./bin/recce ingest loot.txt -o eng          # or ingest recce-service.sh output too
+
+# ...or have creds? Run the local-enum + priv-esc scan on EVERY reachable host at once:
+./bin/recce deploy --ssh-user root --ssh-key id_rsa -o eng           # all Linux via SSH
+./bin/recce deploy -u admin -p 'Pw!' -d corp.local -o eng            # all Windows via WinRM/SMB
+#   picks SSH / WinRM / SMB per host, runs the script, folds results in. --dry-run to preview.
 
 ./bin/recce exploitplan -o eng --lhost 10.10.14.7   # runnable msf .rc (--run to arm)
 ./bin/recce attackpath  -o eng                       # foothold → priv-esc → … → domain
