@@ -5,6 +5,11 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0] - 2026-07-22
 
 ### Added
+- **Stylized tester docs.** `QUICKSTART.md` rewritten as a scannable field guide
+  (workflow diagram, command cheat-sheet table, per-step sections, callouts), and
+  a new self-contained **`CHEATSHEET.html`** — a printable one-page reference
+  matching the report's teal theme (workflow, core commands, targeting, workbook
+  legend, deliverables, troubleshooting). Ships in the burn package.
 - **Burn-package builder (`make_package.sh`).** Produces a self-contained
   `dist/recce-<version>.tar.gz` (+ `.zip`) with `SHA256SUMS` — copy to a Kali box
   or burn to disk, `tar xzf` and run `./bin/recce doctor`. Runtime stays

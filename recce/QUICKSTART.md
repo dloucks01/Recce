@@ -1,205 +1,198 @@
 # recce — Quick Start
 
-A simple, no-nonsense guide. (Full details are in `README.md`.)
+> **Airgapped pentest enumeration → one Excel workbook you check off as you go.**
+> Point it at IPs/subnets, it scans with `nmap` and fills the sheet. Your ticks
+> are saved — re-scanning never wipes them.
 
-## What it does
+📄 Prefer a printable one-pager? Open **[`CHEATSHEET.html`](CHEATSHEET.html)** in a browser.
+📚 Full reference: **[`README.md`](README.md)** · 🧰 Deep troubleshooting: **[`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)**
 
-You point it at IPs or subnets. It scans them with `nmap` and fills in one
-**Excel workbook** — a per-IP checklist plus tabs for services, vulnerabilities,
-databases, Active Directory, and priv-esc. You **check things off** as you go,
-and your ticks are saved (re-scanning never wipes them).
+---
 
-## Setup (once)
+## 1 · Get it running
 
-Nothing to install — it uses only Python 3.9+ and the tools already on Kali
-(`nmap` required; `masscan`, `searchsploit`, `ldapsearch`, `netexec`, `impacket`,
-and a headless browser — `firefox` or `chromium` — optional). It runs entirely
-inside your **Kali VM**.
-
-**Getting it into the Kali VM** (Windows 11 host → Kali guest):
-- Best: `git clone` the repo *inside Kali* — that preserves LF line endings and
-  the executable bit automatically.
-- Or copy the folder in (shared folder / scp / USB). If it came through Windows
-  and `./bin/recce` says *"bad interpreter"* or *"Permission denied"*, either run
-  `python3 -m recce …` (identical, no wrapper needed) or `chmod +x bin/recce`.
+Nothing to install — Python 3.9+ and the tools already on Kali. Only **`nmap`** is
+required; everything else is optional and degrades cleanly.
 
 ```bash
 cd recce
-./bin/recce doctor          # first thing to run: confirms nmap + shows optional tools
+./bin/recce doctor          # run this first: confirms nmap + shows optional tools
 ```
 
+> [!TIP]
 > `./bin/recce` is just a shortcut for `python3 -m recce` — use whichever works.
-> Run scans with `sudo` so nmap can do SYN/OS detection.
-> Auto web-screenshots use a headless browser — **`firefox`** (the Kali default)
-> or `chromium`, whichever is present. Point `RECCE_BROWSER` at a specific binary
-> to override. Without any browser you just paste screenshots into the Word
-> write-ups yourself, which is the normal flow.
+> Run scans with **`sudo`** so nmap can do SYN/OS detection.
 
-## The 5-step engagement
+> [!NOTE]
+> **Getting it onto Kali** (Windows host → Kali guest): best is `git clone` *inside
+> Kali* (preserves LF endings + the executable bit). If you copied it through
+> Windows and see *"bad interpreter"* / *"Permission denied"*, run
+> `python3 -m recce …` (identical) or `chmod +x bin/recce`.
 
-```bash
-# 1) Fast enumeration -> fills the sheet (hosts, ports, services)
-sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
-#    Hosts blocking ping (firewalled / Windows / AD)? add -Pn to scan all as up:
-#    sudo ./bin/recce enum 10.0.10.0/24 -Pn -o eng
-#    ...or, if you ALREADY have an nmap scan, skip enum and import it:
-#    ./bin/recce import scan.xml -o eng      # -oX XML (best), -oG .gnmap, dir, or glob
+---
 
-# 2) Open the workbook and start working
-#    eng/enumeration.xlsx  ->  read the "Start Here" tab, then use "Checklist"
+## 2 · The engagement at a glance
 
-# 3) Vuln-scan the open ports it found (safe by default)
-#    Runs: NSE vuln+weak-config, the offline version->CVE/CWE engine,
-#    stdlib HTTP-header + TLS probes, and searchsploit exploit mapping.
-sudo ./bin/recce vulns -o eng
-
-# 3b) Deep per-service enumeration (SMB shares, HTTP paths/TLS, SNMP walk,
-#     anon FTP/LDAP, Redis unauth, ...). Runs the RIGHT tool per open port and
-#     flags likely vulns. Safe by default; -a adds brute/nikto/dir-busting.
-#     Not sure what to run? recce prints the exact command for every open port:
-./bin/recce      services -o eng                         # per-port enum commands
-#     Then run one, or sweep the whole engagement from recce's own nmap output:
-./scripts/recce-service.sh from-nmap eng/raw/*.xml       # or: smb 10.0.10.5
-
-# 4) Optional deeper phases (any time, on any subset)
-sudo ./bin/recce db -o eng                 # databases
-./bin/recce      privesc -o eng            # priv-esc playbook
-# ...and once you have creds (needs netexec/impacket/ssh on Kali):
-./bin/recce      credenum -u alice -p 'Pw!' -d corp.local -o eng  # authed SMB/AD/SSH
-#   Have a user AND a privileged account? Pass both - the user account does the
-#   enumeration, the privileged one runs the admin-only checks (confirm local
-#   admin, secretsdump), and the report labels what each account reached:
-./bin/recce      credenum -u alice -p 'Pw!' -d corp.local \
-                 --admin-user admin --admin-pass 'AdmPw!' -o eng
-
-# 4b) On-target enum: got a shell on a box? Run the bundled read-only sweep
-#     (recce/local/), bring the output back, and fold its [!] findings into the
-#     Priv-Esc tab for that host. The sweep ends with a "How to exploit" runbook
-#     tailored to THAT host's findings (prereq -> command -> confirm -> cleanup,
-#     using existing public tools):
-#       target$  ./recce-enum.sh -o loot.txt          # Linux  (-t self-tests first)
-#       target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
-./bin/recce      ingest loot.txt -o eng    # matches the host by name (or --host IP)
-#     ingest also accepts recce-service.sh output - its [!] findings land on the
-#     Vulnerabilities sheet against the right host:port (auto-detected):
-#       ./scripts/recce-service.sh smb 10.0.10.5 > smb.txt  &&  ./bin/recce ingest smb.txt -o eng
-
-# 4b2) Turn confirmed findings into ready-to-run exploitation artifacts:
-#      Metasploit .rc scripts (params pre-filled) + parameterized impacket/GTFOBins
-#      commands + a per-host plan. Drives EXISTING tools; safe by default (check-only).
-./bin/recce      exploitplan -o eng --lhost 10.10.14.7   # add --run to arm msf launch
-
-# 4b3) See how the confirmed findings chain: foothold -> priv-esc -> creds ->
-#      lateral -> domain (the "so what"; also an Attack Path sheet in the workbook).
-./bin/recce      attackpath -o eng
-#      Stack the creds you capture and get the netexec/impacket spray plan:
-./bin/recce      creds --add 'CORP\alice:Passw0rd!' -o eng   # then:  creds --plan -o eng
-
-# 4c) Generate Word (.docx) write-ups, then finish each in Word
-./bin/recce      writeups -o eng           # one per REAL finding (+ combined report)
-#    --include-potential also writes up low-confidence version-inferred guesses.
-#    Just want ONE finding, pre-filled with what you've already looted/obtained?
-./bin/recce      writeup -o eng            # list findings to pick from
-./bin/recce      writeup F-007 -o eng      # or by CVE / IP / a word from the title
-
-# 5) See what's left (prints progress + the suggested next command)
-./bin/recce status -o eng
+```
+ enum ─▶ vulns ─▶ services ─▶ (foothold) ─▶ ingest / creds ─▶ writeups
+ scan     deep      per-port     exploitplan    attackpath        report
+ hosts    NSE+CVE   enum cmds    runnable .rc   the "so what"     deliverables
 ```
 
-That's it. Repeat steps 3–5 until `status` says everything's done.
+| Phase | Command | What it does |
+|---|---|---|
+| **Enumerate** | `sudo ./bin/recce enum <targets> -o eng` | discover hosts/ports/services → fills the sheet |
+| _(have a scan?)_ | `./bin/recce import scan.xml -o eng` | build the sheet from existing nmap output |
+| **Vuln-scan** | `sudo ./bin/recce vulns -o eng` | NSE + offline CVE/CWE engine + TLS/HTTP probes |
+| **Per-service** | `./bin/recce services -o eng` | prints the exact enum command for each open port |
+| **Databases** | `sudo ./bin/recce db -o eng` | database services |
+| **Priv-esc** | `./bin/recce privesc -o eng` | per-host escalation playbook |
+| **Credentialed** | `./bin/recce credenum -u U -p P -d dom -o eng` | authed SMB/AD/SSH enum |
+| **On-target loot** | `./bin/recce ingest loot.txt -o eng` | fold `recce-enum.sh/.ps1` findings in |
+| **Exploit plan** | `./bin/recce exploitplan -o eng --lhost <ip>` | runnable msf `.rc` + tool commands |
+| **Attack path** | `./bin/recce attackpath -o eng` | chains findings → domain compromise |
+| **Credentials** | `./bin/recce creds --add 'dom\u:p' -o eng` | stack creds → spray plan (`--plan`) |
+| **Write-ups** | `./bin/recce writeups -o eng` | one Word doc per real finding |
+| **Status** | `./bin/recce status -o eng` | what's left + the next command |
 
-## Targeting (every phase accepts these)
+> [!IMPORTANT]
+> **Keep `-o eng` the same across every command** — it's the one engagement folder
+> they all read, update, and write. Different `-o` = a separate engagement.
 
-| You want to scan… | Type |
+---
+
+## 3 · Step by step
+
+### ① Enumerate
+```bash
+sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
+```
+> [!WARNING]
+> **Hosts showing zero ports?** They block ping (firewalled / Windows / AD). Add
+> **`-Pn`** to scan every target as up: `sudo ./bin/recce enum 10.0.10.0/24 -Pn -o eng`.
+> recce also auto-falls-back to `-Pn` when discovery gets zero responses.
+
+Already have an nmap scan? Skip enum and **import** it (XML best; `.gnmap`, a dir, or a glob):
+```bash
+./bin/recce import scan.xml -o eng
+```
+
+### ② Open the workbook
+`eng/enumeration.xlsx` → read the **Start Here** tab, then work out of **Checklist**.
+
+### ③ Vuln-scan (safe by default)
+```bash
+sudo ./bin/recce vulns -o eng
+```
+Runs NSE vuln+weak-config, the offline version→CVE/CWE engine, stdlib HTTP-header +
+TLS probes, and searchsploit mapping.
+
+> [!TIP]
+> Filters: `--only http smb` · `--unscanned` · `--aggressive` · `--fast` (top-signal
+> only, shows a live **% + ETA** on a big /24) · `--no-probes` · `--no-searchsploit`.
+
+### ④ Deep per-service enumeration
+```bash
+./bin/recce services -o eng                        # the exact command per open port
+./scripts/recce-service.sh from-nmap eng/raw/*.xml # or sweep the whole scan; smb 10.0.10.5
+```
+Runs the **right** tool per service (SMB shares, HTTP paths/TLS, SNMP walk, anon
+FTP/LDAP, unauth Redis…). Safe by default; **`-a`** adds brute/nikto/dir-busting.
+
+### ⑤ Post-exploitation
+```bash
+# Got a shell? Run the bundled read-only sweep, bring the output back, fold it in:
+#   target$  ./recce-enum.sh -o loot.txt                                   # Linux (-t self-test)
+#   target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
+./bin/recce ingest loot.txt -o eng          # or ingest recce-service.sh output too
+
+./bin/recce exploitplan -o eng --lhost 10.10.14.7   # runnable msf .rc (--run to arm)
+./bin/recce attackpath  -o eng                       # foothold → priv-esc → … → domain
+./bin/recce creds --add 'CORP\alice:Pw!' -o eng      # then: creds --plan  (spray plan)
+```
+
+> [!NOTE]
+> **Credentialed enum** with a normal + privileged account — the user account
+> enumerates, the admin one runs admin-only checks; the report labels what each reached:
+> ```bash
+> ./bin/recce credenum -u alice -p 'Pw!' -d corp.local \
+>              --admin-user admin --admin-pass 'AdmPw!' -o eng
+> ```
+
+### ⑥ Report & track
+```bash
+./bin/recce writeups -o eng     # Word write-up per REAL finding (--include-potential for guesses)
+./bin/recce writeup  F-007 -o eng   # or ONE finding, pre-filled with what you've looted
+./bin/recce status   -o eng     # progress + suggested next command
+```
+
+Repeat ③–⑥ until `status` says everything's done.
+
+---
+
+## 4 · 🎯 Targeting (every phase accepts these)
+
+| Scan… | Type |
 |---|---|
 | one host | `10.0.10.5` |
-| several hosts | `10.0.10.5 10.0.10.9` |
+| several | `10.0.10.5 10.0.10.9` |
 | a range | `10.0.10.10-40` |
-| a whole subnet | `10.0.10.0/24` |
-| a list in a file | `@scope.txt` |
+| a subnet | `10.0.10.0/24` |
+| a file list | `@scope.txt` |
 
-`enum`/`scan` take targets as the scope to scan. `vulns`/`db`/`privesc` take
-targets to work on **just that subset** of what's already been enumerated —
-e.g. `sudo ./bin/recce vulns 10.0.20.0/24 -o eng`.
+`enum`/`scan` take the **scope to scan**. `vulns`/`db`/`privesc` take targets to
+work on **just that subset** of what's already enumerated — e.g.
+`sudo ./bin/recce vulns 10.0.20.0/24 -o eng`.
 
-Handy filters on `vulns`: `--only http smb` (just those services),
-`--unscanned` (only ports not yet done), `--aggressive` (intrusive checks),
-`--fast` (top-signal detection scripts only — much quicker on a big /24, and
-shows a live per-host **progress % + ETA**), `--no-probes` (skip the
-HTTP-header/TLS probes), `--no-searchsploit`.
+---
 
-Every finding on the **Vulnerabilities** tab carries a severity, source
-(nse / version-db / probe / config), confidence, CVE refs and **CWE** refs, so
-you can sort and report by weakness class.
+## 5 · 📗 Using the workbook
 
-## Using the workbook
+- **Start Here** explains every tab; **Runbook** is a "what to type" for each phase.
+- **Checklist** — one row per IP, grouped by subnet, with two kinds of box:
+  - 🟩 **Auto** (Enumerated / Vuln-scan / Web / DB) turn green when the tool finishes.
+  - ✍️ **Manual sign-offs** (AD / Access / Priv-esc / Creds / Lateral) you tick as
+    you work the kill-chain. Tick **Reviewed** when you're done with a host.
+- **`—` means the step doesn't apply** (no Web box off a non-web host), so a checked
+  box always means real work.
+- **Services** — one row per open port with its own **☐ / ◐ / ☑** status + notes.
+- **Overview** — every subnet in scope with live-host + per-surface completion.
 
-- **Start Here** tab explains every tab; the **Runbook** tab is a step-by-step
-  "what to type" for each phase and its options — start there if you just want
-  the commands.
-- **Checklist** tab = one row per IP, **grouped by subnet**, with two kinds of
-  step box:
-  - **Auto** (Enumerated / Vuln-scan / Web / DB) **turn green automatically** when
-    the tool finishes that step.
-  - **Manual sign-offs** (AD / Access / Priv-esc / Creds / Lateral) start
-    unchecked — you tick them as you work. AD = you reviewed the DC's users/
-    shares/roasting; then the kill-chain: **Access** gained → **Priv-esc** →
-    **Creds** harvested → **Lateral** movement tried.
-  Tick **Reviewed** when you're personally done with a host.
-- **Boxes only show where the step applies.** A step that's irrelevant shows
-  **`—`** — no Web box without a web server, no AD box off a non-DC, no DB box
-  without a database. So a checked box always means real work.
-- **SMB, remote access (SSH/RDP/WinRM), mail, SNMP, …** aren't checklist columns —
-  each such port is tracked with its own Status on the **Services** tab (below),
-  which keeps the checklist readable while still covering every service.
-- **Services** tab = one row per **open port**, grouped by IP, each with its own
-  **Status** dropdown — **☐ Not started / ◐ In progress / ☑ Done** — plus a Notes
-  cell. Done rows go green, in-progress amber. This is where you track exactly
-  which ports you've looked at, are working, or haven't touched yet.
-- **Overview** tab = every subnet in scope (even ones with no live hosts), showing
-  addresses in range, live hosts found, and per-surface completion — so no subnet
-  (or surface) gets missed.
-- **Filter a step column to `☐`** (or filter by Subnet) to see what's left; `—`
-  cells are ignored, so you never chase a phase that doesn't apply.
-- After editing in Excel, **save**, then run `./bin/recce report -o eng` (or
-  any scan) to fold your edits back in. Close the file before a scan rewrites it.
+> [!TIP]
+> Filter a step column to **`☐`** (or filter by Subnet) to see what's left. After
+> editing in Excel, **save + close**, then `./bin/recce report -o eng` folds your
+> edits back in.
 
-## Deliverables
+---
 
-Every scan/report writes these into `eng/`:
-- **`enumeration.xlsx`** — the tracking workbook you work out of.
-- **`report.html`** — a single, self-contained page (no external assets) you can
-  hand a client: exec summary, severity rollup, findings, attack path, hosts.
-- **`enumeration.md`** / **`services.csv`** — notes-friendly + flat pivot data.
-- Word write-ups (per finding + combined) after `writeups`; the exploitation
-  artifacts under `exploit-plan/` after `exploitplan`.
+## 6 · 📦 Deliverables (written into `eng/`)
 
-## If a scan is slow or crashes
+| File | What it is |
+|---|---|
+| **`enumeration.xlsx`** | the tracking workbook you work out of |
+| **`report.html`** | self-contained client-ready page (exec summary, severity, findings, attack path) |
+| `enumeration.md` / `services.csv` | notes-friendly + flat pivot data |
+| `writeups/*.docx` | per-finding Word write-ups + a combined report (after `writeups`) |
+| `exploit-plan/*` | runnable msf `.rc` + per-host plans (after `exploitplan`) |
 
-Nothing is lost — every host is saved the moment it finishes. Press **Ctrl-C** to
-stop cleanly (it still writes the sheet), use **`--resume`** to skip hosts already
-done, and run **`report -o eng`** any time to rebuild the workbook from saved data.
-On a large scope, `vulns --fast` finishes far quicker (top-signal checks only) and
-prints a live **progress % + ETA**; each phase ends with a loud summary of any
-hosts that errored so a failure can't scroll past unseen.
+---
 
-## Troubleshooting (the quick hits)
+## 7 · 🧰 Troubleshooting (quick hits)
 
-Run **`recce doctor`** first — it reports what's missing and self-tests the whole
-pipeline on this box. The usual snags:
+Run **`recce doctor`** first — it self-tests the whole pipeline on this box.
 
 | Symptom | Fix |
 |---|---|
-| `nmap ... not found` | Install nmap — the only hard requirement. |
-| "Not running as root" / weak scan | Run with `sudo`; use `sudo ./bin/recce ...` so PATH survives sudo. |
-| Hosts show zero ports / few live | They block ping — add **`-Pn`** to `enum`/`scan` (scan all as up). recce also auto-falls-back to `-Pn` if discovery gets zero responses. |
-| Too slow | `--fast`, `--workers N`, `vulns --fast`, `--profile quick`, `--host-timeout`. |
-| Crashed / interrupted | Re-run with `--resume`, or `report -o eng`. `RECCE_DEBUG=1` for the traceback. |
-| "No open ports match" on `vulns` | Run `enum` first; `--unscanned` finds nothing once all is scanned. |
-| No findings (but expected some) | Improve service ID (`--version-all`) then `vulns --aggressive`. |
-| credenum: `No ... tools found` | Install netexec + impacket (or ssh). |
-| Auth table shows `FAIL`/`ERR` | `FAIL` = creds rejected (check user/pass/**domain**); `ERR` = unreachable/tool error. |
-| Workbook won't update | Close it in Excel first — an open file is locked. |
+| `nmap … not found` | Install nmap — the only hard requirement. |
+| weak scan / "not root" | Run with `sudo` (`sudo ./bin/recce …` so PATH survives). |
+| **zero ports / few live** | They block ping — add **`-Pn`**. |
+| too slow | `--fast`, `--workers N`, `--profile quick`, `--host-timeout`. |
+| crashed / interrupted | Re-run with `--resume`, or `report -o eng`. `RECCE_DEBUG=1` for the traceback. |
+| "No open ports match" | Run `enum` first; `--unscanned` is empty once all is scanned. |
+| no findings (expected some) | `--version-all` then `vulns --aggressive`. |
+| `credenum: No … tools` | Install netexec + impacket (or ssh). |
+| auth `FAIL` / `ERR` | `FAIL` = creds rejected (check **domain**); `ERR` = unreachable/tool error. |
+| workbook won't update | Close it in Excel first — an open file is locked. |
 
-**Re-running any phase is safe** — every phase is idempotent (never duplicates
-rows). Full guide: **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
+> [!NOTE]
+> **Re-running any phase is safe** — every phase is idempotent (never duplicates rows).

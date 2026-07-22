@@ -33,8 +33,8 @@ mkdir -p "$STAGE"
 
 # What ships in the bundle. Everything needed to run + verify offline; nothing
 # client- or scan-specific.
-INCLUDE="recce bin tests README.md QUICKSTART.md TROUBLESHOOTING.md CHANGELOG.md \
-         LICENSE pyproject.toml requirements.txt make_package.sh"
+INCLUDE="recce bin tests README.md QUICKSTART.md CHEATSHEET.html TROUBLESHOOTING.md \
+         CHANGELOG.md LICENSE pyproject.toml requirements.txt make_package.sh"
 for item in $INCLUDE; do
   [ -e "$item" ] && cp -r "$item" "$STAGE/" || echo "  (skip missing: $item)"
 done
