@@ -1647,10 +1647,16 @@ class IngestCommandTest(unittest.TestCase):
             import openpyxl
             ws = openpyxl.load_workbook(os.path.join(d, "enumeration.xlsx"))["Priv-Esc"]
             hdr = [c.value for c in ws[1]]
-            hi = hdr.index("How-to / command")
-            on_target = sum(1 for r in ws.iter_rows(min_row=2, values_only=True)
-                            if r[hi] and "on-target" in str(r[hi]))
+            ti = hdr.index("Type")
+            rows = list(ws.iter_rows(min_row=2, values_only=True))
+            # The 5 ingested findings each become a row verdicted as an escalation
+            # path or an observation (this fresh host has no remote findings).
+            on_target = sum(1 for r in rows if r[ti] in ("Escalation path", "Finding"))
             self.assertEqual(on_target, 5)
+            # ...and at least some are verdicted as actual escalation paths.
+            self.assertGreater(sum(1 for r in rows if r[ti] == "Escalation path"), 0)
+            # The generic OS checklist is clearly marked, not mixed in as findings.
+            self.assertGreater(sum(1 for r in rows if r[ti] == "Checklist"), 0)
 
 
 class ProgressAndAuthTest(unittest.TestCase):

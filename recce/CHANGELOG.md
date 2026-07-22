@@ -148,6 +148,17 @@ All notable changes to recce are documented here. Dates are UTC.
   in-workbook troubleshooting section on the **Runbook** tab.
 
 ### Changed
+- **Priv-Esc sheet now verdicts what's *actually* escalatable.** Ingest a
+  `recce-enum.sh/.ps1` run and each `[!]` finding is classified with a new **Type**
+  column: **Escalation path** (a confirmed on-target finding that maps to a real
+  technique — the How-to shows the exact existing tool + command, verdicted with
+  the same engine as the Exploitation sheet), **Finding** (an observation with no
+  auto-mapped escalation — worth a look, not a confirmed path), or **Checklist**
+  (the generic per-OS "what to run once you have a shell" reference). Rows sort
+  escalation → finding → checklist and are colour-tinted, so the real paths sit on
+  top and the generic checklist no longer reads as findings. Before any local enum
+  a host shows only the **Checklist** (clearly labelled); after ingest the checklist
+  is tagged "host already swept — see the findings above."
 - **Write-ups now cover REAL findings by default.** `recce writeups` generates a
   document only for findings backed by an actual check/observation (an NSE script
   that reported VULNERABLE, a config/probe observation, or an ingested on-target

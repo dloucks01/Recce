@@ -2095,6 +2095,39 @@ class IngestServiceTest(unittest.TestCase):
             self.assertTrue(any("signing" in t for t in titles))
 
 
+class PrivEscVerdictTest(unittest.TestCase):
+    def test_verdict_orders_and_classifies(self):
+        from recce import privesc as pe
+        h = Host(ip="10.0.0.5", os_family="Linux", local_findings=[
+            {"category": "sudo",
+             "vector": "NOPASSWD sudo: /usr/bin/find -> GTFOBins 'find'",
+             "section": "Sudo", "source": "recce-enum"},
+            {"category": "local",
+             "vector": "recently modified config /opt/app/settings.conf",
+             "section": "Files", "source": "recce-enum"}])
+        rows = pe.plan(h)
+        # escalation sorts first; both finding and checklist are present.
+        self.assertEqual(rows[0]["type"], "escalation")
+        self.assertIn("GTFOBins", rows[0]["howto"])       # verdict shows the tool
+        types = [r["type"] for r in rows]
+        self.assertIn("finding", types)                   # the unmappable observation
+        self.assertIn("checklist", types)                 # generic OS reference
+        # ordering: no checklist row precedes a finding/escalation row.
+        order = {"escalation": 0, "finding": 1, "checklist": 2}
+        idx = [order[t] for t in types]
+        self.assertEqual(idx, sorted(idx))
+        # checklist notes that the host was already swept.
+        cl = next(r for r in rows if r["type"] == "checklist")
+        self.assertIn("already swept", cl["note"])
+
+    def test_no_ingest_is_checklist_only(self):
+        from recce import privesc as pe
+        rows = pe.plan(Host(ip="10.0.0.6", os_family="Windows"))
+        self.assertTrue(rows)
+        self.assertTrue(all(r["type"] == "checklist" for r in rows))
+        self.assertNotIn("already swept", rows[0]["note"])  # no sweep claimed
+
+
 class CredentialsTest(unittest.TestCase):
     def _hosts(self):
         return [Host(ip="10.0.10.5", subnet="10.0.10.0/24", os_family="Windows",

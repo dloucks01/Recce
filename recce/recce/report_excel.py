@@ -354,21 +354,31 @@ def _spec_databases(hosts: list[Host]) -> SheetSpec:
     return SheetSpec("Databases", cols, rows, _styler_databases, skip_if_empty=True)
 
 
+_PE_TYPE = {"escalation": "Escalation path", "finding": "Finding",
+            "checklist": "Checklist"}
+
+
 def _styler_privesc(d: dict) -> dict:
-    return {"Category": "sev_medium"} if d.get("Category") == "finding" else {}
+    t = d.get("Type")
+    if t == "Escalation path":
+        return {"Type": "sev_high"}          # confirmed, actually escalatable
+    if t == "Finding":
+        return {"Type": "sev_medium"}
+    return {"Type": "sev_info"} if t == "Checklist" else {}
 
 
 def _spec_privesc(hosts: list[Host]) -> SheetSpec:
     cols = [
-        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 20),
-        ("OS", "data", 22), ("Category", "data", 10), ("Vector", "data", 30),
-        ("How-to / command", "data", 55), ("Ref / note", "data", 40),
-        ("Notes", "notes", 26), ("Key", "key", 4),
+        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 18),
+        ("Type", "data", 15), ("OS", "data", 18), ("Category", "data", 10),
+        ("Vector", "data", 30), ("How-to / command", "data", 55),
+        ("Ref / note", "data", 40), ("Notes", "notes", 24), ("Key", "key", 4),
     ]
     rows = []
     for r in pe.all_rows(hosts):
         rows.append({"key": r["key"], "data": {
-            "IP": r["ip"], "Hostname": r["hostname"], "OS": r["os"],
+            "IP": r["ip"], "Hostname": r["hostname"],
+            "Type": _PE_TYPE.get(r.get("type"), ""), "OS": r["os"],
             "Category": r["category"], "Vector": r["vector"],
             "How-to / command": r["howto"], "Ref / note": r["note"]}})
     return SheetSpec("Priv-Esc", cols, rows, _styler_privesc, skip_if_empty=True)
