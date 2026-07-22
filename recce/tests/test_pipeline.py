@@ -1921,6 +1921,9 @@ class CliSmokeTest(unittest.TestCase):
                      ["db", "-o", "x"], ["privesc", "--scan"], ["scan", "10.0.0.1"],
                      ["credenum", "-u", "a", "-p", "b", "-d", "corp.local"],
                      ["writeups", "--min-severity", "high", "--no-screenshots"],
+                     ["writeups", "--include-potential"],
+                     ["writeup", "F-007", "-o", "eng"],
+                     ["services", "-o", "eng", "-a"],
                      ["ingest", "loot.txt", "--host", "1.2.3.4"],
                      ["import", "scan.xml", "-o", "eng"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
@@ -1932,6 +1935,44 @@ class CliSmokeTest(unittest.TestCase):
         from recce import cli
         rc = cli.cmd_doctor(SimpleNamespace(no_self_scan=True))
         self.assertIn(rc, (0, 1))  # 0 if nmap present, 1 if not - never raises
+
+
+class ServiceEnumTest(unittest.TestCase):
+    def test_script_mapping(self):
+        from recce import serviceenum as se
+        self.assertEqual(se.script_for("microsoft-ds", 445), "smb")
+        self.assertEqual(se.script_for("netbios-ssn", 139), "smb")
+        self.assertEqual(se.script_for("ssl/http", 8443), "http")
+        self.assertEqual(se.script_for("", 6379), "redis")       # port fallback
+        self.assertEqual(se.script_for("http", 5985), "winrm")   # WinRM port wins
+        self.assertEqual(se.script_for("ms-wbt-server", 3389), "rdp")
+        self.assertEqual(se.script_for("unknown-thing", 12345), "")
+
+    def test_commands_and_unmapped(self):
+        from recce import serviceenum as se
+        h = Host(ip="10.0.0.5", hostnames=["dc"],
+                 ports=[Port(portid=445, service="microsoft-ds"),
+                        Port(portid=6379, service="redis"),
+                        Port(portid=9999, service="weird", state="open")])
+        cmds = se.commands_for_host(h)
+        scripts = {c[2] for c in cmds}
+        self.assertEqual(scripts, {"smb", "redis"})
+        self.assertTrue(all(c[3].startswith("./scripts/recce-service.sh") for c in cmds))
+        self.assertIn((9999, "weird"), se.unmapped_ports(h))
+
+    def test_cmd_services_smoke(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "results.sqlite")
+            st = Store(db)
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                ports=[Port(portid=445, service="microsoft-ds"),
+                                       Port(portid=80, service="http")]))
+            st.close()
+            rc = cli.cmd_services(SimpleNamespace(output_dir=d, targets=[],
+                                                  host=[], subnet=[], aggressive=False))
+            self.assertEqual(rc, 0)
 
 
 class ReportTest(unittest.TestCase):

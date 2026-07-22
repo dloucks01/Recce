@@ -131,6 +131,8 @@ from_nmap() {
       [ -z "$ip" ] && continue
       total=$((total+1))
       local script; script=$(name_to_svc "$svc"); [ -z "$script" ] && script=$(port_to_svc "$port")
+      case "$port" in 5985|5986) script=winrm;; esac   # nmap labels WinRM as http
+
       if [ -n "$script" ]; then
         handled=$((handled+1)); run_svc "$script" "$ip" "$port"
       else

@@ -56,7 +56,9 @@ sudo ./bin/recce vulns -o eng
 # 3b) Deep per-service enumeration (SMB shares, HTTP paths/TLS, SNMP walk,
 #     anon FTP/LDAP, Redis unauth, ...). Runs the RIGHT tool per open port and
 #     flags likely vulns. Safe by default; -a adds brute/nikto/dir-busting.
-#     Sweep the whole engagement from recce's own nmap output:
+#     Not sure what to run? recce prints the exact command for every open port:
+./bin/recce      services -o eng                         # per-port enum commands
+#     Then run one, or sweep the whole engagement from recce's own nmap output:
 ./scripts/recce-service.sh from-nmap eng/raw/*.xml       # or: smb 10.0.10.5
 
 # 4) Optional deeper phases (any time, on any subset)

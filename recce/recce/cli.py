@@ -910,6 +910,8 @@ def cmd_enum(args: argparse.Namespace) -> int:
     print(f"\n[+] Enumeration done -> {paths['xlsx']}")
     print(f"    Next:  recce vulns -o {args.output_dir}     "
           "# vuln-scan the open ports it found")
+    print(f"    or:    recce services -o {args.output_dir}  "
+          "# the exact per-service enum command for each open port")
     return 0
 
 
@@ -1166,6 +1168,58 @@ def _match_one_host(hosts, selector):
     """Best-effort: the host(s) an IP/IP:port selector points at (for screenshots)."""
     sel = (selector or "").split(":")[0].strip()
     return [h for h in hosts if h.ip == sel] if sel else []
+
+
+def cmd_services(args: argparse.Namespace) -> int:
+    """Print the exact per-service enumeration command to run for every open port
+    recce found - the bridge from the datastore to recce/scripts/. Answers 'what
+    do I type next?' for each service."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    hosts = _selected_hosts(store.all_hosts(), args)
+    store.close()
+    from . import serviceenum
+
+    print("Per-service enumeration - run these against the open ports recce found.")
+    print("Safe by default (banners, versions, anon/null checks, TLS, NSE 'safe');")
+    print("add -a to a command for the intrusive checks (brute / nikto / dir-bust).\n")
+    total = 0
+    unmapped: list[tuple[str, int, str]] = []
+    for h in hosts:
+        cmds = serviceenum.commands_for_host(h)
+        um = serviceenum.unmapped_ports(h)
+        if not cmds and not um:
+            continue
+        label = h.ip + (f"  ({h.hostname})" if h.hostname else "")
+        roles = f"   [{', '.join(h.roles)}]" if h.roles else ""
+        print(f"{label}{roles}")
+        for port, svc, _script, cmd in cmds:
+            print(f"  {port:<6}{svc:<14}{cmd}" + ("  -a" if args.aggressive else ""))
+            total += 1
+        for port, svc in um:
+            unmapped.append((h.ip, port, svc))
+        print()
+    if total == 0:
+        print("No enumerable open ports yet. Run `enum` (or `import`) first.")
+        return 0
+    print(f"{total} service command(s) across {len({h.ip for h in hosts})} host(s).")
+    raw_glob = os.path.join(args.output_dir, "raw", "*.xml")
+    print("Or sweep every open port in one go from recce's own scans:")
+    print(f"  {serviceenum.DRIVER} from-nmap {raw_glob}"
+          + ("  -a" if args.aggressive else ""))
+    if unmapped:
+        print(f"\n{len(unmapped)} open port(s) have no dedicated script - "
+              f"enumerate manually:")
+        for ip, port, svc in unmapped[:15]:
+            print(f"  {ip}:{port} ({svc or '?'})  ->  nmap -sV --script vuln -p {port} {ip}")
+        if len(unmapped) > 15:
+            print(f"  ... and {len(unmapped) - 15} more")
+    return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1938,6 +1992,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     w1.add_argument("--overwrite", action="store_true",
                     help="regenerate even if this write-up already exists")
     w1.set_defaults(func=cmd_writeup)
+
+    # Bridge: per-open-port enumeration commands from recce/scripts/.
+    sv = sub.add_parser("services",
+                        help="print the per-service enum command to run for every "
+                             "open port recce found (bridges to recce/scripts/)")
+    sv.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    sv.add_argument("-o", "--output-dir", default="engagement")
+    sv.add_argument("-a", "--aggressive", action="store_true",
+                    help="append -a to each command (enable the intrusive checks)")
+    sv.set_defaults(func=cmd_services)
 
     # Convenience: enum + vulns in one shot.
     s = sub.add_parser("scan", help="run enum then vulns in one shot")

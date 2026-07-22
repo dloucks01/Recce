@@ -5,6 +5,13 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **`services` command** — the bridge from recce's findings to the per-service
+  suite. `recce services -o eng` prints the exact `recce-service.sh` command to
+  run for **every open port** recce found, grouped by host (with roles and a
+  one-shot `from-nmap` sweep line); `-a` appends the intrusive flag. Directly
+  answers the field complaint "hard to know what command to type" — after `enum`,
+  recce now tells you. Mirrors the dispatcher's port/name→script map (new
+  `serviceenum` module), including the WinRM-on-5985 fix (nmap labels it `http`).
 - **Single-finding write-up** — `recce writeup <selector>` generates one Word
   (.docx) report for a chosen finding, **pre-filled with what's already been
   looted or obtained** on the affected host(s): ingested on-target (recce-enum)

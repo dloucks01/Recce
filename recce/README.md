@@ -676,6 +676,7 @@ Every command takes targets as a single IP, several IPs, a range
 | `ingest <loot>` | Fold on-target `recce-enum.sh`/`.ps1` findings into Priv-Esc | `--host IP` |
 | `writeups [targets]` | One Word write-up per **real** finding + combined report | `--include-potential`, `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
 | `writeup <selector>` | **One** finding's write-up, pre-filled with looted/obtained evidence (F-id / CVE / IP / title; omit to list) | `--no-screenshots`, `--overwrite` |
+| `services [targets]` | Print the per-service enum command (`recce/scripts/`) for every open port found | `-a` (append the intrusive flag) |
 | `report` | Rebuild the workbook/reports from the datastore | — |
 | `status` | Print live coverage + suggested next command | — |
 | `review` | Mark hosts/services/items reviewed from the CLI | `--host`, `--service IP:PORT`, `--key`, `--cascade`, `--note`, `--undo` |
@@ -735,6 +736,7 @@ recce/               the package (python -m recce)
   credenum.py        credentialed enum via netexec / impacket / ssh (tool-gated)
   ingest.py          on-target loot -> Priv-Esc rows + promoted Vulnerabilities
   playbook.py        confirmed finding -> exact existing tool + command + validate
+  serviceenum.py     open port -> per-service enum command (bridge to scripts/)
   screenshot.py      optional headless-browser web screenshots (tool-gated)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)
   docx.py            standard-library .docx writer (no python-docx) + image embed
