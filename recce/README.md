@@ -76,6 +76,27 @@ to a TCP connect scan otherwise.
 > have `openpyxl` on a connected box, the files are fully compatible — but it is
 > never required.
 
+### Build the burn package (transfer / airgap)
+
+To move recce onto an airgapped Kali box (or burn it to a disk), build a
+self-contained bundle:
+
+```bash
+./make_package.sh              # -> dist/recce-<version>.tar.gz (+ .zip) + SHA256SUMS
+./make_package.sh --verify     # run the test suite first
+```
+
+It stages the tool (`recce/` incl. the `local/` and `scripts/` suites), `bin/`,
+the tests, and the docs — scrubbing caches, VCS, and any scan/engagement output —
+into a single `recce-<version>/` directory, archives it, and writes `SHA256SUMS`
+for verifying the transfer. On the target:
+
+```bash
+tar xzf recce-<version>.tar.gz && cd recce-<version> && ./bin/recce doctor
+```
+
+No network or pip install needed — recce is stdlib-only at runtime.
+
 ## Workflow
 
 The core is **two cheap, resumable commands**: `enum` gets the sheet populated
