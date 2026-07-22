@@ -89,6 +89,12 @@ sudo ./bin/recce db -o eng                 # databases
 #      commands + a per-host plan. Drives EXISTING tools; safe by default (check-only).
 ./bin/recce      exploitplan -o eng --lhost 10.10.14.7   # add --run to arm msf launch
 
+# 4b3) See how the confirmed findings chain: foothold -> priv-esc -> creds ->
+#      lateral -> domain (the "so what"; also an Attack Path sheet in the workbook).
+./bin/recce      attackpath -o eng
+#      Stack the creds you capture and get the netexec/impacket spray plan:
+./bin/recce      creds --add 'CORP\alice:Passw0rd!' -o eng   # then:  creds --plan -o eng
+
 # 4c) Generate Word (.docx) write-ups, then finish each in Word
 ./bin/recce      writeups -o eng           # one per REAL finding (+ combined report)
 #    --include-potential also writes up low-confidence version-inferred guesses.
@@ -157,6 +163,16 @@ you can sort and report by weakness class.
   cells are ignored, so you never chase a phase that doesn't apply.
 - After editing in Excel, **save**, then run `./bin/recce report -o eng` (or
   any scan) to fold your edits back in. Close the file before a scan rewrites it.
+
+## Deliverables
+
+Every scan/report writes these into `eng/`:
+- **`enumeration.xlsx`** — the tracking workbook you work out of.
+- **`report.html`** — a single, self-contained page (no external assets) you can
+  hand a client: exec summary, severity rollup, findings, attack path, hosts.
+- **`enumeration.md`** / **`services.csv`** — notes-friendly + flat pivot data.
+- Word write-ups (per finding + combined) after `writeups`; the exploitation
+  artifacts under `exploit-plan/` after `exploitplan`.
 
 ## If a scan is slow or crashes
 

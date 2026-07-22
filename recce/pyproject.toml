@@ -30,5 +30,6 @@ packages = ["recce"]
 version = { attr = "recce.__version__" }
 
 [tool.setuptools.package-data]
-# Ship the bundled demo scan and the on-target enum scripts alongside the code.
-recce = ["sample_scan.xml", "local/*"]
+# Ship the bundled demo scan, the on-target enum scripts, and the Kali-side
+# per-service enumeration suite alongside the code.
+recce = ["sample_scan.xml", "local/*", "scripts/*", "scripts/services/*"]
