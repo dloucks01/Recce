@@ -2870,12 +2870,72 @@ class DeployTest(unittest.TestCase):
         finally:
             deploy.deploy_one = orig
 
+    def test_stager_serves_script_under_token_only(self):
+        import urllib.request
+        import urllib.error
+        from recce.stager import Stager
+        data = b"# recce-enum.ps1"
+        with Stager("127.0.0.1", {"recce-enum.ps1": data}) as st:
+            got = urllib.request.urlopen(st.url("recce-enum.ps1"), timeout=5).read()
+            self.assertEqual(got, data)
+            self.assertEqual(st.hits, 1)
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{st.port}/wrong/recce-enum.ps1", timeout=5)
+            self.assertEqual(cm.exception.code, 404)
+
+    def test_nxc_auth_parse_and_authmap_selection(self):
+        from recce import deploy
+        rows = deploy._parse_nxc_auth(
+            "SMB   10.0.0.1  445  DC  [+] d\\a:p (Pwn3d!)\n"
+            "SMB   10.0.0.2  445  WS  [-] d\\a:p STATUS_LOGON_FAILURE")
+        self.assertEqual(rows, [("10.0.0.1", True, True), ("10.0.0.2", False, False)])
+        ssh = {"username": "u", "password": "p"}
+        win = {"username": "a", "password": "b"}
+        amap = {"1": {"winrm": True}, "2": {"winrm": False, "smb": True},
+                "3": {"ssh": True}, "4": {"winrm": False, "smb": False}}
+        self.assertEqual(deploy.transport_for(self._host("1", "Windows", [445, 5985]), ssh, win, amap), "winrm")
+        self.assertEqual(deploy.transport_for(self._host("2", "Windows", [445, 5985]), ssh, win, amap), "smb")
+        self.assertEqual(deploy.transport_for(self._host("3", "Linux", [22]), ssh, win, amap), "ssh")
+        self.assertIsNone(deploy.transport_for(self._host("4", "Windows", [445]), ssh, win, amap))
+
+    def test_stager_unreachable_falls_back_to_push(self):
+        from recce import deploy
+        win = {"username": "a", "password": "b"}
+        seen = []
+
+        def fake_run(argv, timeout, stdin=None):
+            joined = " ".join(argv)
+            if "EncodedCommand" in joined:            # the stager cradle
+                seen.append("stager")
+                return 0, "PowerShell WebException: unable to connect", ""
+            if "--put-file" in joined:                # the push fallback
+                seen.append("put")
+                return 0, "", ""
+            return 0, "recce-enum host=x\n[!] finding", ""   # push exec
+
+        class FakeStager:
+            def url(self, n):
+                return f"http://1.2.3.4:8000/tok/{n}"
+        o_run, o_tool = deploy._run, deploy.smb_tool
+        deploy._run, deploy.smb_tool = fake_run, (lambda: "nxc")
+        try:
+            t, out, err = deploy.deploy_one(
+                self._host("10.0.0.9", "Windows", [445]), None, win,
+                stager=FakeStager(), authmap={"10.0.0.9": {"smb": True}})
+        finally:
+            deploy._run, deploy.smb_tool = o_run, o_tool
+        self.assertIn("stager", seen)                 # tried the stager first
+        self.assertIn("put", seen)                    # then fell back to push
+        self.assertTrue(out and "recce-enum" in out)  # and got output
+
     def test_deploy_worker_folds_recce_enum_output(self):
         from recce import cli, deploy
         sample = ("recce-enum host=web01 os=linux\n"
                   "[!] sudo: NOPASSWD entry - run a root command via sudo\n")
         orig = deploy.deploy_one
-        deploy.deploy_one = lambda host, s, w, timeout: ("ssh", sample, None)
+        deploy.deploy_one = lambda host, s, w, timeout, stager=None, authmap=None: (
+            "ssh", sample, None)
         try:
             with tempfile.TemporaryDirectory() as d:
                 host, transport, added, promoted, err = cli._deploy_worker(
