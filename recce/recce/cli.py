@@ -303,17 +303,43 @@ def _apply_profile_overrides(profile, args) -> None:
     profile.assume_up = not profile.ping_discovery   # -Pn: fail-fast on dead IPs
 
 
+def _split_userdomain(username: str, domain: str | None) -> tuple[str, str]:
+    """Accept a domain-qualified username and split the domain out, so a tester can
+    type the credential however AD hands it to them:
+        -u 'CORP\\administrator'        -> user=administrator, domain=CORP
+        -u 'corp.local/administrator'   -> user=administrator, domain=corp.local
+        -u 'administrator@corp.local'   -> user=administrator, domain=corp.local
+    An explicit -d always wins; an embedded domain only fills in when -d was
+    omitted (so `-u CORP\\admin -d corp.local` keeps the fuller -d form)."""
+    user = username or ""
+    dom = domain or ""
+    if "\\" in user:
+        d, user = user.split("\\", 1)
+        dom = dom or d
+    elif "/" in user:
+        d, user = user.split("/", 1)
+        dom = dom or d
+    elif "@" in user:
+        user, d = user.rsplit("@", 1)
+        dom = dom or d
+    return user, dom
+
+
 def _creds_of(args) -> dict | None:
-    return {"username": args.username, "password": args.password,
-            "domain": args.domain} if getattr(args, "username", None) else None
+    if not getattr(args, "username", None):
+        return None
+    user, domain = _split_userdomain(args.username, getattr(args, "domain", None))
+    return {"username": user, "password": args.password, "domain": domain}
 
 
 def _admin_creds_of(args) -> dict | None:
     """The optional privileged/superuser account (domain defaults to -d)."""
     if not getattr(args, "admin_username", None):
         return None
-    return {"username": args.admin_username, "password": args.admin_password,
-            "domain": getattr(args, "admin_domain", None) or getattr(args, "domain", None)}
+    user, domain = _split_userdomain(
+        args.admin_username,
+        getattr(args, "admin_domain", None) or getattr(args, "domain", None))
+    return {"username": user, "password": args.admin_password, "domain": domain}
 
 
 class _Refresher:
@@ -2342,9 +2368,15 @@ def _add_creds(pp) -> None:
     # privileged-account and LDAP-tuning flags fold into a second group so the
     # simple credentialed run (`-u USER -p PASS -d DOMAIN`) isn't buried.
     g = pp.add_argument_group("credentials")
-    g.add_argument("-u", "--username", help="low-priv/user account for authenticated SMB/LDAP")
+    g.add_argument("-u", "--username",
+                   help="user account for authenticated SMB/LDAP/WinRM. Domain-"
+                        "qualified forms work too: 'CORP\\user', 'corp.local/user', "
+                        "or 'user@corp.local' (splits out the domain, so -d is "
+                        "optional then)")
     g.add_argument("-p", "--password", help="password for the user account")
-    g.add_argument("-d", "--domain", help="AD domain (e.g. corp.local) for authentication")
+    g.add_argument("-d", "--domain",
+                   help="AD domain (e.g. corp.local) for authentication; overrides "
+                        "any domain embedded in -u")
     a = pp.add_argument_group("privileged & LDAP (optional)")
     a.add_argument("--admin-user", dest="admin_username",
                    help="privileged/superuser account: runs the admin-only checks "
