@@ -14,9 +14,11 @@ identification, NTLM-relay target discovery, and credentialed LDAP enumeration o
 users, SPNs, roastable accounts, delegation, groups and trusts.
 
 > 🚀 **New here? Read [QUICKSTART.md](QUICKSTART.md)** — a one-page guide that
-> gets you from zero to a filled-in workbook in five commands. There is also a
-> `./bin/recce` wrapper so you can skip typing `python3 -m recce`, and a
-> **Start Here** tab inside every workbook that explains each sheet.
+> gets you from zero to a filled-in workbook in five commands. Prefer a
+> printable one-sheet field reference? Open **[CHEATSHEET.html](CHEATSHEET.html)**
+> in a browser. There is also a `./bin/recce` wrapper so you can skip typing
+> `python3 -m recce`, and a **Start Here** tab inside every workbook that
+> explains each sheet.
 
 ## Why this over raw nmap / AutoRecon?
 
