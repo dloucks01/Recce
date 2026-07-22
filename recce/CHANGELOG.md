@@ -39,6 +39,26 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Added
+- **Better service detection — no more dead "unknown" ports.** nmap's `-sV` is
+  still the primary identifier, but the ports it leaves as `unknown`/`tcpwrapped`
+  (especially Windows RPC/ephemeral services like **5040 CDPSvc**, 5357 wsdapi,
+  47001 winrm-http, dynamic MSRPC) are now recovered by a new `svcdetect` layer,
+  airgapped-safe and stdlib-only, in three escalating steps:
+  1. **servicefp mining** — nmap already collected the service's raw response but
+     couldn't match it; recce now keeps that fingerprint (previously discarded)
+     and keyword-matches it itself (SSH/VNC/TLS/RDP/Redis/… signatures). No new
+     traffic.
+  2. **curated port map** — a well-known port with no name gets an *inferred*
+     label from the port number (e.g. 5040 → "Windows CDPSvc"). No new traffic.
+  3. **active banner grab** — a timeout-bounded connect-and-read (plus a few
+     protocol nudges: HTTP HEAD, Redis PING, RDP X.224) fingerprints what the
+     first two missed. Only touches the target; runs on a stock airgapped Kali.
+
+  The Services tab gains an **"ID source"** column (nmap / inferred / banner) so
+  you can see *how confident* each label is, and a still-unknown port now shows a
+  **suggested identification command** (`nmap -sV --version-all` / `amap`) in its
+  Enum-command cell instead of being a dead end. `--no-probes` disables the active
+  grab; the free passive layers always run.
 - **Domain-qualified usernames are accepted anywhere creds are given.** `-u` now
   takes the credential however AD hands it to you — `CORP\user`,
   `corp.local/user`, or `user@corp.local` — and splits the domain out for you, so

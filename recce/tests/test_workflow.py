@@ -1958,7 +1958,8 @@ class EnumRobustnessTest(unittest.TestCase):
         store = cli._open_store(paths["db"])
         store.set_scope("10.0.0.0/24", 254)
 
-        def fake_worker(ip, profile, paths, creds, port_map, subnet_map):
+        def fake_worker(ip, profile, paths, creds, port_map, subnet_map,
+                        active_probe=True):
             if ip == "10.0.0.11":            # worker raises
                 raise RuntimeError("boom")
             if ip == "10.0.0.12":            # timed out -> None + issue

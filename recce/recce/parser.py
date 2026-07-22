@@ -311,6 +311,15 @@ def parse_nmap_xml(path: str) -> list[Host]:
                     port.tunnel = svc.get("tunnel", "")
                     port.ostype = svc.get("ostype", "")
                     port.cpe = [c.text for c in svc.findall("cpe") if c.text]
+                    # The raw probe response nmap collected but couldn't match to a
+                    # signature - free evidence we mine later (svcdetect) instead of
+                    # discarding it, so an unmatched port isn't a dead end.
+                    port.servicefp = svc.get("servicefp", "")
+                    # A concrete name from nmap (not the "unknown"/"tcpwrapped"
+                    # non-answers) is authoritative; record that provenance so our
+                    # fallback naming only fills the genuine gaps.
+                    if port.service and port.service not in ("unknown", "tcpwrapped"):
+                        port.detect_source = "nmap"
                 for snode in pnode.findall("script"):
                     script = _script_from_node(snode)
                     port.scripts.append(script)

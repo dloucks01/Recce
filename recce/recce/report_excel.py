@@ -190,23 +190,39 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
     Status (not started / in progress / done) and a Notes cell, so a tester can
     track exactly which ports they've looked at, are working, or haven't touched."""
     from . import serviceenum as se
+    from . import svcdetect
     cols = [
         ("Status", "status", 15), ("IP", "data", 16),
         ("Hostname", "data", 24), ("Port", "data", 7), ("Proto", "data", 6),
-        ("Service", "data", 16), ("Product", "data", 22), ("Version", "data", 16),
+        ("Service", "data", 16), ("ID source", "data", 10),
+        ("Product", "data", 22), ("Version", "data", 16),
         ("Extra info", "data", 24), ("CPE", "data", 28),
-        ("Enum command", "data", 42), ("Notes", "notes", 28),
+        ("Enum command", "data", 46), ("Notes", "notes", 28),
         ("Key", "key", 4),
     ]
     rows = []
     for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
         for p in sorted(h.open_ports, key=lambda p: p.portid):
             script = se.script_for(p.service, p.portid)
-            enum_cmd = f"{se.DRIVER} {script} {h.ip} {p.portid}" if script else ""
+            if script:
+                enum_cmd = f"{se.DRIVER} {script} {h.ip} {p.portid}"
+            else:
+                # No dedicated script - don't dead-end: hand the tester the exact
+                # command to positively identify a still-unknown port.
+                enum_cmd = svcdetect.suggest_id_command(h.ip, p)
+            # Provenance of the service label: nmap (authoritative), our inferred
+            # port-map guess, our banner grab, or a leftover nmap non-answer.
+            if p.detect_source:
+                source = p.detect_source
+            elif p.service and p.service not in ("unknown", "tcpwrapped"):
+                source = "nmap"
+            else:
+                source = "—"
             rows.append({"key": tr.svc_key(h.ip, p.protocol, p.portid),
                          "group": h.ip, "data": {
                 "IP": h.ip, "Hostname": h.hostname, "Port": p.portid,
-                "Proto": p.protocol, "Service": p.service,
+                "Proto": p.protocol, "Service": p.service or "unknown",
+                "ID source": source,
                 "Product": p.product, "Version": p.version, "Extra info": p.extrainfo,
                 "CPE": ", ".join(p.cpe), "Enum command": enum_cmd}})
     return SheetSpec("Services", cols, rows, group_by="IP")
