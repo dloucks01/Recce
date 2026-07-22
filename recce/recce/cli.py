@@ -1451,6 +1451,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("browser", False, "auto web screenshots in write-ups (firefox/chromium)"),
     ]
     nmap_ok = False
+    presence: dict[str, bool] = {}   # reused for the summary, so it can't disagree
     for name, required, desc in tools:
         present = shutil.which(name) is not None
         if name == "netexec":
@@ -1464,6 +1465,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 desc = f"auto web screenshots in write-ups (using {found})"
         if name == "nmap":
             nmap_ok = present
+        presence[name] = present
         mark = "OK  " if present else ("MISSING (required)" if required else "-   (optional)")
         print(f"  {name:<15} {mark:<20} {desc}")
     from . import credenum as _ce
@@ -1489,7 +1491,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("  NOT READY - nmap is present but the self-scan failed (see above).")
         verdict = 1
     else:
-        degraded = [n for n, req, _ in tools if not req and not shutil.which(n)]
+        degraded = [n for n, req, _ in tools if not req and not presence.get(n)]
         print("  READY." + (f"  Optional tools missing: {', '.join(degraded)}."
                             if degraded else "  All tools present."))
         verdict = 0

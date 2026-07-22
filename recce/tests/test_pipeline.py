@@ -872,6 +872,39 @@ class WriteupTest(unittest.TestCase):
         os.chmod(path, 0o755)
         return path
 
+    def test_browser_found_off_path(self):
+        """Regression: a browser installed but not on PATH (sudo secure_path,
+        snap, /opt) must still be found via the absolute-path fallback scan."""
+        import shutil as _sh
+        from recce import screenshot as s
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: _sh.rmtree(d, ignore_errors=True))
+        # a browser in a bin dir + one nested under an /opt-style dir
+        bind = os.path.join(d, "bin"); os.makedirs(bind)
+        optd = os.path.join(d, "opt", "vendor"); os.makedirs(optd)
+        chromium = os.path.join(bind, "chromium")
+        firefox = os.path.join(optd, "firefox")
+        for p in (chromium, firefox):
+            with open(p, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(p, 0o755)
+        orig_dirs, orig_globs = s._SCAN_DIRS, s._OPT_GLOBS
+        orig_path = os.environ.get("PATH", "")
+        os.environ.pop("RECCE_BROWSER", None)
+        try:
+            os.environ["PATH"] = "/nonexistent-xyz"   # nothing resolvable on PATH
+            # 1) scan-dir fallback finds the bin-dir chromium
+            s._SCAN_DIRS = [bind]; s._OPT_GLOBS = []
+            self.assertEqual(s.browser_tool(), chromium)
+            self.assertTrue(s.available())
+            # 2) /opt-style glob finds the nested firefox
+            s._SCAN_DIRS = []
+            s._OPT_GLOBS = [os.path.join(d, "opt", "*/{n}")]
+            self.assertEqual(s.browser_tool(), firefox)
+        finally:
+            s._SCAN_DIRS, s._OPT_GLOBS = orig_dirs, orig_globs
+            os.environ["PATH"] = orig_path
+
     def test_firefox_detection_and_command(self):
         from recce import screenshot
         ff = self._fake_browser("firefox")

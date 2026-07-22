@@ -12,6 +12,7 @@ evidenced by the raw tool output the report already includes.
 
 from __future__ import annotations
 
+import glob
 import os
 import shutil
 import subprocess
@@ -25,6 +26,28 @@ _CHROME = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stabl
 _FIREFOX = ["firefox", "firefox-esr"]
 _TIMEOUT = 30
 
+# Absolute-path fallback for when the browser isn't on the PATH recce sees -
+# common on Kali when scans run under `sudo` (which strips PATH to secure_path)
+# or when the browser is a snap. Scans the standard bin dirs plus snap, and a
+# shallow glob of /opt for vendor layouts (chrome/chromium/firefox nested a level
+# or two down, e.g. /opt/google/chrome/chrome, /opt/firefox/firefox).
+_SCAN_DIRS = ["/usr/bin", "/usr/local/bin", "/bin", "/snap/bin",
+              "/usr/sbin", "/sbin", "/opt/bin"]
+_OPT_GLOBS = ["/opt/*/{n}", "/opt/*/*/{n}"]
+
+
+def _find_on_disk(name: str) -> str | None:
+    """Locate a browser binary by name outside PATH (bin dirs + /opt globs)."""
+    for d in _SCAN_DIRS:
+        cand = os.path.join(d, name)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    for pat in _OPT_GLOBS:
+        for cand in sorted(glob.glob(pat.format(n=name))):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+    return None
+
 
 def browser_tool() -> str | None:
     # Explicit override wins - lets the tester point at a browser not on PATH.
@@ -34,6 +57,12 @@ def browser_tool() -> str | None:
     for name in _CHROME + _FIREFOX:
         if shutil.which(name):
             return name
+    # Not on PATH: fall back to scanning /snap/bin, /usr/bin, /opt, ... so an
+    # installed-but-not-on-PATH browser (sudo secure_path, snap) is still found.
+    for name in _CHROME + _FIREFOX:
+        found = _find_on_disk(name)
+        if found:
+            return found
     return None
 
 

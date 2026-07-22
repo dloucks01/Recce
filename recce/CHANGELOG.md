@@ -2,6 +2,22 @@
 
 All notable changes to recce are documented here. Dates are UTC.
 
+## [0.2.4] - 2026-07-22
+
+### Fixed
+- **Browser detection missed installed browsers off PATH.** `doctor` (and the
+  auto-screenshot feature) reported "browser not present" when Firefox/Chromium
+  were installed but not on the PATH recce sees — common on Kali when scans run
+  under `sudo` (which strips PATH to `secure_path`), for snap installs
+  (`/snap/bin`), or `/opt` vendor layouts. `screenshot.browser_tool()` now falls
+  back to scanning `/usr/bin`, `/usr/local/bin`, `/bin`, `/snap/bin`, `/opt/bin`
+  and a shallow `/opt/*/…` glob when nothing is on PATH (the `RECCE_BROWSER`
+  override still wins).
+- **`doctor` summary contradicted its own tool list.** The "Optional tools
+  missing" line recomputed presence with a naive `which()`, so `browser` and
+  `netexec` could show `OK` in the detailed list yet still be listed as missing
+  in the summary. The summary now reuses the same detection the list prints.
+
 ## [0.2.3] - 2026-07-22
 
 ### Changed
