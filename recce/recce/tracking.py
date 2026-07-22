@@ -110,14 +110,18 @@ def step_auto(host, step: str) -> bool:
     return False - they're operator sign-offs the tool can't complete for you.
     The operator can override any box on the sheet.
     """
+    # A truncated sweep (host-timeout) left a PARTIAL port list, so the host is
+    # not actually fully enumerated/vuln-scanned - don't auto-tick it done (it
+    # stays outstanding, matching the ⚠ PARTIAL marker). Operator can override.
+    complete = host.enumerated and not getattr(host, "incomplete_scan", False)
     if step == "enum":
-        return host.enumerated
+        return complete
     if step == "vuln":
         op = host.open_ports
-        return host.enumerated and bool(op) and all(p.vuln_scanned for p in op)
+        return complete and bool(op) and all(p.vuln_scanned for p in op)
     if step == "web":
         wp = _web_ports(host)
-        return host.enumerated and bool(wp) and all(p.vuln_scanned for p in wp)
+        return complete and bool(wp) and all(p.vuln_scanned for p in wp)
     if step == "db":
         return host.db_scanned
     if step == "privesc":

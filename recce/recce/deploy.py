@@ -37,8 +37,14 @@ WINDOWS_SCRIPT = os.path.join(_SCRIPT_DIR, "recce-enum.ps1")
 # Per-host exec ceiling (seconds); the enum sweep does a lot of reads.
 DEFAULT_TIMEOUT = 300
 
-_AUTH_FAIL = ("permission denied", "authentication failed", "auth_error",
-              "logon_failure", "access denied", "sts_error", "[-]")
+# Markers that a remote login was REJECTED. Deliberately specific - nxc prints a
+# bare "[-]" on a WinRM 401, impacket/Windows use STATUS_* codes. A broad "auth"
+# substring is avoided on purpose: it also matches benign "Proxy Authentication
+# Required" / "Unauthorized" download errors and would wrongly suppress fallback.
+_AUTH_FAIL = ("[-]", "permission denied", "authentication failed",
+              "logon_failure", "status_logon_failure", "access_denied",
+              "access denied", "rpc_s_access_denied", "sts_error",
+              "the attempted logon is invalid", "account restriction")
 
 
 def _read(path: str) -> str:
@@ -158,9 +164,13 @@ def _run(argv: list, timeout: int, stdin: str | None = None):
 
 def _looks_like_auth_fail(out: str, err: str) -> bool:
     blob = f"{out}\n{err}".lower()
-    return any(m in blob for m in ("permission denied", "authentication failed",
-                                   "logon_failure", "access denied",
-                                   "sts_error", "auth"))
+    return any(m in blob for m in _AUTH_FAIL)
+
+
+def _ran_ok(out: str) -> bool:
+    """Positive proof the on-target script actually executed (its banner is in the
+    output), so a reject banner or an exec error is never folded as a success."""
+    return "recce-enum" in (out or "").lower()
 
 
 # --- SSH (Linux) ----------------------------------------------------------------
@@ -253,9 +263,11 @@ def run_winrm(ip: str, creds: dict, script_text: str, timeout: int):
     rc, out, err = _run(argv, timeout)
     if rc is None:
         return None, err
-    if _looks_like_auth_fail(out, err) and "recce-enum" not in out.lower():
-        return None, "authentication failed / not permitted (WinRM)"
-    return out, None
+    if _ran_ok(out):
+        return out, None
+    return None, ("authentication failed / not permitted (WinRM)"
+                  if _looks_like_auth_fail(out, err)
+                  else "WinRM ran but the script produced no output (creds/policy?)")
 
 
 def run_smb(ip: str, creds: dict, script_path: str, timeout: int):
@@ -295,9 +307,11 @@ def run_smb(ip: str, creds: dict, script_path: str, timeout: int):
         _, out, err = _wmiexec(tool, creds, ip,
                                f"powershell -ep bypass -File {remote_abs}", timeout)
         _wmiexec(tool, creds, ip, f"del {remote_abs}", 60)   # best-effort cleanup
-    if _looks_like_auth_fail(out, err) and "recce-enum" not in (out or "").lower():
-        return None, "authentication failed / not permitted (SMB exec)"
-    return out, None
+    if _ran_ok(out):
+        return out, None
+    return None, ("authentication failed / not permitted (SMB exec)"
+                  if _looks_like_auth_fail(out, err)
+                  else "SMB exec produced no script output (not admin / policy?)")
 
 
 def run_win_stager(ip: str, creds: dict, sub: str, stager, timeout: int):
@@ -317,7 +331,7 @@ def run_win_stager(ip: str, creds: dict, sub: str, stager, timeout: int):
         rc, out, err = _wmiexec(tool, creds, ip, ps, timeout)
     if rc is None:
         return None, err, "unreachable"
-    if "recce-enum" in (out or "").lower():
+    if _ran_ok(out):
         return out, None, "ok"                     # ran; target reached the stager
     if _looks_like_auth_fail(out, err):
         return None, "authentication failed / not permitted", "authfail"

@@ -163,24 +163,36 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
         # ftp-anon is web02 only.
         self.assertIn("FTP", " ".join(r["Finding"] for r in by_ip.get("10.0.20.6", [])))
 
-    def test_proven_exploit_column(self):
+    def test_exploit_column_proven_vs_candidate(self):
         _hdr, by_ip = rows_by_ip(self.sheets, "Vulnerabilities")
-        self.assertIn("Proven exploit", _hdr)
-        # The DC's ms17-010 finding carries the proven EternalBlue exploit...
+        self.assertIn("Exploit", _hdr)
+        self.assertNotIn("Proven exploit", _hdr)
+        # The DC's ms17-010 finding carries the proven EternalBlue exploit (curated).
         dc = by_ip["10.0.10.10"]
         ms17 = next(r for r in dc if "ms17-010" in r["Finding"])
-        self.assertIn("eternalblue", ms17["Proven exploit"].lower())
-        # ...while an advisory/potential finding (SMBGhost etc.) gets no exploit,
-        # and neither does any non-proven finding.
+        self.assertIn("eternalblue", ms17["Exploit"].lower())
+        # A potential/advisory finding never claims an exploit.
         for r in dc:
             if r["Conf."] == "potential":
-                self.assertEqual(r["Proven exploit"], "")
-        # The Overview total equals the number of proven-exploit rows on the sheet.
-        _h2, all_by_ip = rows_by_ip(self.sheets, "Vulnerabilities")
-        n_proven = sum(1 for rs in all_by_ip.values() for r in rs if r["Proven exploit"])
+                self.assertEqual(r["Exploit"], "")
+        # A config/hardening finding (weak TLS cipher/protocol, missing header)
+        # never gets a PROVEN exploit, even if a CVE leaked into its output.
+        for rs in by_ip.values():
+            for r in rs:
+                f = r["Finding"].lower()
+                if any(k in f for k in ("weak", "cipher", "tlsv1", "missing", "header")):
+                    self.assertFalse(r["Exploit"].startswith(("Metasploit", "impacket")),
+                                     f"hardening finding wrongly proven: {r['Finding']}")
+        # searchsploit hits are shown as CANDIDATES to verify, never as proof.
+        for rs in by_ip.values():
+            for r in rs:
+                if r["Exploit"].startswith("candidate"):
+                    self.assertIn("verify", r["Exploit"].lower())
+        # Overview 'proven exploit' tile counts only the curated (non-candidate) ones.
+        n_proven = sum(1 for rs in by_ip.values() for r in rs
+                       if r["Exploit"] and not r["Exploit"].startswith("candidate"))
         ov = ["|".join(str(c) for c in r) for r in self.sheets["Overview"]]
         self.assertTrue(any(f"Findings with a proven exploit|{n_proven}" in t for t in ov))
-        # ws01 has no findings at all.
         self.assertEqual(by_ip.get("10.0.10.25", []), [])
 
     def test_vuln_row_counts_match_per_host(self):
