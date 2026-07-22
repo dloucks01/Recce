@@ -76,7 +76,8 @@ TAB_COLORS = {
     "Start Here": _TAB_GUIDE, "Runbook": _TAB_GUIDE, "Overview": _TAB_GUIDE,
     "Checklist": _TAB_WORK, "Services": _TAB_WORK,
     "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND,
-    "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND, "Credentials": _TAB_FIND,
+    "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
+    "Priv-Esc Playbook": _TAB_RAW, "Credentials": _TAB_FIND,
     "Exploitation": _TAB_FIND, "Attack Path": _TAB_FIND,
     "Services by Product": _TAB_INV, "Databases": _TAB_INV,
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
@@ -424,7 +425,7 @@ def _spec_databases(hosts: list[Host]) -> SheetSpec:
 
 
 _PE_TYPE = {"escalation": "Escalation path", "finding": "Finding",
-            "checklist": "Checklist"}
+            "action": "To do"}
 
 
 def _styler_privesc(d: dict) -> dict:
@@ -433,7 +434,7 @@ def _styler_privesc(d: dict) -> dict:
         return {"Type": "sev_high"}          # confirmed, actually escalatable
     if t == "Finding":
         return {"Type": "sev_medium"}
-    return {"Type": "sev_info"} if t == "Checklist" else {}
+    return {"Type": "sev_info"} if t == "To do" else {}
 
 
 def _spec_privesc(hosts: list[Host]) -> SheetSpec:
@@ -451,6 +452,22 @@ def _spec_privesc(hosts: list[Host]) -> SheetSpec:
             "Category": r["category"], "Vector": r["vector"],
             "How-to / command": r["howto"], "Ref / note": r["note"]}})
     return SheetSpec("Priv-Esc", cols, rows, _styler_privesc, skip_if_empty=True)
+
+
+def _spec_privesc_playbook(hosts: list[Host]) -> SheetSpec:
+    """Reference sheet: the generic Windows/Linux local-privesc checklist, listed
+    once per OS in scope. Deliberately separate from Priv-Esc so that tab stays
+    real findings (from `recce deploy`/`ingest`), not boilerplate."""
+    cols = [
+        ("Done", "checkbox", 7), ("OS", "data", 10), ("Vector", "data", 32),
+        ("How-to / command", "data", 60), ("Note", "data", 50), ("Key", "key", 4),
+    ]
+    rows = []
+    for r in pe.playbook_rows(hosts):
+        rows.append({"key": r["key"], "data": {
+            "OS": r["os"], "Vector": r["vector"],
+            "How-to / command": r["howto"], "Note": r["note"]}})
+    return SheetSpec("Priv-Esc Playbook", cols, rows, skip_if_empty=True)
 
 
 def _spec_exploitation(hosts: list[Host]) -> SheetSpec:
@@ -750,7 +767,11 @@ def _build_guide(wb, meta: dict) -> None:
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
-        ("Priv-Esc", "Per-host escalation findings + a Windows/Linux playbook."),
+        ("Priv-Esc", "Per-host escalation findings from the local sweep "
+                     "(recce deploy/ingest) + remote signals. Un-swept hosts show a "
+                     "'run recce deploy' to-do; dead IPs get no rows."),
+        ("Priv-Esc Playbook", "Reference: the generic Windows/Linux local-privesc "
+                              "checklist (what to run once you have a shell)."),
         ("Exploitation", "Each confirmed priv-esc finding mapped to the exact "
                          "existing tool + command (your values filled in) + how "
                          "to validate. References vetted tools, not new exploits."),
@@ -1190,7 +1211,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
 
         Start Here, Overview, Checklist, Services, Vulnerabilities, Exploits,
         Services by Product, Databases, Active Directory, AD Quick Wins,
-        Users & Accounts, Priv-Esc, Raw NSE.
+        Users & Accounts, Priv-Esc, Priv-Esc Playbook, Raw NSE.
 
     Rationale for the pairings you flip between:
       * Checklist <-> Services  - host <-> its open ports (the working pair).
@@ -1203,7 +1224,8 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
             _spec_exploits(hosts), _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
            [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_credentials(hosts, creds_stored),
-            _spec_privesc(hosts), _spec_exploitation(hosts), _spec_attackpath(hosts),
+            _spec_privesc(hosts), _spec_privesc_playbook(hosts),
+            _spec_exploitation(hosts), _spec_attackpath(hosts),
             _spec_raw_nse(hosts)]
 
 
