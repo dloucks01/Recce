@@ -40,6 +40,21 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
     return tuple(parts) or (0,)
 
 
+def _clean_version(v: str) -> str:
+    """Normalize a service version before comparison.
+
+    MariaDB 10.x announces itself with a legacy MySQL-compat handshake prefix:
+    "5.5.5-10.11.6-MariaDB-0+deb12u1" - the real version is 10.11.6. Without
+    stripping the "5.5.5-" prefix, _ver_tuple reads the leading 5.5.5 and a
+    patched MariaDB matches the MySQL "< 5.7 EOL" and "5.5.x / CVE-2012-2122"
+    ranges, fabricating findings. A genuine MySQL 5.5.5 has no "-<version>" after
+    it, so it is left untouched (and correctly flagged as EOL).
+    """
+    v = v.strip()
+    m = re.match(r"5\.5\.5-(\d+\.\d+.*)", v, re.I)
+    return m.group(1) if m else v
+
+
 def _cmp(a: str, b: str) -> int:
     ta, tb = _ver_tuple(a), _ver_tuple(b)
     n = max(len(ta), len(tb))
@@ -789,7 +804,7 @@ def _matches(sig: dict, port: Port, host: Host) -> bool:
         if not osv or _cmp(osv, sig["os_lt"]) >= 0:
             return False
         return True   # OS-gated sig without a service version requirement
-    version = port.version.strip()
+    version = _clean_version(port.version)
     if any(k in sig for k in ("eq", "lt", "le", "ge", "gt")):
         if not version:
             return False

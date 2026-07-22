@@ -2,6 +2,33 @@
 
 All notable changes to recce are documented here. Dates are UTC.
 
+## [0.2.1] - 2026-07-22
+
+### Fixed
+- **False HIGH on patched MariaDB.** MariaDB 10.x announces itself with a legacy
+  MySQL-compat handshake prefix (`5.5.5-10.11.6-MariaDB-…`); the version parser
+  read the leading `5.5.5` and flagged a fully-patched MariaDB as end-of-life
+  MySQL **and** fabricated a high-severity `CVE-2012-2122` finding. The version
+  normalizer now strips the `5.5.5-` prefix, so the real version (10.11.6) is
+  compared; genuine old MySQL 5.5.x is still flagged (`vulndb._clean_version`).
+- **CVSS vector strings mis-scored.** A `CVSS:3.1/AV:N/…` vector was read as base
+  score `3.1`, silently downgrading criticals to "low", and `CVSS Base Score: 7.5`
+  wasn't matched at all. The score regex now skips the vector version and
+  recognizes the "Base Score" / parenthetical phrasings (`parser._CVSS_RE`).
+- **Vulnerability sheet row loss / coverage undercount.** The workbook & coverage
+  key truncated the finding title to 40 chars while the datastore dedups on 60,
+  so two store-distinct findings (e.g. same title differing only in the CVE id)
+  collapsed to one Vulnerabilities row and the coverage total was short by one.
+  The keys now use the same 60-char slice (`tracking.vuln_row_key`).
+
+### Changed
+- **Docs accuracy pass.** Dropped a non-existent `--subnet` flag from the README
+  Speed section (use positional targets); corrected the credentialed-LDAP note to
+  say it needs `ldapsearch` (ldap-utils) **or** `ldap3` (not `ldap3` only); added
+  the `exploit-plan/` and `creds/` output dirs to the deliverables tables
+  (README/QUICKSTART/CHEATSHEET); and fixed stale CLI `--help`/error strings that
+  understated `import` (`-oN` is fully supported) and listed only 5 of 19 commands.
+
 ## [0.2.0] - 2026-07-22
 
 ### Added

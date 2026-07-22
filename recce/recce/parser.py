@@ -13,7 +13,15 @@ import xml.etree.ElementTree as ET
 from .models import Account, Host, Port, Script, Vuln
 
 _CVE_RE = re.compile(r"\b(CVE-\d{4}-\d{4,7})\b", re.IGNORECASE)
-_CVSS_RE = re.compile(r"CVSS(?:v?\d)?[:\s]*([0-9]+\.[0-9]+)", re.IGNORECASE)
+# A CVSS *base score* in the phrasings NSE/community scripts emit -
+# "CVSS Base Score: 7.5", "CVSSv3: 9.8", "CVSS: 9.8", "... (7.5)" - but NOT the
+# version inside a vector string ("CVSS:3.1/AV:N/..."), where 3.1 is the CVSS
+# version, not the score. The negative lookahead (?![\d./]) drops the vector case.
+_CVSS_RE = re.compile(
+    r"CVSS[^\n]*?base\s*score[:\s]*([0-9]{1,2}\.[0-9])"      # "Base Score: 7.5"
+    r"|CVSS(?:v?\d)?[:\s]+([0-9]{1,2}\.[0-9])(?![\d./])"     # "CVSSv3: 9.8" (not a vector)
+    r"|CVSS[^\n(]*\(([0-9]{1,2}\.[0-9])\)",                  # "CVSS2#... (7.5)"
+    re.IGNORECASE)
 # vulners lines look like:  CVE-2021-42013   9.8   https://vulners.com/...
 _VULNERS_RE = re.compile(r"CVE-\d{4}-\d{4,7}\s+([0-9]{1,2}\.[0-9])\b", re.IGNORECASE)
 
@@ -75,7 +83,7 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
         state = "VULNERABLE"
 
     ids = sorted(set(_CVE_RE.findall(out)))
-    cvss_scores = [float(s) for s in _CVSS_RE.findall(out)]
+    cvss_scores = [float(g) for tup in _CVSS_RE.findall(out) for g in tup if g]
     cvss_scores += [float(s) for s in _VULNERS_RE.findall(out)]
     severity = _severity_from_cvss(max(cvss_scores)) if cvss_scores else (
         "high" if "VULNERABLE" in out.upper() else "info"

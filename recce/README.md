@@ -620,8 +620,8 @@ not at the end. On top of that:
 For a time-boxed engagement, three levers cut wall-clock dramatically:
 
 - **Two phases** — `enum` is cheap, so the sheet is usable in minutes; the
-  expensive `vulns` pass runs later and only where you point it (`--only`,
-  `--subnet`, `--unscanned`).
+  expensive `vulns` pass runs later and only where you point it (positional
+  targets, `--only`, `--unscanned`).
 - **`--workers N`** — scan N hosts concurrently (default 6). The single biggest
   win for large scopes.
 - **`--fast`** — "go fast" end to end. On the sweep it runs one **network-wide
@@ -657,7 +657,7 @@ the **password policy** (from `smb-enum-domains`). It then derives target lists:
 - **NTLM relay targets** — hosts where *SMB signing is not required* (feed to `ntlmrelayx`)
 - **SMBv1 / MS17-010** candidates
 
-**Tier 2 — credentialed LDAP (`--ldap-enum`, needs `ldap3`).** Binds to each
+**Tier 2 — credentialed LDAP (`--ldap-enum`, needs `ldapsearch` (ldap-utils) or the `ldap3` package).** Binds to each
 discovered DC and enumerates:
 
 - **Users** with UAC flags → **AS-REP roastable** (`DONT_REQ_PREAUTH`) accounts
@@ -692,7 +692,9 @@ are color-flagged).
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |
-| `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) |
+| `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) — after `writeups` |
+| `exploit-plan/*`   | Ready-to-run msf `.rc` + per-host plans — after `exploitplan` |
+| `creds/*.txt`      | `users.txt` / `passwords.txt` / `nthashes.txt` for the spray plan — after `creds --plan` |
 | `recce.log`        | Scan errors / timeouts / incomplete hosts (also on the Overview tab) |
 | `results.sqlite`   | Normalized datastore (resume + re-report) |
 | `raw/*.xml`        | Every raw nmap XML, for auditing / re-parsing |
