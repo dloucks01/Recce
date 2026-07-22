@@ -309,6 +309,22 @@ class CoverageMathFidelityTest(unittest.TestCase):
         cov = tr.compute_coverage(hosts, {k: (True, "")})
         self.assertEqual(cov["services"]["done"], 1)
 
+    def test_ticking_a_vuln_triaged_box_counts_toward_coverage(self):
+        # Regression: the Vulnerabilities-sheet row key MUST equal the key coverage
+        # counts against, otherwise ticking "Triaged" never moves the vulns %.
+        hosts = sample_hosts()
+        vuln_hosts = [h for h in hosts if h.vulns]
+        self.assertTrue(vuln_hosts)                    # sample has findings
+        h = vuln_hosts[0]
+        v = h.vulns[0]
+        # The key the workbook writes for this vuln row (single source of truth)...
+        sheet_key = tr.vuln_row_key(v)
+        # ...must be one of the keys coverage enumerates.
+        self.assertIn(sheet_key, tr.item_keys(hosts)["vulns"])
+        # And ticking it must register as one done vuln.
+        cov = tr.compute_coverage(hosts, {sheet_key: (True, "")})
+        self.assertEqual(cov["vulns"]["done"], 1)
+
 
 class WriteupPerIpFidelityTest(unittest.TestCase):
     def test_grouped_finding_lists_only_the_affected_ip(self):
