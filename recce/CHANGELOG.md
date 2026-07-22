@@ -39,6 +39,31 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Added
+- **`recce prove` — is this finding real, or a false positive?** A new
+  verification engine reasons over the evidence recce already collected (the exact
+  version, the port state, the NSE detection result, the on-target privilege
+  state) and returns a per-finding verdict for the noisy types testers can never
+  easily disposition — **ActiveMQ, SMB, SeImpersonate/GodPotato**, plus MS17-010,
+  SMBGhost, null-session, anonymous-FTP and weak-TLS:
+  - **CONFIRMED** — the evidence positively proves it (an NSE detection fired,
+    signing really is off, the privilege really is *Enabled*, we negotiated the
+    weak cipher ourselves).
+  - **FALSE POSITIVE** — the evidence disproves it (ActiveMQ build is ≥ the branch
+    fix, SMB signing is *required*, the NSE check says NOT VULNERABLE, the OS build
+    is outside the SMBGhost window). These are the ones you can safely dismiss.
+  - **LIKELY** — preconditions hold but the final proof is the PoC; the exact safe
+    command to finish proving is given.
+  - **INCONCLUSIVE** — what to collect next (e.g. get the exact version, or run the
+    on-target `whoami /priv` to confirm SeImpersonate is Enabled).
+
+  Each verdict lists the evidence it used, the preconditions, the exact
+  finish-proving command (within ROE — `nmap --script smb-vuln-ms17-010`,
+  `nxc smb … --gen-relay-list`, `GodPotato -cmd whoami`, the msf module) and what a
+  false positive looks like. `recce prove --run` additionally re-runs the
+  NON-INTRUSIVE SMB detection NSE to move LIKELY verdicts to CONFIRMED / FALSE
+  POSITIVE on fresh evidence. Results land on a new **Verification** workbook tab
+  (real first, noise last). Nothing here exploits anything — it reasons and tells
+  you the safe check to run.
 - **Windows privesc: fully-qualified exploits, not just flagged classes.** Where
   the script used to say "unquoted service path" or "DLL hijack," it now computes
   and prints the exact artifact and the precise steps:
