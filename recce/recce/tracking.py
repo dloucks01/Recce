@@ -143,8 +143,12 @@ def vuln_row_key(v: Any) -> str:
     """The single canonical key for a Vulnerabilities-sheet row, used by BOTH the
     sheet writer and coverage counting so a triaged finding is actually counted.
     (The two sites used different keys - script_id vs script_id+title - so the
-    Triaged tick was invisible to compute_coverage.) Keys live in one place."""
-    return vuln_key(v.ip, v.port, f"{v.script_id}:{(v.title or '')[:40]}")
+    Triaged tick was invisible to compute_coverage.) Keys live in one place.
+
+    The title slice must match models.Vuln.key's (60 chars): the store dedups
+    vulns on title[:60], so a coarser key here would collapse two store-distinct
+    findings into one Vulnerabilities row and undercount coverage."""
+    return vuln_key(v.ip, v.port, f"{v.script_id}:{(v.title or '')[:60]}")
 
 
 def exploit_key(ip: str, port: Any, edb_id: str) -> str:

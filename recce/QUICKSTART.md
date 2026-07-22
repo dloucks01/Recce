@@ -174,6 +174,7 @@ work on **just that subset** of what's already enumerated — e.g.
 | `enumeration.md` / `services.csv` | notes-friendly + flat pivot data |
 | `writeups/*.docx` | per-finding Word write-ups + a combined report (after `writeups`) |
 | `exploit-plan/*` | runnable msf `.rc` + per-host plans (after `exploitplan`) |
+| `creds/*.txt` | `users` / `passwords` / `nthashes` lists for spraying (after `creds --plan`) |
 
 ---
 

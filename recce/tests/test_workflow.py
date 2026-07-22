@@ -1678,6 +1678,30 @@ class IngestCommandTest(unittest.TestCase):
         cov = tr.compute_coverage([h], {sheet_key: (True, "")})["vulns"]
         self.assertEqual(cov, {"total": 1, "done": 1, "pct": 100})
 
+    def test_vuln_row_key_matches_store_dedup_granularity(self):
+        """Regression: the workbook/coverage key must not truncate the title
+        more coarsely than the store's dedup key (models.Vuln.key uses [:60]),
+        or two store-distinct findings collapse to one Vulnerabilities row and
+        coverage undercounts."""
+        from recce import tracking as tr
+        from recce.models import Vuln
+        from recce.report_excel import _spec_vulns
+        # Two findings identical for 40 chars, differing only at chars 41-60.
+        base = "Apache httpd 2.4.49 Path Traversal RCE - "  # 41 chars
+        v1 = Vuln(ip="10.0.0.5", port=443, protocol="tcp", script_id="version-db",
+                  title=base + "CVE-2021-41773", severity="high", source="db")
+        v2 = Vuln(ip="10.0.0.5", port=443, protocol="tcp", script_id="version-db",
+                  title=base + "CVE-2021-42013", severity="high", source="db")
+        # Store keeps both distinct (its key uses title[:60])...
+        self.assertNotEqual(v1.key, v2.key)
+        # ...so the workbook keys must also be distinct (no collapse).
+        self.assertNotEqual(tr.vuln_row_key(v1), tr.vuln_row_key(v2))
+        h = Host(ip="10.0.0.5", ports=[Port(portid=443, service="https")],
+                 vulns=[v1, v2])
+        rows = _spec_vulns([h]).rows
+        self.assertEqual(len(rows), 2, "both findings must appear on the sheet")
+        self.assertEqual(tr.compute_coverage([h], {})["vulns"]["total"], 2)
+
 
 class ProgressAndAuthTest(unittest.TestCase):
     def test_fmt_dur(self):

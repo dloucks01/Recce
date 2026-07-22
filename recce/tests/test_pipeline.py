@@ -68,6 +68,24 @@ class ParserTest(unittest.TestCase):
         web = next(h for h in self.hosts if h.ip == "10.0.20.5")
         self.assertTrue(any(v.severity == "critical" for v in web.vulns))
 
+    def test_cvss_vector_not_misread_as_score(self):
+        """Regression: a CVSS vector string ('CVSS:3.1/AV:N/...') must not be
+        read as base score 3.1 (which downgraded criticals to 'low'); the
+        'Base Score' phrasing must be recognized."""
+        from recce.parser import _classify_vuln
+        from recce.models import Script, Port
+        p = Port(portid=443, protocol="tcp", service="https")
+        # Vector + explicit base score 9.8 -> must classify critical, not low.
+        out = ("VULNERABLE\nCVE-2021-44228\n"
+               "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\n"
+               "CVSS Base Score: 9.8\n")
+        v = _classify_vuln("10.0.0.5", p, Script(id="vuln-log4shell", output=out))
+        self.assertEqual(v.severity, "critical")
+        # Vector ONLY (no numeric score) must not become 'low' via the 3.1.
+        v2 = _classify_vuln("10.0.0.5", p, Script(
+            id="vuln-x", output="VULNERABLE\nCVE-2021-1\nCVSS:3.1/AV:N/AC:L\n"))
+        self.assertNotEqual(v2.severity, "low")
+
     def test_ad_users_extracted(self):
         dc = next(h for h in self.hosts if h.ip == "10.0.10.10")
         users = [a.name for a in dc.accounts if a.kind == "user"]
@@ -1434,6 +1452,24 @@ class VulnDbTest(unittest.TestCase):
         self.assertLess(vulndb._cmp("8.2p1", "8.5"), 0)
         self.assertGreater(vulndb._cmp("1.0.2k", "1.0.2"), 0)
         self.assertEqual(vulndb._cmp("2.3.4", "2.3.4"), 0)
+
+    def test_mariadb_handshake_prefix_not_read_as_eol_mysql(self):
+        """Regression: MariaDB 10.x announces '5.5.5-10.x.y-MariaDB'. The
+        leading 5.5.5 must not be read as the version, or a patched MariaDB gets
+        a bogus EOL medium + high CVE-2012-2122."""
+        from recce import vulndb
+        self.assertEqual(vulndb._clean_version("5.5.5-10.11.6-MariaDB-0+deb12u1"),
+                         "10.11.6-MariaDB-0+deb12u1")
+        h = Host(ip="10.0.0.5", ports=[Port(portid=3306, service="mysql",
+                 product="MySQL", version="5.5.5-10.11.6-MariaDB-0+deb12u1")])
+        vulndb.assess_host_inplace(h)
+        titles = {v.title for v in h.vulns}
+        self.assertFalse(any("MySQL" in t for t in titles), titles)
+        # A genuine old MySQL 5.5.40 (no handshake prefix) is still flagged.
+        h2 = Host(ip="10.0.0.6", ports=[Port(portid=3306, service="mysql",
+                  product="MySQL", version="5.5.40")])
+        vulndb.assess_host_inplace(h2)
+        self.assertTrue(any("End-of-life MySQL" in v.title for v in h2.vulns))
 
     def test_exact_and_range_matches(self):
         from recce import vulndb
