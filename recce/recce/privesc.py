@@ -17,6 +17,7 @@ be run by the `privesc` command; the playbook needs no scanning.
 from __future__ import annotations
 
 from .models import Host
+from . import playbook as pb
 
 # OS-specific local checklists. (vector, command / how-to, note)
 WINDOWS_VECTORS = [
@@ -172,29 +173,60 @@ def _os_kind(host: Host) -> str:
 
 
 def plan(host: Host) -> list[dict]:
-    """Per-host privesc rows: on-target findings + remote findings, then the
-    OS playbook."""
-    rows: list[dict] = []
-    # On-target enum findings (ingested from recce-enum.sh/.ps1) come first - they
-    # are confirmed local observations, the strongest signal on the sheet.
-    for f in getattr(host, "local_findings", []) or []:
-        sect = f.get("section", "")
-        rows.append({"category": f.get("category", "local"),
-                     "vector": f.get("vector", ""),
-                     "howto": f"on-target finding ({sect})" if sect else "on-target finding",
-                     "note": f"via {f.get('source', 'recce-enum')}"})
-    for f in remote_findings(host):
-        rows.append({"category": "finding", "vector": f["signal"],
-                     "howto": f["detail"], "note": f["refs"]})
+    """Per-host privesc rows, each tagged with a `type`:
+
+      * "escalation" - a CONFIRMED on-target finding that maps to a real escalation
+        technique (verdicted with the same engine as the Exploitation sheet); the
+        How-to shows the exact existing tool + command. This is "what is actually
+        priv-escable" on this host.
+      * "finding"    - an observation (on-target or remote) with no auto-mapped
+        escalation - worth a look, not a confirmed path.
+      * "checklist"  - the generic OS playbook: what to RUN once you have a shell.
+        Reference only, never a confirmed finding.
+
+    Rows are ordered escalation -> finding -> checklist, so the real paths sit on
+    top. The checklist only implies "here's what to try" - it is not evidence of
+    anything until you ingest a recce-enum.sh/.ps1 run."""
     kind = _os_kind(host)
+    os_hint = kind if kind != "unknown" else ""
+    swept = bool(getattr(host, "local_findings", None))
+    rows: list[dict] = []
+
+    # 1. On-target findings - verdict each: escalation path or just an observation.
+    for f in getattr(host, "local_findings", []) or []:
+        vec = f.get("vector", "")
+        sect = f.get("section", "")
+        play = pb.for_text(vec, os_hint)
+        if play:
+            rows.append({"type": "escalation", "category": f.get("category", "local"),
+                         "vector": vec, "howto": f"{play['tool']}: {play['cmd']}",
+                         "note": f"CONFIRMED on-target -> escalation path. Validate: "
+                                 f"{play['validate']}"})
+        else:
+            rows.append({"type": "finding", "category": f.get("category", "local"),
+                         "vector": vec,
+                         "howto": f"on-target finding ({sect})" if sect else "on-target finding",
+                         "note": f"via {f.get('source', 'recce-enum')} - review "
+                                 "(no auto-mapped escalation)"})
+
+    # 2. Remotely-observed signals.
+    for f in remote_findings(host):
+        rows.append({"type": "finding", "category": "finding", "vector": f["signal"],
+                     "howto": f["detail"], "note": f["refs"]})
+
+    # 3. OS checklist - what to run once you have a foothold (reference only).
     vectors = []
     if kind in ("windows", "unknown"):
         vectors += [("windows", v) for v in WINDOWS_VECTORS]
     if kind in ("linux", "unknown"):
         vectors += [("linux", v) for v in LINUX_VECTORS]
+    tail = " (host already swept - see the findings above)" if swept else ""
     for os_kind, (vector, howto, note) in vectors:
-        rows.append({"category": os_kind, "vector": vector, "howto": howto,
-                     "note": note})
+        rows.append({"type": "checklist", "category": os_kind, "vector": vector,
+                     "howto": howto, "note": note + tail})
+
+    order = {"escalation": 0, "finding": 1, "checklist": 2}
+    rows.sort(key=lambda r: order.get(r.get("type"), 3))
     return rows
 
 

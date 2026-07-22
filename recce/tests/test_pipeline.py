@@ -561,6 +561,77 @@ class WriteupTest(unittest.TestCase):
             summary = build_writeups(self._hosts(), out, min_severity="high")
             self.assertEqual(summary["total"], 1)   # only the critical
 
+    def _hosts_potential_and_loot(self):
+        from recce.models import Vuln
+        return [Host(ip="10.0.30.5", hostnames=["box"],
+                     ports=[Port(portid=23, service="telnet"),
+                            Port(portid=445, service="microsoft-ds")],
+                     local_findings=[{"section": "Sudo", "category": "sudo",
+                                      "vector": "NOPASSWD find",
+                                      "text": "NOPASSWD sudo: /usr/bin/find",
+                                      "source": "recce-enum"}],
+                     vulns=[
+                         Vuln(ip="10.0.30.5", port=23, protocol="tcp",
+                              script_id="version-db", title="Telnet cleartext",
+                              severity="medium", source="version-db",
+                              confidence="potential", cwes=["CWE-319"]),
+                         Vuln(ip="10.0.30.5", port=445, protocol="tcp",
+                              script_id="smb-vuln-ms17-010", title="smb-vuln-ms17-010",
+                              severity="high", source="nse", ids=["CVE-2017-0143"],
+                              output="VULNERABLE"),
+                     ])]
+
+    def test_potential_excluded_by_default_included_on_flag(self):
+        from recce.report_docx import build_writeups
+        hosts = self._hosts_potential_and_loot()
+        with tempfile.TemporaryDirectory() as d:
+            real = build_writeups(hosts, os.path.join(d, "r"))
+            self.assertEqual(real["total"], 1)                 # only the nse ms17-010
+            self.assertEqual(real["dropped_potential"], 1)     # telnet guess skipped
+            allf = build_writeups(hosts, os.path.join(d, "a"), include_potential=True)
+            self.assertEqual(allf["total"], 2)                 # both
+
+    def test_list_findings_flags_real(self):
+        from recce.report_docx import list_findings
+        rows = list_findings(self._hosts_potential_and_loot())
+        by_title = {r["title"]: r for r in rows}
+        self.assertFalse(by_title["Telnet cleartext"]["real"])
+        self.assertTrue(by_title["smb-vuln-ms17-010"]["real"])
+        # stable ids: high sorts before the medium
+        self.assertEqual(by_title["smb-vuln-ms17-010"]["id"], "F-001")
+
+    def test_single_writeup_prefills_looted(self):
+        from recce.report_docx import build_one_writeup
+        hosts = self._hosts_potential_and_loot()
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "writeups")
+            res = build_one_writeup(hosts, out, "ms17")
+            self.assertTrue(res["written"])
+            self.assertEqual(res["looted"], 1)
+            text, _ = _docx_text(res["written"])
+            self.assertIn("Obtained Access / Looted Evidence", text)
+            self.assertIn("NOPASSWD sudo: /usr/bin/find", text)
+
+    def test_single_writeup_selectors(self):
+        from recce.report_docx import build_one_writeup
+        hosts = self._hosts_potential_and_loot()
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "w")
+            # by F-id
+            self.assertTrue(build_one_writeup(hosts, out, "F-001")["written"])
+            # by CVE
+            self.assertTrue(build_one_writeup(hosts, out, "CVE-2017-0143",
+                                              overwrite=True)["written"])
+            # ambiguous IP -> lists candidates, writes nothing
+            amb = build_one_writeup(hosts, out, "10.0.30.5")
+            self.assertIsNone(amb["written"])
+            self.assertEqual(amb["reason"], "ambiguous")
+            self.assertEqual(len(amb["matched"]), 2)
+            # unmatched
+            none = build_one_writeup(hosts, out, "zzz-nope")
+            self.assertIsNone(none["written"])
+            self.assertEqual(none["reason"], "none")
+
     def test_auto_walkthrough_steps(self):
         from recce.report_docx import group_findings, _walkthrough_steps
         findings = group_findings(self._hosts())
@@ -1147,6 +1218,7 @@ class RobustnessTest(unittest.TestCase):
         class _P:
             def parse_args(self, _a):
                 ns = argparse.Namespace()
+                ns.command = "boom"      # non-None so main() dispatches to func
                 ns.func = boom
                 return ns
 
@@ -1849,7 +1921,14 @@ class CliSmokeTest(unittest.TestCase):
                      ["db", "-o", "x"], ["privesc", "--scan"], ["scan", "10.0.0.1"],
                      ["credenum", "-u", "a", "-p", "b", "-d", "corp.local"],
                      ["writeups", "--min-severity", "high", "--no-screenshots"],
+                     ["writeups", "--include-potential"],
+                     ["writeup", "F-007", "-o", "eng"],
+                     ["services", "-o", "eng", "-a"],
+                     ["exploitplan", "-o", "eng", "--lhost", "10.0.0.1", "--run"],
+                     ["attackpath", "-o", "eng"],
+                     ["creds", "--add", "CORP\\alice:Pw!", "--plan", "-o", "eng"],
                      ["ingest", "loot.txt", "--host", "1.2.3.4"],
+                     ["import", "scan.xml", "-o", "eng"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
                      ["demo"], ["doctor", "--no-self-scan"]):
             ns = p.parse_args(argv)
@@ -1859,6 +1938,525 @@ class CliSmokeTest(unittest.TestCase):
         from recce import cli
         rc = cli.cmd_doctor(SimpleNamespace(no_self_scan=True))
         self.assertIn(rc, (0, 1))  # 0 if nmap present, 1 if not - never raises
+
+
+class ExploitPlanTest(unittest.TestCase):
+    @staticmethod
+    def _read(*parts):
+        with open(os.path.join(*parts)) as fh:
+            return fh.read()
+
+    def _hosts(self):
+        from recce.models import Vuln, Account
+        dc = Host(ip="10.0.10.5", hostnames=["dc01"], os_family="Windows",
+                  roles=["Domain Controller"], smb_signing="not required",
+                  accounts=[Account(ip="10.0.10.5", source="nse", kind="domain",
+                                    domain="CORP")],
+                  ports=[Port(portid=445, service="microsoft-ds")],
+                  vulns=[Vuln(ip="10.0.10.5", port=445, protocol="tcp",
+                              script_id="smb-vuln-ms17-010", title="smb-vuln-ms17-010",
+                              severity="high", source="nse", ids=["CVE-2017-0143"],
+                              output="VULNERABLE")])
+        ftp = Host(ip="10.0.10.30", os_family="Linux",
+                   ports=[Port(portid=21, service="ftp")],
+                   vulns=[Vuln(ip="10.0.10.30", port=21, protocol="tcp",
+                               script_id="version-db", title="vsftpd 2.3.4 backdoor",
+                               severity="critical", source="version-db",
+                               confidence="likely", ids=["CVE-2011-2523"]),
+                          # a 'potential' guess must NOT get a plan
+                          Vuln(ip="10.0.10.30", port=23, protocol="tcp",
+                               script_id="version-db", title="Telnet cleartext",
+                               severity="medium", source="version-db",
+                               confidence="potential")])
+        return [dc, ftp]
+
+    def test_msf_mapping(self):
+        from recce import exploitplan as ep
+        self.assertEqual(ep._msf_for("smb-vuln-ms17-010 CVE-2017-0143")["module"],
+                         "exploit/windows/smb/ms17_010_eternalblue")
+        self.assertEqual(ep._msf_for("vsftpd 2.3.4 backdoor")["module"],
+                         "exploit/unix/ftp/vsftpd_234_backdoor")
+        self.assertIsNone(ep._msf_for("telnet cleartext credentials"))
+
+    def test_build_plan_safe_default(self):
+        from recce import exploitplan as ep
+        with tempfile.TemporaryDirectory() as d:
+            s = ep.build_plan(self._hosts(), d, lhost="10.9.9.9")
+            self.assertEqual(sorted(s["plans"]), ["10.0.10.30", "10.0.10.5"])
+            self.assertEqual(s["rc_files"], 2)          # ms17-010 + vsftpd
+            pd = s["dir"]
+            eb = next(f for f in os.listdir(pd) if "eternalblue" in f)
+            rc = self._read(pd, eb)
+            self.assertIn("set RHOSTS 10.0.10.5", rc)
+            self.assertIn("set LHOST 10.9.9.9", rc)
+            self.assertIn("check", rc)
+            self.assertIn("# exploit -j", rc)           # launch commented (safe)
+            # DC gets AS-REP + Kerberoast + relay actions with the domain filled in.
+            dc_sh = self._read(pd, "10.0.10.5.sh")
+            self.assertIn("impacket-GetNPUsers CORP/", dc_sh)
+            self.assertIn("impacket-GetUserSPNs CORP/", dc_sh)
+            self.assertIn("ntlmrelayx", dc_sh)
+
+    def test_run_arms_launch(self):
+        from recce import exploitplan as ep
+        with tempfile.TemporaryDirectory() as d:
+            s = ep.build_plan(self._hosts(), d, lhost="10.9.9.9", run=True)
+            eb = next(f for f in os.listdir(s["dir"]) if "eternalblue" in f)
+            rc = self._read(s["dir"], eb)
+            self.assertRegex(rc, r"(?m)^exploit -j$")   # active, not commented
+
+    def test_potential_findings_get_no_plan(self):
+        from recce import exploitplan as ep
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.9", os_family="Linux",
+                 ports=[Port(portid=23, service="telnet")],
+                 vulns=[Vuln(ip="10.0.0.9", port=23, protocol="tcp",
+                             script_id="version-db", title="Telnet cleartext",
+                             severity="medium", source="version-db",
+                             confidence="potential")])
+        with tempfile.TemporaryDirectory() as d:
+            s = ep.build_plan([h], d)
+            self.assertEqual(s["plans"], [])            # nothing confirmed -> no plan
+
+    def test_actions_for_host_structured(self):
+        from recce import exploitplan as ep
+        dc = self._hosts()[0]                            # DC with ms17-010 + signing off
+        acts = ep.actions_for_host(dc, lhost="10.9.9.9")
+        kinds = {a["kind"] for a in acts}
+        self.assertIn("remote-msf", kinds)
+        self.assertIn("remote-tool", kinds)             # AS-REP/Kerberoast/relay
+        msf = next(a for a in acts if a["kind"] == "remote-msf")
+        self.assertIn("ms17_010_eternalblue", msf["cmd"])
+        self.assertIn("10.9.9.9", msf["cmd"])           # LHOST filled in
+
+    def test_exploitation_sheet_unifies_actions(self):
+        from recce.report_excel import _spec_exploitation
+        spec = _spec_exploitation(self._hosts())
+        types = {r["data"]["Type"] for r in spec.rows}
+        self.assertIn("remote (msf)", types)
+
+    def test_services_sheet_has_enum_command(self):
+        from recce.report_excel import _spec_services
+        spec = _spec_services(self._hosts())
+        self.assertIn("Enum command", [c[0] for c in spec.cols])
+        cmds = [r["data"].get("Enum command", "") for r in spec.rows]
+        self.assertTrue(any("recce-service.sh smb" in c for c in cmds))
+
+
+class IngestServiceTest(unittest.TestCase):
+    OUT = ("\n==== SMB  ->  10.0.0.5:445 ====\n"
+           "[+] 445/tcp is open\n"
+           "[!] SMB signing NOT required -> NTLM relay target\n"
+           "[!] Null session lists shares -> anonymous SMB access\n"
+           "[!] Test BlueKeep CVE-2019-0708 on legacy Windows\n"
+           "==== SNMP  ->  10.0.0.9:161 ====\n"
+           "[!] SNMP community string works: 'public' (v2c)\n")
+
+    def test_parse_service_output(self):
+        from recce import ingest
+        p = ingest.parse_service_output(self.OUT)
+        self.assertTrue(p["is_service"])
+        self.assertEqual(len(p["findings"]), 4)
+        self.assertEqual({f["ip"] for f in p["findings"]}, {"10.0.0.5", "10.0.0.9"})
+        smb = [f for f in p["findings"] if f["ip"] == "10.0.0.5"]
+        self.assertTrue(all(f["port"] == 445 for f in smb))
+
+    def test_service_vulns_confidence_and_source(self):
+        from recce import ingest
+        vulns = ingest.service_findings_to_vulns(ingest.parse_service_output(self.OUT))
+        adv = next(v for v in vulns if v.title.startswith("Test BlueKeep"))
+        self.assertEqual(adv.confidence, "potential")   # advisory -> off writeups
+        sign = next(v for v in vulns if "signing" in v.title)
+        self.assertEqual(sign.confidence, "")           # observed -> real
+        self.assertEqual(sign.source, "service-enum")
+        self.assertEqual(sign.port, 445)
+        self.assertEqual(sign.severity, "high")
+
+    def test_ingest_service_output_into_store(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "results.sqlite")
+            st = Store(db)
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                ports=[Port(portid=445, service="microsoft-ds")]))
+            st.close()
+            loot = os.path.join(d, "svc.txt")
+            with open(loot, "w") as fh:
+                fh.write(self.OUT)
+            rc = cli.cmd_ingest(SimpleNamespace(
+                output_dir=d, loot=loot, host=None, title="t"))
+            self.assertEqual(rc, 0)
+            st = Store(db)
+            hosts = {h.ip: h for h in st.all_hosts()}
+            st.close()
+            self.assertIn("10.0.0.9", hosts)            # new host created from output
+            titles = [v.title for v in hosts["10.0.0.5"].vulns]
+            self.assertTrue(any("signing" in t for t in titles))
+
+
+class CheckboxPersistenceTest(unittest.TestCase):
+    def test_every_checkbox_header_round_trips(self):
+        """Every column with the checkbox role must be recognised by the read-back
+        (CHECKBOX_HEADERS), or the operator's ticks are silently lost on regen."""
+        from recce import report_excel as rx
+        from recce.models import Vuln, Credential
+        hosts = [Host(ip="10.0.0.5", os_family="Windows", roles=["Domain Controller"],
+                      local_findings=[{"category": "sudo",
+                                       "vector": "NOPASSWD sudo: /usr/bin/find",
+                                       "section": "Sudo", "source": "recce-enum"}],
+                      accounts=[__import__("recce.models", fromlist=["Account"]).Account(
+                          ip="10.0.0.5", source="nse", kind="domain", domain="CORP")],
+                      ports=[Port(portid=445, service="microsoft-ds")],
+                      vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                                  script_id="smb-vuln-ms17-010", title="ms17-010",
+                                  severity="high", source="nse", ids=["CVE-2017-0143"],
+                                  output="VULNERABLE")])]
+        creds = [Credential(username="alice", secret="Pw!", domain="CORP")]
+        pre, post = rx._ordered_specs(hosts, None, creds)
+        for spec in pre + post:
+            cb = [h for h, role, _w in spec.cols if role == "checkbox"]
+            for header in cb:
+                self.assertIn(header, rx.CHECKBOX_HEADERS,
+                              f"{spec.title}: checkbox column {header!r} not in "
+                              "CHECKBOX_HEADERS -> ticks won't persist")
+
+
+class VersionTupleTest(unittest.TestCase):
+    def test_openssh_patch_level_preserved(self):
+        """Regression: greedy [a-z]* used to swallow the 'p', collapsing 9.3p1 and
+        9.3p2 to the same tuple and losing the OpenSSH < 9.3p2 finding."""
+        from recce.vulndb import _ver_tuple, _cmp
+        self.assertEqual(_ver_tuple("8.2p1"), (8, 2, 1))      # docstring example
+        self.assertEqual(_ver_tuple("9.3p1"), (9, 3, 1))
+        self.assertEqual(_ver_tuple("9.3p2"), (9, 3, 2))
+        self.assertEqual(_cmp("9.3p1", "9.3p2"), -1)          # p1 sorts below p2
+        self.assertEqual(_ver_tuple("1.0.2k"), (1, 0, 2, 11))  # letter suffix intact
+        self.assertEqual(_cmp("2.3.4", "2.3.4a"), -1)          # ...still < a-suffix
+
+    def test_openssh_9_3p1_flags_double_free(self):
+        from recce import vulndb
+        h = Host(ip="10.0.0.9", os_family="Linux",
+                 ports=[Port(portid=22, service="ssh", product="OpenSSH",
+                             version="9.3p1")])
+        vulndb.assess_host_inplace(h)
+        self.assertTrue(any("double-free" in v.title for v in h.vulns))
+        # 9.3p2 (patched) must NOT flag it
+        h2 = Host(ip="10.0.0.10", os_family="Linux",
+                  ports=[Port(portid=22, service="ssh", product="OpenSSH",
+                              version="9.3p2")])
+        vulndb.assess_host_inplace(h2)
+        self.assertFalse(any("double-free" in v.title for v in h2.vulns))
+
+
+class HtmlReportTest(unittest.TestCase):
+    def _hosts(self):
+        from recce.models import Vuln
+        return [Host(ip="10.0.0.5", hostnames=["dc01"], os_family="Windows",
+                     roles=["Domain Controller"], defenses=["EDR/AV: CSFalcon (process)"],
+                     ports=[Port(portid=445, service="microsoft-ds")],
+                     vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                                 script_id="smb-vuln-ms17-010",
+                                 title="smb-vuln-ms17-010 <x>", severity="high",
+                                 source="nse", ids=["CVE-2017-0143"],
+                                 output="VULNERABLE")])]
+
+    def test_self_contained_and_escaped(self):
+        from recce import report_html
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "report.html")
+            report_html.build_html(self._hosts(), p, title="Client X",
+                                   generated="2026-01-01")
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("<!doctype html>", html)
+        # self-contained: no external resources at all.
+        for bad in ("http://", "https://", "src=", "<link"):
+            self.assertNotIn(bad, html)
+        self.assertIn("Client X", html)
+        for section in ("Executive summary", "Findings by severity", "Attack path",
+                        "Hosts", "CVE-2017-0143"):
+            self.assertIn(section, html)
+        self.assertIn("smb-vuln-ms17-010 &lt;x&gt;", html)   # HTML-escaped title
+
+    def test_empty_hosts_ok(self):
+        from recce import report_html
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html([], p, title="Empty")
+            self.assertTrue(os.path.exists(p))
+
+
+class PrivEscVerdictTest(unittest.TestCase):
+    def test_verdict_orders_and_classifies(self):
+        from recce import privesc as pe
+        h = Host(ip="10.0.0.5", os_family="Linux", local_findings=[
+            {"category": "sudo",
+             "vector": "NOPASSWD sudo: /usr/bin/find -> GTFOBins 'find'",
+             "section": "Sudo", "source": "recce-enum"},
+            {"category": "local",
+             "vector": "recently modified config /opt/app/settings.conf",
+             "section": "Files", "source": "recce-enum"}])
+        rows = pe.plan(h)
+        # escalation sorts first; both finding and checklist are present.
+        self.assertEqual(rows[0]["type"], "escalation")
+        self.assertIn("GTFOBins", rows[0]["howto"])       # verdict shows the tool
+        types = [r["type"] for r in rows]
+        self.assertIn("finding", types)                   # the unmappable observation
+        self.assertIn("checklist", types)                 # generic OS reference
+        # ordering: no checklist row precedes a finding/escalation row.
+        order = {"escalation": 0, "finding": 1, "checklist": 2}
+        idx = [order[t] for t in types]
+        self.assertEqual(idx, sorted(idx))
+        # checklist notes that the host was already swept.
+        cl = next(r for r in rows if r["type"] == "checklist")
+        self.assertIn("already swept", cl["note"])
+
+    def test_no_ingest_is_checklist_only(self):
+        from recce import privesc as pe
+        rows = pe.plan(Host(ip="10.0.0.6", os_family="Windows"))
+        self.assertTrue(rows)
+        self.assertTrue(all(r["type"] == "checklist" for r in rows))
+        self.assertNotIn("already swept", rows[0]["note"])  # no sweep claimed
+
+
+class CredentialsTest(unittest.TestCase):
+    def _hosts(self):
+        return [Host(ip="10.0.10.5", subnet="10.0.10.0/24", os_family="Windows",
+                     ports=[Port(portid=445, service="microsoft-ds"),
+                            Port(portid=5985, service="http"),
+                            Port(portid=389, service="ldap")]),
+                Host(ip="10.0.20.9", subnet="10.0.20.0/24", os_family="Linux",
+                     ports=[Port(portid=22, service="ssh")])]
+
+    def test_parse_and_stack_dedupe(self):
+        from recce import cli, credentials as cr
+        a = cli._parse_cred_spec("CORP\\alice:Passw0rd!")
+        self.assertEqual((a.domain, a.username, a.kind), ("CORP", "alice", "password"))
+        b = cli._parse_cred_spec("administrator:aad3b435b51404eeaad3b435b51404ee")
+        self.assertEqual(b.kind, "nthash")             # 32-hex -> hash
+        c = cli._parse_cred_spec("bob")
+        self.assertEqual(c.kind, "blank")
+        stacked = cr.stack([], [a, b, a])              # duplicate a collapses
+        self.assertEqual(len(stacked), 2)
+
+    def test_spray_plan_files_and_commands(self):
+        from recce import credentials as cr
+        from recce.models import Credential
+        creds = [Credential(username="alice", secret="Pw!", kind="password", domain="CORP"),
+                 Credential(username="administrator",
+                            secret="aad3b435b51404eeaad3b435b51404ee", kind="nthash")]
+        with tempfile.TemporaryDirectory() as d:
+            s = cr.build_spray(creds, self._hosts(), d)
+            self.assertIn("users.txt", s["files"])
+            self.assertIn("passwords.txt", s["files"])
+            self.assertIn("nthashes.txt", s["files"])
+            cmds = "\n".join(s["commands"])
+            self.assertIn("netexec smb 10.0.10.0/24", cmds)
+            self.assertIn("-H nthashes.txt", cmds)     # pass-the-hash line
+            self.assertIn("netexec ssh 10.0.20.0/24", cmds)
+            self.assertNotIn("netexec ssh 10.0.20.0/24 -u users.txt -H", cmds)  # no PtH over ssh
+
+    def test_harvest_from_accounts(self):
+        from recce import credentials as cr
+        from recce.models import Account
+        h = Host(ip="10.0.0.5", accounts=[
+            Account(ip="10.0.0.5", source="secretsdump", kind="user", name="svc",
+                    domain="CORP", attrs={"password": "S3cret"})])
+        got = cr.harvest([h])
+        self.assertEqual(len(got), 1)
+        self.assertEqual((got[0].username, got[0].secret), ("svc", "S3cret"))
+
+    def test_creds_add_list_plan_via_cli(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "results.sqlite")
+            st = Store(db)
+            st.upsert_host(Host(ip="10.0.10.5", subnet="10.0.10.0/24",
+                                ports=[Port(portid=445, service="microsoft-ds")]))
+            st.close()
+            def ns(**kw):
+                base = dict(output_dir=d, targets=[], host=[], subnet=[], add=None,
+                            user=None, password=None, hash=None, domain=None,
+                            plan=False, title="t")
+                base.update(kw)
+                return SimpleNamespace(**base)
+            self.assertEqual(cli.cmd_creds(ns(add=["CORP\\alice:Pw!"])), 0)
+            st = Store(db)
+            self.assertEqual(len(st.all_credentials()), 1)
+            st.close()
+            self.assertEqual(cli.cmd_creds(ns(plan=True)), 0)
+            self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
+
+
+class AttackPathTest(unittest.TestCase):
+    def _hosts(self):
+        from recce.models import Vuln, Account
+        dc = Host(ip="10.0.10.5", hostnames=["dc01"], os_family="Windows",
+                  roles=["Domain Controller"], smb_signing="not required",
+                  accounts=[Account(ip="10.0.10.5", source="nse", kind="domain",
+                                    domain="CORP")],
+                  ports=[Port(portid=445, service="microsoft-ds"),
+                         Port(portid=5985, service="http")],
+                  vulns=[Vuln(ip="10.0.10.5", port=445, protocol="tcp",
+                              script_id="smb-vuln-ms17-010", title="smb-vuln-ms17-010",
+                              severity="high", source="nse", ids=["CVE-2017-0143"],
+                              output="VULNERABLE"),
+                         Vuln(ip="10.0.10.5", port=0, protocol="tcp",
+                              script_id="local-enum", title="SeImpersonate -> Potato",
+                              severity="high", source="local", confidence="confirmed",
+                              output="SeImpersonate held")])
+        return [dc]
+
+    def test_stages_and_ordering(self):
+        from recce import attackpath as ap
+        steps = ap.build(self._hosts())
+        stages = [s["stage"] for s in steps]
+        # ordered by STAGE_ORDER
+        idx = [ap.STAGE_ORDER.index(s) for s in stages]
+        self.assertEqual(idx, sorted(idx))
+        self.assertIn("Initial Access", stages)          # ms17-010
+        self.assertIn("Privilege Escalation", stages)    # SeImpersonate/Potato
+        self.assertIn("Domain Dominance", stages)        # AS-REP/Kerberoast/relay on DC
+        self.assertIn("Lateral Movement", stages)        # SMB/WinRM present
+
+    def test_narrative_grounded(self):
+        from recce import attackpath as ap
+        hosts = self._hosts()
+        text = " ".join(ap.narrative(hosts))
+        self.assertIn("Likely path", text)
+        self.assertIn("10.0.10.5", text)                 # names the real host
+
+    def test_attackpath_sheet(self):
+        from recce.report_excel import _spec_attackpath
+        spec = _spec_attackpath(self._hosts())
+        self.assertEqual(spec.title, "Attack Path")
+        self.assertIn("Stage", [c[0] for c in spec.cols])
+        self.assertTrue(spec.rows)
+
+    def test_empty_when_no_confirmed(self):
+        from recce import attackpath as ap
+        h = Host(ip="10.0.0.1", os_family="Linux",
+                 ports=[Port(portid=23, service="telnet")])
+        self.assertEqual(ap.build([h]), [])              # no confirmed findings
+
+
+class AVAwarenessTest(unittest.TestCase):
+    LOOT = ("recce-enum  host=DC01  user=admin  now\n"
+            "==== AV / EDR detection ====\n"
+            "    AV product: Windows Defender\n"
+            "[!] EDR/AV process: CSFalcon\n"
+            "    EDR/AV service: CSAgent\n"
+            "==== OS hardening & defences ====\n"
+            "    Defender: RealTime=True Tamper=True\n"
+            "    LSA protection (RunAsPPL)=1\n"
+            "    Sysmon service present (activity is being logged)\n"
+            "    AppLocker policy present (review allowed paths)\n")
+
+    def test_extract_defenses(self):
+        from recce import ingest
+        j = " | ".join(ingest.extract_defenses(self.LOOT))
+        for expect in ("AV: Windows Defender", "CSFalcon (process)",
+                       "CSAgent (service)", "Defender RTP=True",
+                       "LSASS protected (RunAsPPL)", "Sysmon present (logging)",
+                       "AppLocker enforced"):
+            self.assertIn(expect, j)
+
+    def test_ingest_populates_defenses(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as dd:
+            db = os.path.join(dd, "results.sqlite")
+            st = Store(db)
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                os_family="Windows",
+                                ports=[Port(portid=445, service="microsoft-ds")]))
+            st.close()
+            loot = os.path.join(dd, "l.txt")
+            with open(loot, "w") as fh:
+                fh.write(self.LOOT)
+            cli.cmd_ingest(SimpleNamespace(output_dir=dd, loot=loot,
+                                           host="10.0.0.5", title="t"))
+            st = Store(db)
+            h = {x.ip: x for x in st.all_hosts()}["10.0.0.5"]
+            st.close()
+            self.assertTrue(any("CSFalcon" in x for x in h.defenses))
+
+    def test_checklist_and_exploitation_columns(self):
+        from recce.report_excel import _spec_checklist, _spec_exploitation
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.5", os_family="Windows",
+                 defenses=["EDR/AV: CSFalcon (process)"],
+                 ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                             script_id="local-enum",
+                             title="SeImpersonate -> Potato -> SYSTEM", severity="high",
+                             source="local", confidence="confirmed",
+                             output="SeImpersonate held")])
+        cl = _spec_checklist([h])
+        self.assertIn("AV / EDR", [c[0] for c in cl.cols])
+        self.assertEqual(cl.rows[0]["data"]["AV / EDR"], "EDR/AV: CSFalcon (process)")
+        ex = _spec_exploitation([h])
+        self.assertIn("Defenses (host)", [c[0] for c in ex.cols])
+        self.assertTrue(any("CSFalcon" in r["data"].get("Defenses (host)", "")
+                            for r in ex.rows))
+
+    def test_exploitplan_defenses_banner(self):
+        from recce import exploitplan as ep
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.5", os_family="Windows",
+                 defenses=["EDR/AV: CSFalcon (process)"],
+                 ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                             script_id="smb-vuln-ms17-010", title="smb-vuln-ms17-010",
+                             severity="high", source="nse", ids=["CVE-2017-0143"],
+                             output="VULNERABLE")])
+        with tempfile.TemporaryDirectory() as dd:
+            s = ep.build_plan([h], dd)
+            with open(os.path.join(s["dir"], "10.0.0.5.sh")) as fh:
+                sh = fh.read()
+        self.assertIn("DEFENSES on 10.0.0.5", sh)
+        self.assertIn("CSFalcon", sh)
+        self.assertIn("does not evade AV", sh)   # coordination, not evasion
+
+
+class ServiceEnumTest(unittest.TestCase):
+    def test_script_mapping(self):
+        from recce import serviceenum as se
+        self.assertEqual(se.script_for("microsoft-ds", 445), "smb")
+        self.assertEqual(se.script_for("netbios-ssn", 139), "smb")
+        self.assertEqual(se.script_for("ssl/http", 8443), "http")
+        self.assertEqual(se.script_for("", 6379), "redis")       # port fallback
+        self.assertEqual(se.script_for("http", 5985), "winrm")   # WinRM port wins
+        self.assertEqual(se.script_for("ms-wbt-server", 3389), "rdp")
+        self.assertEqual(se.script_for("unknown-thing", 12345), "")
+
+    def test_commands_and_unmapped(self):
+        from recce import serviceenum as se
+        h = Host(ip="10.0.0.5", hostnames=["dc"],
+                 ports=[Port(portid=445, service="microsoft-ds"),
+                        Port(portid=6379, service="redis"),
+                        Port(portid=9999, service="weird", state="open")])
+        cmds = se.commands_for_host(h)
+        scripts = {c[2] for c in cmds}
+        self.assertEqual(scripts, {"smb", "redis"})
+        self.assertTrue(all(c[3].startswith("./scripts/recce-service.sh") for c in cmds))
+        self.assertIn((9999, "weird"), se.unmapped_ports(h))
+
+    def test_cmd_services_smoke(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "results.sqlite")
+            st = Store(db)
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                ports=[Port(portid=445, service="microsoft-ds"),
+                                       Port(portid=80, service="http")]))
+            st.close()
+            rc = cli.cmd_services(SimpleNamespace(output_dir=d, targets=[],
+                                                  host=[], subnet=[], aggressive=False))
+            self.assertEqual(rc, 0)
 
 
 class ReportTest(unittest.TestCase):

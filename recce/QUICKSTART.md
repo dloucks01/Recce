@@ -40,6 +40,10 @@ cd recce
 ```bash
 # 1) Fast enumeration -> fills the sheet (hosts, ports, services)
 sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
+#    Hosts blocking ping (firewalled / Windows / AD)? add -Pn to scan all as up:
+#    sudo ./bin/recce enum 10.0.10.0/24 -Pn -o eng
+#    ...or, if you ALREADY have an nmap scan, skip enum and import it:
+#    ./bin/recce import scan.xml -o eng      # -oX XML (best), -oG .gnmap, dir, or glob
 
 # 2) Open the workbook and start working
 #    eng/enumeration.xlsx  ->  read the "Start Here" tab, then use "Checklist"
@@ -48,6 +52,14 @@ sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
 #    Runs: NSE vuln+weak-config, the offline version->CVE/CWE engine,
 #    stdlib HTTP-header + TLS probes, and searchsploit exploit mapping.
 sudo ./bin/recce vulns -o eng
+
+# 3b) Deep per-service enumeration (SMB shares, HTTP paths/TLS, SNMP walk,
+#     anon FTP/LDAP, Redis unauth, ...). Runs the RIGHT tool per open port and
+#     flags likely vulns. Safe by default; -a adds brute/nikto/dir-busting.
+#     Not sure what to run? recce prints the exact command for every open port:
+./bin/recce      services -o eng                         # per-port enum commands
+#     Then run one, or sweep the whole engagement from recce's own nmap output:
+./scripts/recce-service.sh from-nmap eng/raw/*.xml       # or: smb 10.0.10.5
 
 # 4) Optional deeper phases (any time, on any subset)
 sudo ./bin/recce db -o eng                 # databases
@@ -62,13 +74,27 @@ sudo ./bin/recce db -o eng                 # databases
 
 # 4b) On-target enum: got a shell on a box? Run the bundled read-only sweep
 #     (recce/local/), bring the output back, and fold its [!] findings into the
-#     Priv-Esc tab for that host:
+#     Priv-Esc tab for that host. The sweep ends with a "How to exploit" runbook
+#     tailored to THAT host's findings (prereq -> command -> confirm -> cleanup,
+#     using existing public tools):
 #       target$  ./recce-enum.sh -o loot.txt          # Linux  (-t self-tests first)
 #       target>  powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt  # Windows
 ./bin/recce      ingest loot.txt -o eng    # matches the host by name (or --host IP)
+#     ingest also accepts recce-service.sh output - its [!] findings land on the
+#     Vulnerabilities sheet against the right host:port (auto-detected):
+#       ./scripts/recce-service.sh smb 10.0.10.5 > smb.txt  &&  ./bin/recce ingest smb.txt -o eng
 
-# 4c) Generate a Word (.docx) write-up per finding, then finish each in Word
-./bin/recce      writeups -o eng           # auto-fills fields + web screenshots
+# 4b2) Turn confirmed findings into ready-to-run exploitation artifacts:
+#      Metasploit .rc scripts (params pre-filled) + parameterized impacket/GTFOBins
+#      commands + a per-host plan. Drives EXISTING tools; safe by default (check-only).
+./bin/recce      exploitplan -o eng --lhost 10.10.14.7   # add --run to arm msf launch
+
+# 4c) Generate Word (.docx) write-ups, then finish each in Word
+./bin/recce      writeups -o eng           # one per REAL finding (+ combined report)
+#    --include-potential also writes up low-confidence version-inferred guesses.
+#    Just want ONE finding, pre-filled with what you've already looted/obtained?
+./bin/recce      writeup -o eng            # list findings to pick from
+./bin/recce      writeup F-007 -o eng      # or by CVE / IP / a word from the title
 
 # 5) See what's left (prints progress + the suggested next command)
 ./bin/recce status -o eng
@@ -150,7 +176,7 @@ pipeline on this box. The usual snags:
 |---|---|
 | `nmap ... not found` | Install nmap — the only hard requirement. |
 | "Not running as root" / weak scan | Run with `sudo`; use `sudo ./bin/recce ...` so PATH survives sudo. |
-| Discovery finds no hosts | A firewall drops pings — re-run `enum` with `--no-discovery` (`-Pn`). |
+| Hosts show zero ports / few live | They block ping — add **`-Pn`** to `enum`/`scan` (scan all as up). recce also auto-falls-back to `-Pn` if discovery gets zero responses. |
 | Too slow | `--fast`, `--workers N`, `vulns --fast`, `--profile quick`, `--host-timeout`. |
 | Crashed / interrupted | Re-run with `--resume`, or `report -o eng`. `RECCE_DEBUG=1` for the traceback. |
 | "No open ports match" on `vulns` | Run `enum` first; `--unscanned` finds nothing once all is scanned. |

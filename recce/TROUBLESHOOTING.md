@@ -35,15 +35,27 @@ and SYN scan need root/CAP_NET_RAW.`
   package. Use **`sudo ./bin/recce ...`** (the wrapper re-adds PYTHONPATH), or
   `sudo env "PATH=$PATH" python3 -m recce ...`.
 
-## 4. Discovery finds no hosts / "No targets after expansion/exclusion"
+## 4. Hosts report zero ports / discovery finds nothing (ping-blocking networks)
 
-- **Hosts are up but a firewall drops ping/discovery probes.** Re-run enum with
-  **`--no-discovery`** (treats every target as up, `-Pn`). This is the #1 cause
-  of "it found nothing" on hardened networks.
-- **Targeting typo.** Valid forms: single `10.0.0.5`, list `10.0.0.5 10.0.0.9`,
+The **#1 field issue.** recce first does a quick host-discovery sweep and only
+port-scans the hosts that answer. Firewalled / Windows / AD hosts routinely
+**block ping**, so they don't answer discovery and get skipped — leaving you with
+few live hosts or lots of "zero ports."
+
+- **Add `-Pn`** to `enum`/`scan` — it skips discovery and scans **every target as
+  if up**, exactly like nmap's `-Pn`. This is the fix, and it's the normal mode
+  on hardened internal networks:
+  ```bash
+  recce enum 10.0.10.0/24 -Pn -o eng        # scan all 254, don't rely on ping
+  ```
+- **recce now auto-recovers:** if discovery gets **zero** responses, it falls back
+  to `-Pn` automatically (with a loud notice) rather than handing you an empty
+  engagement. If discovery finds *some* but fewer than you expect, it prints a
+  hint to re-run with `-Pn`.
+- **Targeting typo?** Valid forms: single `10.0.0.5`, list `10.0.0.5 10.0.0.9`,
   range `10.0.0.10-40`, CIDR `10.0.0.0/24`, or `@file` (one per line, `#`
   comments ok). `--exclude` carves hosts back out.
-- **Everything excluded.** Check your `--exclude`.
+- **Everything excluded?** Check your `--exclude`.
 
 ## 5. Scans are too slow
 

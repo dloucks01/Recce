@@ -139,6 +139,14 @@ def vuln_key(ip: str, port: Any, script_id: str) -> str:
     return f"vuln:{ip}:{port or 0}:{script_id}"
 
 
+def vuln_row_key(v: Any) -> str:
+    """The single canonical key for a Vulnerabilities-sheet row, used by BOTH the
+    sheet writer and coverage counting so a triaged finding is actually counted.
+    (The two sites used different keys - script_id vs script_id+title - so the
+    Triaged tick was invisible to compute_coverage.) Keys live in one place."""
+    return vuln_key(v.ip, v.port, f"{v.script_id}:{(v.title or '')[:40]}")
+
+
 def exploit_key(ip: str, port: Any, edb_id: str) -> str:
     return f"exploit:{ip}:{port or 0}:{edb_id}"
 
@@ -174,7 +182,7 @@ def item_keys(hosts: list) -> dict[str, list[str]]:
         for p in h.open_ports:
             push("services", svc_key(h.ip, p.protocol, p.portid))
         for v in h.vulns:
-            push("vulns", vuln_key(v.ip, v.port, v.script_id))
+            push("vulns", vuln_row_key(v))
         for e in h.exploits:
             push("exploits", exploit_key(e.ip, e.port, e.edb_id))
         for a in h.accounts:

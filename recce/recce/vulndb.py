@@ -27,14 +27,16 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
     v = v.strip().lower()
     parts: list[int] = []
     for token in re.split(r"[.\-_]", v):
-        m = re.match(r"(\d+)([a-z]*)(?:p(\d+))?", token)
+        # Match the OpenSSH-style pN patch BEFORE the generic trailing letter, so
+        # the greedy [a-z]* can't swallow the 'p' (which collapsed 9.3p1 == 9.3p2).
+        m = re.match(r"(\d+)(?:p(\d+))?([a-z]*)", token)
         if not m:
             continue
         parts.append(int(m.group(1)))
-        if m.group(3):                     # OpenSSH-style p1
-            parts.append(int(m.group(3)))
-        elif m.group(2):                   # trailing letter (1.0.2k)
-            parts.append(ord(m.group(2)[0]) - ord("a") + 1)
+        if m.group(2):                     # OpenSSH-style pN (8.2p1 -> ...,1)
+            parts.append(int(m.group(2)))
+        elif m.group(3):                   # trailing letter (1.0.2k -> ...,11)
+            parts.append(ord(m.group(3)[0]) - ord("a") + 1)
     return tuple(parts) or (0,)
 
 

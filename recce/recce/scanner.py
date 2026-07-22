@@ -33,6 +33,8 @@ class ScanProfile:
     deep_enum: bool = True            # service-aware deep enum scripts (enum phase)
     udp_top: int = 0                  # >0 -> also scan N top UDP ports (vulns phase)
     ping_discovery: bool = True       # discovery; False => treat all as up (-Pn)
+    assume_up: bool = False           # -Pn / discovery fell back: scanning dead IPs
+                                      # too, so fail faster on non-responders
     offline: bool = False             # drop internet-dependent scripts (vulners)
     extra_nse: list[str] = field(default_factory=list)
     scanner: str = "nmap"             # nmap | masscan (masscan for the port sweep)
@@ -282,9 +284,13 @@ def full_port_scan(ip: str, out_xml: str,
     scan_type = "-sS" if _is_root() else "-sT"
     port_spec = ["-p-"] if profile.all_ports else ["--top-ports", str(profile.top_ports)]
     to_args, kill = _timeout_args(profile)
+    # When we're scanning every target as up (-Pn / discovery fallback), dead IPs
+    # get scanned too - so retry less to abandon non-responders roughly twice as
+    # fast. With real discovery the set is already live, so retry more thoroughly.
+    retries = "1" if profile.assume_up else "2"
     cmd = [
         "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
-        "--min-rate", str(profile.min_rate), "--max-retries", "2", "--open",
+        "--min-rate", str(profile.min_rate), "--max-retries", retries, "--open",
         *to_args, *port_spec, ip, "-oX", out_xml,
     ]
     outcome = _run(cmd, timeout=kill)

@@ -23,14 +23,13 @@ from typing import Callable
 
 from . import ad
 from . import db as dbmod
-from . import playbook as pb
 from . import privesc as pe
 from . import tracking as tr
 from . import xlsx
 from .exploitref import proven_exploit_ref
 from .models import Domain, Host
 
-CHECKBOX_HEADERS = {"Reviewed", "Checked", "Triaged"}
+CHECKBOX_HEADERS = {"Reviewed", "Checked", "Triaged", "Done", "Worked"}
 CHECKLIST_TITLE = "Checklist"
 Tracking = dict  # {key: (reviewed_bool, notes_str)}
 
@@ -54,6 +53,7 @@ MONO_COLS = {
     "Port", "Proto", "Version", "CVE / refs", "CWE", "Scope", "CPE",
     "Extra info", "RID", "EDB-ID", "CVEs", "Hosts (ip:port)", "Open ports",
     "# Vulns", "# Hosts", "Script", "Path", "SPN", "Command (fill in your values)",
+    "Enum command", "Command",
 }
 
 
@@ -76,8 +76,8 @@ TAB_COLORS = {
     "Start Here": _TAB_GUIDE, "Runbook": _TAB_GUIDE, "Overview": _TAB_GUIDE,
     "Checklist": _TAB_WORK, "Services": _TAB_WORK,
     "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND,
-    "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
-    "Exploitation": _TAB_FIND,
+    "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND, "Credentials": _TAB_FIND,
+    "Exploitation": _TAB_FIND, "Attack Path": _TAB_FIND,
     "Services by Product": _TAB_INV, "Databases": _TAB_INV,
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
     "Raw NSE": _TAB_RAW,
@@ -128,7 +128,8 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     cols = [
         ("Reviewed", "checkbox", 9), ("Subnet", "data", 16), ("IP", "data", 15),
         ("Hostname", "data", 22), ("OS", "data", 20), ("Hops", "data", 6),
-        ("Roles", "data", 22), ("Open ports", "data", 30), ("# Vulns", "data", 8),
+        ("Roles", "data", 22), ("Open ports", "data", 28), ("# Vulns", "data", 8),
+        ("AV / EDR", "data", 26),
         *step_cols,
         ("Notes", "notes", 28), ("Key", "key", 4),
     ]
@@ -142,7 +143,7 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
             "Subnet": h.subnet, "IP": h.ip, "Hostname": h.hostname, "OS": h.os_guess,
             "Hops": (str(h.distance) if h.distance else ""),
             "Roles": ", ".join(h.roles), "Open ports": open_ports,
-            "# Vulns": len(h.vulns)}})
+            "# Vulns": len(h.vulns), "AV / EDR": "; ".join(h.defenses)}})
     return SheetSpec(CHECKLIST_TITLE, cols, rows, _styler_checklist)
 
 
@@ -184,22 +185,26 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
     """One row per open port, grouped by IP. Each port has its own tri-state work
     Status (not started / in progress / done) and a Notes cell, so a tester can
     track exactly which ports they've looked at, are working, or haven't touched."""
+    from . import serviceenum as se
     cols = [
         ("Status", "status", 15), ("IP", "data", 16),
         ("Hostname", "data", 24), ("Port", "data", 7), ("Proto", "data", 6),
         ("Service", "data", 16), ("Product", "data", 22), ("Version", "data", 16),
-        ("Extra info", "data", 24), ("CPE", "data", 30), ("Notes", "notes", 30),
+        ("Extra info", "data", 24), ("CPE", "data", 28),
+        ("Enum command", "data", 42), ("Notes", "notes", 28),
         ("Key", "key", 4),
     ]
     rows = []
     for h in sorted(hosts, key=lambda x: _ip_sort_key(x.ip)):
         for p in sorted(h.open_ports, key=lambda p: p.portid):
+            script = se.script_for(p.service, p.portid)
+            enum_cmd = f"{se.DRIVER} {script} {h.ip} {p.portid}" if script else ""
             rows.append({"key": tr.svc_key(h.ip, p.protocol, p.portid),
                          "group": h.ip, "data": {
                 "IP": h.ip, "Hostname": h.hostname, "Port": p.portid,
                 "Proto": p.protocol, "Service": p.service,
                 "Product": p.product, "Version": p.version, "Extra info": p.extrainfo,
-                "CPE": ", ".join(p.cpe)}})
+                "CPE": ", ".join(p.cpe), "Enum command": enum_cmd}})
     return SheetSpec("Services", cols, rows, group_by="IP")
 
 
@@ -242,7 +247,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     ordered.sort(key=lambda hv: (order.get(hv[1].severity, 9), _ip_sort_key(hv[0].ip)))
     for h, v in ordered:
         out = v.output if len(v.output) < 700 else v.output[:700] + " ..."
-        rows.append({"key": tr.vuln_key(v.ip, v.port, f"{v.script_id}:{v.title[:40]}"),
+        rows.append({"key": tr.vuln_row_key(v),
                      "data": {
             "Severity": v.severity.upper(), "IP": h.ip, "Hostname": h.hostname,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
@@ -349,44 +354,82 @@ def _spec_databases(hosts: list[Host]) -> SheetSpec:
     return SheetSpec("Databases", cols, rows, _styler_databases, skip_if_empty=True)
 
 
+_PE_TYPE = {"escalation": "Escalation path", "finding": "Finding",
+            "checklist": "Checklist"}
+
+
 def _styler_privesc(d: dict) -> dict:
-    return {"Category": "sev_medium"} if d.get("Category") == "finding" else {}
+    t = d.get("Type")
+    if t == "Escalation path":
+        return {"Type": "sev_high"}          # confirmed, actually escalatable
+    if t == "Finding":
+        return {"Type": "sev_medium"}
+    return {"Type": "sev_info"} if t == "Checklist" else {}
 
 
 def _spec_privesc(hosts: list[Host]) -> SheetSpec:
     cols = [
-        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 20),
-        ("OS", "data", 22), ("Category", "data", 10), ("Vector", "data", 30),
-        ("How-to / command", "data", 55), ("Ref / note", "data", 40),
-        ("Notes", "notes", 26), ("Key", "key", 4),
+        ("Checked", "checkbox", 9), ("IP", "data", 16), ("Hostname", "data", 18),
+        ("Type", "data", 15), ("OS", "data", 18), ("Category", "data", 10),
+        ("Vector", "data", 30), ("How-to / command", "data", 55),
+        ("Ref / note", "data", 40), ("Notes", "notes", 24), ("Key", "key", 4),
     ]
     rows = []
     for r in pe.all_rows(hosts):
         rows.append({"key": r["key"], "data": {
-            "IP": r["ip"], "Hostname": r["hostname"], "OS": r["os"],
+            "IP": r["ip"], "Hostname": r["hostname"],
+            "Type": _PE_TYPE.get(r.get("type"), ""), "OS": r["os"],
             "Category": r["category"], "Vector": r["vector"],
             "How-to / command": r["howto"], "Ref / note": r["note"]}})
     return SheetSpec("Priv-Esc", cols, rows, _styler_privesc, skip_if_empty=True)
 
 
 def _spec_exploitation(hosts: list[Host]) -> SheetSpec:
-    """The finding -> run-this bridge: each CONFIRMED privesc finding mapped to the
-    exact EXISTING public tool, the command (with the finding's values filled in),
-    prerequisites, and how to validate. References vetted tools - not generated
-    exploit code. Empty (sheet skipped) until there are confirmed findings."""
+    """The finding -> run-this bridge for every CONFIRMED finding: remote exploits
+    (Metasploit modules, params filled in), remote tool actions (impacket / netexec
+    / GTFOBins), and post-shell priv-esc - each mapped to the exact EXISTING public
+    tool, the command with the finding's values filled in, the prerequisite, and how
+    to validate. References vetted tools - it does not generate exploit code. Empty
+    (sheet skipped) until there are confirmed findings. `exploitplan` writes the
+    same actions out as runnable .rc / .sh artifacts."""
+    from . import exploitplan as xp
+    _KIND = {"remote-msf": "remote (msf)", "remote-tool": "remote (tool)",
+             "post-shell": "post-shell"}
+    defenses = {h.ip: "; ".join(h.defenses) for h in hosts if h.defenses}
     cols = [
-        ("Done", "checkbox", 9), ("IP", "data", 15), ("Hostname", "data", 18),
-        ("Finding", "data", 34), ("Existing tool", "data", 34),
-        ("Command (fill in your values)", "data", 60),
-        ("Prerequisite", "data", 34), ("Validate", "data", 26),
-        ("Notes", "notes", 24), ("Key", "key", 4),
+        ("Done", "checkbox", 9), ("IP", "data", 15), ("Hostname", "data", 15),
+        ("Type", "data", 13), ("Finding", "data", 28), ("Existing tool", "data", 28),
+        ("Command (fill in your values)", "data", 58),
+        ("Prerequisite", "data", 28), ("Validate", "data", 22),
+        ("Defenses (host)", "data", 26), ("Notes", "notes", 20), ("Key", "key", 4),
     ]
-    rows = [{"key": e["key"], "data": {
-        "IP": e["ip"], "Hostname": e["hostname"], "Finding": e["finding"],
-        "Existing tool": e["tool"], "Command (fill in your values)": e["cmd"],
-        "Prerequisite": e["prereq"], "Validate": e["validate"]}}
-        for e in pb.all_entries(hosts)]
+    rows = [{"key": a["key"], "data": {
+        "IP": a["ip"], "Hostname": a["hostname"],
+        "Type": _KIND.get(a["kind"], a["kind"]), "Finding": a["finding"],
+        "Existing tool": a["tool"], "Command (fill in your values)": a["cmd"],
+        "Prerequisite": a["prereq"], "Validate": a["validate"],
+        "Defenses (host)": defenses.get(a["ip"], "")}}
+        for a in xp.all_actions(hosts)]
     return SheetSpec("Exploitation", cols, rows, skip_if_empty=True)
+
+
+def _spec_attackpath(hosts: list[Host]) -> SheetSpec:
+    """The confirmed findings chained into a prioritised attack path (foothold ->
+    priv-esc -> creds -> lateral -> domain), grounded in what recce found. Empty
+    (sheet skipped) until there are confirmed, chainable findings."""
+    from . import attackpath as ap
+    cols = [
+        ("Done", "checkbox", 9), ("Stage", "data", 20), ("IP", "data", 22),
+        ("Hostname", "data", 16), ("Step", "data", 34), ("Existing tool", "data", 26),
+        ("Command", "data", 60), ("Why it matters", "data", 40),
+        ("Notes", "notes", 20), ("Key", "key", 4),
+    ]
+    rows = [{"key": s["key"], "data": {
+        "Stage": s["stage"], "IP": s["ip"], "Hostname": s["hostname"],
+        "Step": s["title"], "Existing tool": s["tool"], "Command": s["cmd"],
+        "Why it matters": s["why"]}}
+        for s in ap.build(hosts)]
+    return SheetSpec("Attack Path", cols, rows, skip_if_empty=True)
 
 
 def _spec_quick_wins(hosts: list[Host]) -> SheetSpec:
@@ -707,7 +750,12 @@ def _build_runbook(wb, meta: dict) -> None:
     cmd("doctor", "Check env + required/optional tools + run a localhost self-scan. "
                   "Run this first; it tells you loudly what's missing.")
 
-    section("1. Enumerate - discover hosts, ports, services (fast, safe)")
+    section("1. Enumerate - discover hosts, ports, services (fast, safe)",
+            "Already have an nmap scan? Use `import` instead of `enum` (no scanning).")
+    cmd("import scan.xml [more...] -o eng",
+        "Import EXISTING nmap scans - XML (-oX, richest), grepable (-oG), or normal "
+        "(-oN); multiple files/dirs/globs; masscan XML too. Appends + merges (never "
+        "duplicates). Runs the same offline enrichment as enum; ticks Enumerated.")
     cmd("enum <targets> -o eng --title \"Client X\"",
         "Host discovery + full TCP + service/version/OS + deep service NSE. "
         "Fills Checklist, Services, Raw NSE.")
@@ -892,6 +940,7 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         ("NTLM relay targets", len(ad.relay_targets(hosts))),
         ("Kerberoastable / AS-REP", f"{len(ad.kerberoastable(hosts))} / "
                                     f"{len(ad.asrep_roastable(hosts))}"),
+        ("Hosts with AV / EDR seen", sum(1 for h in hosts if h.defenses)),
     ]:
         target = _links.get(label)
         if target in nav_set:
@@ -1037,7 +1086,27 @@ def _build_active_directory(wb, hosts: list[Host], domains: list[Domain]) -> Non
 
 # --- public entry points --------------------------------------------------------
 
-def _ordered_specs(hosts: list[Host], scope: dict | None = None):
+def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
+    """The stacked credential set (auto-harvested + manually captured), ready to
+    spray. Empty (sheet skipped) until there are credentials. `recce creds --plan`
+    writes the users/passwords/hashes files + the netexec/impacket spray commands."""
+    from . import credentials as cr
+    stacked = cr.stack(hosts, creds_stored or [])
+    cols = [
+        ("Worked", "checkbox", 9), ("User", "data", 22), ("Domain", "data", 14),
+        ("Kind", "data", 10), ("Secret", "data", 34), ("Source", "data", 14),
+        ("Captured on", "data", 15), ("Notes", "notes", 26), ("Key", "key", 4),
+    ]
+    rows = [{"key": f"cred:{c.dedupe_key()}", "data": {
+        "User": c.username, "Domain": c.domain, "Kind": c.kind,
+        "Secret": c.secret or "(blank)", "Source": c.source,
+        "Captured on": c.origin_ip, "Notes": c.notes}}
+        for c in stacked]
+    return SheetSpec("Credentials", cols, rows, skip_if_empty=True)
+
+
+def _ordered_specs(hosts: list[Host], scope: dict | None = None,
+                   creds_stored: list | None = None):
     """Specs in final left-to-right order, following the engagement flow:
     orient -> track -> find -> exploit -> pivot -> AD -> post-exploitation.
 
@@ -1058,8 +1127,9 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
     return [_spec_checklist(hosts), _spec_services(hosts), _spec_vulns(hosts),
             _spec_exploits(hosts), _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
-           [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts),
-            _spec_exploitation(hosts), _spec_raw_nse(hosts)]
+           [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_credentials(hosts, creds_stored),
+            _spec_privesc(hosts), _spec_exploitation(hosts), _spec_attackpath(hosts),
+            _spec_raw_nse(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
@@ -1068,14 +1138,15 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
                    order_map: dict | None = None,
                    scope: dict | None = None,
                    statuses: dict | None = None,
-                   issues: list | None = None) -> str:
+                   issues: list | None = None,
+                   credentials: list | None = None) -> str:
     meta = meta or {}
     domains = domains or []
     tracking = tracking or {}
     order_map = order_map or {}
     statuses = statuses or {}
     wb = xlsx.Workbook()
-    pre, post = _ordered_specs(hosts, scope)
+    pre, post = _ordered_specs(hosts, scope, credentials)
     # Which sheets will actually exist (skip_if_empty ones may not), in tab order,
     # so the Overview's jump bar only links to sheets that are really there.
     ad_present = bool(domains or ad.domain_controllers(hosts))
@@ -1123,7 +1194,8 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
                     tracking: Tracking | None = None,
                     scope: dict | None = None,
                     statuses: dict | None = None,
-                    issues: list | None = None) -> str:
+                    issues: list | None = None,
+                    credentials: list | None = None) -> str:
     """Regenerate preserving existing row order (new rows appended) + tracking.
 
     The tool re-lays-out the sheet each time; the operator's checkboxes, notes and
@@ -1132,7 +1204,7 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
     """
     order_map = read_key_order(path) if os.path.exists(path) else {}
     return build_workbook(hosts, path, meta, domains, tracking, order_map, scope,
-                          statuses, issues)
+                          statuses, issues, credentials)
 
 
 def read_key_order(path: str) -> dict[str, list[str]]:

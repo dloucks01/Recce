@@ -18,11 +18,24 @@ import re
 from dataclasses import dataclass, field
 
 from . import playbook as _pb
+from . import exploitplan as _xp
 from .docx import Document
 from .exploitref import proven_exploit_ref
 from .models import Host, Vuln
 
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+# How the finding was established. "" = observed by an actual check (an NSE script
+# that reported VULNERABLE, a config/probe observation, or an ingested on-target
+# finding) and treated as REAL. Version-inferred guesses are "likely" or, at the
+# weakest, "potential". By default the write-ups cover real findings and drop the
+# "potential" version guesses; --include-potential brings them back.
+_CONF_RANK = {"confirmed": 3, "likely": 2, "": 2, "potential": 1}
+
+
+def _is_real(f: "Finding") -> bool:
+    """A finding backed by an actual observation/check, not just a version guess."""
+    return _CONF_RANK.get((f.confidence or "").lower(), 2) >= 2
 
 # First matching CWE -> (vulnerability type, CIA aspects) for auto-draft. Ordered
 # most-specific first; every CWE recce can emit is covered (see the coverage test).
@@ -499,6 +512,11 @@ def group_findings(hosts: list[Host]) -> list[Finding]:
             # Severity: keep the highest seen.
             if _SEV_ORDER.get(v.severity, 9) < _SEV_ORDER.get(f.severity, 9):
                 f.severity = v.severity
+            # Confidence: keep the strongest seen, so a title confirmed by any one
+            # check isn't dropped as a "potential" version guess.
+            if (_CONF_RANK.get((v.confidence or "").lower(), 2)
+                    > _CONF_RANK.get((f.confidence or "").lower(), 2)):
+                f.confidence = v.confidence
             for c in v.cwes:
                 if c not in f.cwes:
                     f.cwes.append(c)
@@ -526,6 +544,84 @@ def group_findings(hosts: list[Host]) -> list[Finding]:
     ordered = sorted(groups.values(),
                      key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.title.lower()))
     return ordered
+
+
+def _all_findings_with_ids(hosts: list[Host]) -> list[tuple[str, "Finding"]]:
+    """Every grouped finding with a STABLE F-id = its position in the full
+    severity-sorted list. Ids don't shift when severity/confidence filters are
+    applied, so `F-007` names the same finding in the bulk run, the combined
+    report, and a single-finding write-up."""
+    return [(f"F-{i:03d}", f) for i, f in enumerate(group_findings(hosts), 1)]
+
+
+def list_findings(hosts: list[Host], *, min_severity: str = "info") -> list[dict]:
+    """A pickable index of findings for the CLI (id, severity, title, affected,
+    confidence, whether it's real). Used to let the tester choose one to write up."""
+    cutoff = _SEV_ORDER.get(min_severity, 4)
+    out = []
+    for fid, f in _all_findings_with_ids(hosts):
+        if _SEV_ORDER.get(f.severity, 9) > cutoff:
+            continue
+        out.append({"id": fid, "severity": f.severity, "title": f.title,
+                    "affected": sorted({a[0] for a in f.affected}),
+                    "cves": f.cves, "confidence": f.confidence or "confirmed",
+                    "real": _is_real(f)})
+    return out
+
+
+def _match_findings(allf: list[tuple[str, "Finding"]],
+                    selector: str) -> list[tuple[str, "Finding"]]:
+    """Resolve a selector to finding(s): an exact id ('F-007', '7'), else a
+    case-insensitive substring of the title / CVE / affected IP / IP:port."""
+    q = (selector or "").strip()
+    if not q:
+        return []
+    m = re.fullmatch(r"[Ff]?-?0*(\d+)", q)
+    if m:
+        n = int(m.group(1))
+        return [(fid, f) for fid, f in allf if int(fid.split("-")[1]) == n]
+    ql = q.lower()
+    out = []
+    for fid, f in allf:
+        hay = " | ".join(
+            [f.title.lower()] + [c.lower() for c in f.cves]
+            + [f"{ip}:{p}" for ip, p, _h in f.affected]
+            + [ip for ip, _p, _h in f.affected]
+            + [(hn or "").lower() for _i, _p, hn in f.affected])
+        if ql in hay:
+            out.append((fid, f))
+    return out
+
+
+def _looted_for(f: "Finding", hosts_by_ip: dict) -> list[str]:
+    """Evidence already OBTAINED on the affected host(s): ingested on-target
+    (recce-enum) findings and high-value harvested accounts/credentials. This is
+    what a single-finding report pulls in to pre-fill 'what we already have'."""
+    lines: list[str] = []
+    for ip in sorted({a[0] for a in f.affected}):
+        h = hosts_by_ip.get(ip)
+        if not h:
+            continue
+        for lf in getattr(h, "local_findings", []) or []:
+            txt = (lf.get("text") or lf.get("vector") or "").strip()
+            if txt:
+                sect = lf.get("section", "")
+                lines.append(f"{ip}: on-target finding" + (f" [{sect}]" if sect else "")
+                             + f" - {txt}")
+        for a in getattr(h, "accounts", []) or []:
+            attrs = a.attrs or {}
+            tags = [t for t, on in (
+                ("kerberoastable", attrs.get("kerberoastable")),
+                ("AS-REP roastable", attrs.get("asrep_roastable")),
+                ("adminCount=1", attrs.get("admincount")),
+                ("password recovered", attrs.get("password") or attrs.get("cleartext")),
+                ("hash captured", attrs.get("hash") or attrs.get("ntlm")),
+            ) if on]
+            if not tags:
+                continue
+            label = "/".join(x for x in (a.domain, a.name) if x) or a.name or "account"
+            lines.append(f"{ip}: obtained account - {label} ({', '.join(tags)})")
+    return lines
 
 
 def _vuln_type(cwes: list[str]) -> tuple[str, str]:
@@ -609,6 +705,15 @@ def _walkthrough_steps(f: Finding) -> list[str]:
     # version), and never a speculative "go research one" - if nothing proven is
     # known, the tester's [TESTER: perform the exploitation] placeholder stands.
     if f.confidence != "potential":
+        # Remote exploit: if the finding maps to a published Metasploit module,
+        # cite the ready-to-run invocation (recce `exploitplan` writes it as a .rc).
+        msf = _xp._msf_for(f"{f.title} {' '.join(f.cves)} {' '.join(f.scripts)}")
+        if msf:
+            ip0, port0, _h0 = f.affected[0]
+            steps.append(
+                f"Exploit with the published module - {_xp._msf_cmd(msf, ip0, port0, '<LHOST>', 4444)} "
+                f"({msf['note']}). recce `exploitplan` writes this as a ready-to-run "
+                f".rc; run only within the rules of engagement.")
         if f.exploits:
             ids = ", ".join(f"EDB-{eid}" for eid, _t in f.exploits[:5] if eid)
             steps.append(f"Run the indexed public exploit(s) for this service: "
@@ -635,7 +740,8 @@ def _walkthrough_steps(f: Finding) -> list[str]:
 
 
 def _finding_body(doc: Document, f: Finding, fid: str,
-                  shots: dict | None = None) -> None:
+                  shots: dict | None = None,
+                  looted: list[str] | None = None) -> None:
     """Render one finding's sections into `doc` (shared by per-finding + combined)."""
     vtype, cia = _vuln_type(f.cwes)
     sev = f.severity.lower()
@@ -680,6 +786,17 @@ def _finding_body(doc: Document, f: Finding, fid: str,
         doc.para(f"{ip}:{port}" if port else ip, italic=True)
         doc.mono_block(out if len(out) < 1500 else out[:1500] + " ...")
 
+    # Evidence already obtained on the affected host(s) - looted on-target findings
+    # and harvested credentials/accounts. Only rendered when there is such data
+    # (single-finding reports pass it in); pre-fills "what we already have".
+    if looted:
+        doc.heading("Obtained Access / Looted Evidence", 2)
+        doc.placeholder("Credentials, shells, or on-target findings already "
+                        "obtained on the affected host(s). Cite the items relevant "
+                        "to this finding and remove the rest.")
+        for line in looted[:25]:
+            doc.para(line)
+
     doc.heading("Technical Walkthrough with screenshots", 2)
     # recce drafts the mechanical steps; the tester adds the exploitation result.
     n = 0
@@ -697,30 +814,38 @@ def _finding_body(doc: Document, f: Finding, fid: str,
 
 
 def _write_one(f: Finding, fid: str, path: str,
-               shots: dict | None = None) -> None:
+               shots: dict | None = None,
+               looted: list[str] | None = None) -> None:
     doc = Document()
     doc.title(f"{fid}: {f.title}")
-    _finding_body(doc, f, fid, shots)
+    _finding_body(doc, f, fid, shots, looted)
     doc.save(path)
 
 
 def build_writeups(hosts: list[Host], out_dir: str, *, min_severity: str = "low",
+                   include_potential: bool = False,
                    screenshots: dict | None = None,
                    overwrite: bool = False) -> dict:
     """Generate one .docx per finding into out_dir. Returns a summary dict.
 
-    Reports cover findings only: informational observations (info severity - e.g.
-    a disclosed server banner or TLS-cert detail) are excluded by default. Pass
-    min_severity='info' to include them. Never overwrites an existing write-up
-    unless overwrite=True, so tester edits survive a regenerate.
-    """
+    Covers REAL findings by default - those backed by an actual check/observation.
+    Version-inferred "potential" guesses are skipped unless include_potential=True.
+    Informational (info severity) observations are excluded unless min_severity is
+    lowered to 'info'. F-ids are stable (a finding's position in the full
+    severity-sorted list), so they match the combined report and single write-ups.
+    Never overwrites an existing write-up unless overwrite=True, so tester edits
+    survive a regenerate."""
     os.makedirs(out_dir, exist_ok=True)
     cutoff = _SEV_ORDER.get(min_severity, 4)
-    findings = [f for f in group_findings(hosts)
-                if _SEV_ORDER.get(f.severity, 9) <= cutoff]
-    written, skipped = [], []
-    for i, f in enumerate(findings, 1):
-        fid = f"F-{i:03d}"
+    written, skipped, dropped = [], [], 0
+    total = 0
+    for fid, f in _all_findings_with_ids(hosts):
+        if _SEV_ORDER.get(f.severity, 9) > cutoff:
+            continue
+        if not include_potential and not _is_real(f):
+            dropped += 1
+            continue
+        total += 1
         fname = f"{fid}_{f.severity}_{_slug(f.title)}.docx"
         path = os.path.join(out_dir, fname)
         if os.path.exists(path) and not overwrite:
@@ -728,19 +853,49 @@ def build_writeups(hosts: list[Host], out_dir: str, *, min_severity: str = "low"
             continue
         _write_one(f, fid, path, screenshots)
         written.append(fname)
-    return {"written": written, "skipped": skipped, "total": len(findings)}
+    return {"written": written, "skipped": skipped, "total": total,
+            "dropped_potential": dropped}
+
+
+def build_one_writeup(hosts: list[Host], out_dir: str, selector: str, *,
+                      screenshots: dict | None = None,
+                      overwrite: bool = False) -> dict:
+    """Write up a SINGLE finding chosen by `selector` (an F-id, CVE, IP, IP:port,
+    or a title substring), pre-filled with everything recce already has for the
+    affected host(s) - including looted on-target findings and obtained accounts/
+    credentials. Returns {matched, written, ...}; if the selector is ambiguous or
+    unmatched, `matched` lists the candidates instead of writing anything."""
+    os.makedirs(out_dir, exist_ok=True)
+    matches = _match_findings(_all_findings_with_ids(hosts), selector)
+    cand = [{"id": fid, "severity": f.severity, "title": f.title,
+             "affected": sorted({a[0] for a in f.affected})} for fid, f in matches]
+    if len(matches) != 1:
+        return {"matched": cand, "written": None,
+                "reason": "none" if not matches else "ambiguous"}
+    fid, f = matches[0]
+    hosts_by_ip = {h.ip: h for h in hosts}
+    looted = _looted_for(f, hosts_by_ip)
+    fname = f"{fid}_{f.severity}_{_slug(f.title)}.docx"
+    path = os.path.join(out_dir, fname)
+    if os.path.exists(path) and not overwrite:
+        return {"matched": cand, "written": None, "reason": "exists", "path": path}
+    _write_one(f, fid, path, screenshots, looted)
+    return {"matched": cand, "written": path, "looted": len(looted),
+            "real": _is_real(f)}
 
 
 def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
-                   min_severity: str = "low",
+                   min_severity: str = "low", include_potential: bool = False,
                    screenshots: dict | None = None) -> dict:
     """One document: title, severity summary, findings-summary table, then every
     finding as a section. Regenerated each run (it's a rollup, not hand-edited).
-    Findings only - informational (info) items are excluded unless min_severity
-    is lowered to 'info'."""
+    Real findings only by default (include_potential brings back version guesses);
+    informational (info) items excluded unless min_severity is lowered to 'info'."""
     cutoff = _SEV_ORDER.get(min_severity, 4)
-    findings = [f for f in group_findings(hosts)
-                if _SEV_ORDER.get(f.severity, 9) <= cutoff]
+    findings_with_ids = [(fid, f) for fid, f in _all_findings_with_ids(hosts)
+                         if _SEV_ORDER.get(f.severity, 9) <= cutoff
+                         and (include_potential or _is_real(f))]
+    findings = [f for _fid, f in findings_with_ids]
     doc = Document()
     doc.title(title or "Penetration Test - Findings Report")
     doc.para(f"{len(findings)} finding(s) across "
@@ -760,10 +915,7 @@ def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
     # Findings summary table.
     doc.heading("Findings", 1)
     rows = []
-    fids = []
-    for i, f in enumerate(findings, 1):
-        fid = f"F-{i:03d}"
-        fids.append(fid)
+    for fid, f in findings_with_ids:
         hosts_txt = ", ".join(sorted({a[0] for a in f.affected}))
         rows.append([fid, f.severity.upper(), f.title,
                      ", ".join(f.cwes) or "-",
@@ -772,7 +924,7 @@ def build_combined(hosts: list[Host], out_path: str, *, title: str = "",
               widths=[900, 1100, 3860, 1500, 2000])
 
     # Each finding as a section.
-    for fid, f in zip(fids, findings):
+    for fid, f in findings_with_ids:
         doc.page_break()
         doc.heading(f"{fid}: {f.title}", 1)
         _finding_body(doc, f, fid, screenshots)

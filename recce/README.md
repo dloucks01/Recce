@@ -84,6 +84,37 @@ that — `db`, `privesc`, `credenum`, `ingest`, `writeups` — is an **optional
 deeper phase** you run on whatever subset you like, whenever you like. Each phase
 is separate and re-runnable (re-running never duplicates anything).
 
+**Already have an nmap scan?** Skip `enum` and `import` it — no scanning needed:
+
+```bash
+recce import scan.xml -o eng                 # nmap -oX XML (richest)
+recce import scan.gnmap -o eng               # nmap -oG grepable
+recce import scan.nmap -o eng                # nmap -oN normal text
+recce import a.xml b.gnmap c.nmap -o eng     # multiple files at once (any mix)
+recce import scans/ -o eng                   # a whole directory (or a glob)
+```
+
+**All three nmap output formats work** — XML (`-oX`), grepable (`-oG`), and normal
+(`-oN`) — auto-detected by extension or content, so you can point it at whatever
+you have. Tools that emit nmap-compatible XML (**masscan** `-oX`, rustscan, …)
+import too. A `-oA` set (`base.xml`/`.gnmap`/`.nmap`) is imported once, from the
+richest file. The normal (`-oN`) and grepable formats carry hosts + open ports +
+service/version; XML additionally carries NSE scripts and OS detection.
+
+`import` folds the hosts into the workbook, runs the same offline enrichment as
+`enum` (version→CVE/CWE database, AD role/DC identification, SMB signing), ticks
+**Enumerated** (and **Vuln-scan** where the scan ran NSE scripts), and preserves
+any ticks/notes already in the sheet. XML (`-oX`) carries the most (services, NSE
+scripts, OS); grepable (`-oG`) gives hosts + open ports + service/version. From
+there, every other phase (`vulns`, `db`, `credenum`, `writeups`, …) works exactly
+as if recce had done the scan itself.
+
+**Import as many scans as you like** — a single IP, a range, one subnet, or many
+— into the same engagement. New hosts are **appended** and grouped by subnet; a
+host seen in more than one scan is **merged, never duplicated** (its open ports
+are unioned, richer service/version wins). So you can drip-feed scans in as they
+finish, or combine per-subnet scans into one workbook.
+
 ```bash
 # FIRST, on any new box: verify it can run the tool (env + tools + a real
 # localhost self-scan). Do this before every engagement.
@@ -356,6 +387,45 @@ Only confirmed findings get an entry — advisories / unconfirmed version matche
 never get a "run this" line, matching the proven-exploit gating. The same guidance
 appears in each finding's Word write-up as an *Escalate with existing tooling* step.
 
+### Exploitation plan (`exploitplan`)
+
+`recce exploitplan -o eng --lhost <IP>` takes that a step further: for each
+**confirmed** finding it writes **ready-to-run artifacts** into `eng/exploit-plan/`,
+with the parameters recce discovered already filled in:
+
+- a **Metasploit resource script** (`.rc`) for every finding that maps to a
+  published module — `ms17_010_eternalblue`, `vsftpd_234_backdoor`,
+  `is_known_pipename` (SambaCry), `tomcat_ghostcat`, … — with `RHOSTS`, `RPORT`,
+  `PAYLOAD`, `LHOST`/`LPORT` set. Run it with `msfconsole -q -r <file>`.
+- **parameterized invocations of existing tools** — `impacket-GetNPUsers` /
+  `GetUserSPNs` (with the domain + DC IP filled in), `ntlmrelayx` for an
+  unsigned-SMB relay target, anonymous-FTP mirror, unauth-Redis write, … —
+- a per-host **`<ip>.sh`** that chains the remote steps and lists the post-shell
+  priv-esc steps (from the playbook) for reference.
+
+It **selects and configures published exploits** against the specific hosts recce
+found — **it authors no exploit code**; the exploit logic lives in the referenced
+tool/module. It's gated to confirmed findings, and **safe by default**: the
+Metasploit *launch* line in each `.rc` is commented out (only a non-intrusive
+`check` runs) until you pass `--run`. Everything is to be used strictly within
+your rules of engagement.
+
+The same actions are surfaced in the workbook — the **Exploitation** sheet lists
+every action (remote msf / remote tool / post-shell, each with the command,
+prerequisite, and validation) — and in the Word write-ups, where a finding that
+maps to a module gets a ready-to-run *Exploit with the published module* step.
+
+**AV/EDR awareness (detection, not evasion).** When you `ingest` a `recce-enum.ps1`
+run, recce records the host's AV/EDR product and defensive posture (Defender
+real-time/tamper, EDR agents, Sysmon, LSASS `RunAsPPL`, AppLocker, Credential
+Guard) and shows it where it matters: an **AV / EDR** column on the Checklist, a
+**Defenses (host)** column on the Exploitation sheet next to each GodPotato/
+PrintSpoofer/msf action, a count on the Overview, and a banner in the exploit-plan
+scripts. The guidance is the legitimate one — coordinate a scoped testing
+exclusion with the blue team (your tooling being caught is a finding *for the
+defender*) or validate in a lab. recce flags what's watching a host; **it does not
+evade AV/EDR** (the bundled scripts likewise do no AMSI/Defender tampering).
+
 ## Credentialed enumeration (`credenum`)
 
 Once you have valid creds, `credenum` runs the *authenticated* checks nmap can't
@@ -397,6 +467,20 @@ tools are installed.
 matching a walkthrough template. Findings are grouped by title across hosts, so
 one issue spanning many systems is a single write-up listing every affected
 `IP:port`.
+
+By default it writes up **real findings only** — those confirmed by an actual
+check or observation (an NSE script that reported `VULNERABLE`, a config/probe
+observation, an ingested on-target finding). Low-confidence, version-inferred
+**"potential"** guesses are skipped (with a one-line count); add
+`--include-potential` to write them up too.
+
+**One finding at a time.** `recce writeup <selector>` writes up a **single**
+finding, **pre-filled with what you've already looted or obtained** on the
+affected host(s) — ingested on-target findings and harvested accounts/creds land
+in an *Obtained Access / Looted Evidence* section. Pick it by F-id (`F-007`),
+CVE, IP, `IP:port`, or a word from the title; run `recce writeup` with no
+selector to list every finding. F-ids are stable across the bulk run, the
+combined report, and single write-ups.
 
 recce **auto-fills** everything it knows — Finding ID, title, affected systems,
 severity, CWE, CVE, tools/techniques used, a drafted vulnerability type and
@@ -584,6 +668,7 @@ are color-flagged).
 | `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
+| `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |
 | `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) |
 | `recce.log`        | Scan errors / timeouts / incomplete hosts (also on the Overview tab) |
 | `results.sqlite`   | Normalized datastore (resume + re-report) |
@@ -621,14 +706,20 @@ Every command takes targets as a single IP, several IPs, a range
 |---|---|---|
 | `doctor` | Verify the box (env + tools + real localhost self-scan) | `--no-self-scan` |
 | `demo` | Build reports from a bundled sample scan (no network) | — |
+| `import <files>` | Import **existing** nmap scans (`-oX`/`-oG`/`-oN`, multiple files/dirs/globs, masscan XML) → workbook, no scanning | `--enum-only`, `--searchsploit` |
 | `enum <targets>` | Discover hosts, port sweep, service/OS/AD enum → sheet | `--fast` (masscan), `--all-ports`, `--top-ports N`, `--no-discovery`, `--no-ad`, `--no-os`, `--version-all`, `--version-intensity 0-9`, `--min-rate`, `--exclude`, `--resume` |
 | `vulns [targets]` | Vuln-scan open ports (safe detection + offline CVE/CWE DB + probes) | `--fast` (top-signal + progress/ETA), `--aggressive` (full NSE), `--only SVC`, `--unscanned`, `--offline`, `--no-searchsploit`, `--no-probes`, `--udp-top N` |
 | `scan <targets>` | `enum` then `vulns` in one shot | all of enum + vulns (`--fast` = fast sweep *and* fast vulns) |
 | `db [targets]` | Database enumeration + vuln scan | `--aggressive` (brute/xp_cmdshell/hash), `--no-searchsploit` |
 | `privesc [targets]` | Per-host priv-esc playbook | `--scan` (remote NSE checks), `--aggressive` |
 | `credenum [targets]` | Authenticated SMB/AD/SSH enum | `-u/-p/-d`, `--admin-user/--admin-pass/--admin-domain`, `--ssh-user/--ssh-pass/--ssh-key`, `--ldap-enum`, `--ldap-anon`, `--ldap-ssl`, `--dc-ip`, `--aggressive` |
-| `ingest <loot>` | Fold on-target `recce-enum.sh`/`.ps1` findings into Priv-Esc | `--host IP` |
-| `writeups [targets]` | One Word write-up per finding + combined report | `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
+| `ingest <loot>` | Fold on-target `recce-enum.sh`/`.ps1` findings into Priv-Esc, **or** `recce-service.sh` output into Vulnerabilities (auto-detected) | `--host IP` |
+| `writeups [targets]` | One Word write-up per **real** finding + combined report | `--include-potential`, `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
+| `writeup <selector>` | **One** finding's write-up, pre-filled with looted/obtained evidence (F-id / CVE / IP / title; omit to list) | `--no-screenshots`, `--overwrite` |
+| `services [targets]` | Print the per-service enum command (`recce/scripts/`) for every open port found | `-a` (append the intrusive flag) |
+| `exploitplan [targets]` | Ready-to-run artifacts (msf `.rc` + tool commands) for **confirmed** findings, params pre-filled | `--lhost`, `--lport`, `--run` |
+| `attackpath [targets]` | Chain confirmed findings into a staged attack path (foothold → priv-esc → creds → lateral → domain) | — |
+| `creds [targets]` | Stack captured credentials + build a netexec/impacket spray plan | `--add`, `--user/--pass/--hash/--domain`, `--plan` |
 | `report` | Rebuild the workbook/reports from the datastore | — |
 | `status` | Print live coverage + suggested next command | — |
 | `review` | Mark hosts/services/items reviewed from the CLI | `--host`, `--service IP:PORT`, `--key`, `--cascade`, `--note`, `--undo` |
@@ -688,6 +779,11 @@ recce/               the package (python -m recce)
   credenum.py        credentialed enum via netexec / impacket / ssh (tool-gated)
   ingest.py          on-target loot -> Priv-Esc rows + promoted Vulnerabilities
   playbook.py        confirmed finding -> exact existing tool + command + validate
+  exploitplan.py     confirmed finding -> runnable msf .rc / tool cmd (existing tools)
+  attackpath.py      confirmed findings -> staged attack path (the "so what")
+  credentials.py     stack captured creds -> netexec/impacket spray plan
+  report_html.py     self-contained shareable HTML report (stdlib, no assets)
+  serviceenum.py     open port -> per-service enum command (bridge to scripts/)
   screenshot.py      optional headless-browser web screenshots (tool-gated)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)
   docx.py            standard-library .docx writer (no python-docx) + image embed

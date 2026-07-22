@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import tempfile
 import time
@@ -105,6 +106,7 @@ def _open_paths(out_dir: str) -> dict[str, str]:
         "xlsx": os.path.join(out_dir, "enumeration.xlsx"),
         "md": os.path.join(out_dir, "enumeration.md"),
         "csv": os.path.join(out_dir, "services.csv"),
+        "html": os.path.join(out_dir, "report.html"),
         "log": os.path.join(out_dir, "recce.log"),
     }
 
@@ -225,13 +227,18 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     domains = _resolve_domains(store, hosts)
     update_workbook(paths["xlsx"], hosts, meta={"subtitle": title},
                     domains=domains, tracking=tracking, scope=store.get_scope(),
-                    statuses=store.get_statuses(), issues=store.get_issues())
+                    statuses=store.get_statuses(), issues=store.get_issues(),
+                    credentials=store.all_credentials())
     build_markdown(hosts, paths["md"], title=title, domains=domains)
     build_csv(hosts, paths["csv"])
+    from .report_html import build_html
+    build_html(hosts, paths["html"], title=title, domains=domains,
+               credentials=store.all_credentials(), generated=_now())
     if not quiet:
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
-              f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}")
+              f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}"
+              f"\n    {paths['html']}")
         counts = store.count_issues()
         if counts.get("total"):
             print(f"[!] {counts['total']} scan issue(s) logged "
@@ -267,6 +274,7 @@ def _apply_profile_overrides(profile, args) -> None:
     if g("version_intensity") is not None:
         profile.version_intensity = args.version_intensity
     profile.ping_discovery = not g("no_discovery", False)
+    profile.assume_up = not profile.ping_discovery   # -Pn: fail-fast on dead IPs
 
 
 def _creds_of(args) -> dict | None:
@@ -402,10 +410,32 @@ def _discover(args, profile, store, paths):
                 _record_issues(store, paths, "(discovery)", [_mkissue(iss, "discovery")])
             live_ips = [h.ip for h in np.parse_nmap_xml(disc_xml)]
             os.unlink(targets_file)
-            print(f"[+] {len(live_ips)} live host(s) found.")
+            print(f"[+] {len(live_ips)} of {len(hosts)} target(s) responded to discovery.")
+            if not live_ips:
+                # Zero responses almost always means the network blocks ping/probes,
+                # not that nothing is there. Don't hand back an empty engagement -
+                # fall back to -Pn (scan every target as up) automatically.
+                print("\n" + "!" * 64)
+                print("[!] 0 hosts answered host discovery - the network is likely "
+                      "blocking ping/probes.")
+                print("    Falling back to -Pn (scanning all targets as up) so you "
+                      "don't miss firewalled hosts.")
+                print(f"    Per-host cap {profile.host_timeout}m + fail-fast keep it "
+                      "moving; for a large scope, --fast (masscan) sweeps in seconds.")
+                print("!" * 64)
+                profile.assume_up = True          # dead IPs get scanned -> fail fast
+                live_ips = hosts
+            elif len(live_ips) < len(hosts):
+                missed = len(hosts) - len(live_ips)
+                print(f"    ({missed} didn't answer. If you expect more live hosts, "
+                      "re-run with -Pn - firewalled hosts often block ping.)")
         else:
             live_ips = hosts
-            print("[*] Discovery skipped (treating all targets as up).")
+            print(f"[*] -Pn: skipping discovery, scanning all {len(hosts)} target(s) "
+                  "as up.")
+            print(f"    Each host is capped at {profile.host_timeout}m (--host-timeout) "
+                  "and dead IPs are abandoned fast; --fast (masscan) is quickest on a "
+                  "big scope.")
 
     if getattr(args, "resume", False):
         done = store.scanned_ips()
@@ -884,7 +914,11 @@ def cmd_enum(args: argparse.Namespace) -> int:
     finally:
         _final_report(store, paths, args.title)
         store.close()
-    print("\n[+] Enumeration done. Review the sheet, then run `vulns` on open ports.")
+    print(f"\n[+] Enumeration done -> {paths['xlsx']}")
+    print(f"    Next:  recce vulns -o {args.output_dir}     "
+          "# vuln-scan the open ports it found")
+    print(f"    or:    recce services -o {args.output_dir}  "
+          "# the exact per-service enum command for each open port")
     return 0
 
 
@@ -906,7 +940,9 @@ def cmd_vulns(args: argparse.Namespace) -> int:
     finally:
         _final_report(store, paths, title)
         store.close()
-    print("\n[+] Vuln scan done.")
+    print("\n[+] Vuln scan done -> open the Vulnerabilities / Exploitation tabs.")
+    print(f"    Next:  recce status -o {args.output_dir}      # what's left, and the "
+          "suggested next step")
     return 0
 
 
@@ -1037,6 +1073,7 @@ def cmd_writeups(args: argparse.Namespace) -> int:
                     shots[h.ip] = grabbed
                     print(f"    [+] {h.ip}: {len(grabbed)} screenshot(s)")
     summary = build_writeups(hosts, out_dir, min_severity=args.min_severity,
+                             include_potential=args.include_potential,
                              screenshots=shots, overwrite=args.overwrite)
     title = store.get_meta("engagement") or args.title
     combined_path = None
@@ -1044,16 +1081,323 @@ def cmd_writeups(args: argparse.Namespace) -> int:
         from .report_docx import build_combined
         combined_path = os.path.join(out_dir, "findings_report.docx")
         build_combined(hosts, combined_path, title=f"{title} - Findings Report",
-                       min_severity=args.min_severity, screenshots=shots)
+                       min_severity=args.min_severity,
+                       include_potential=args.include_potential, screenshots=shots)
     store.close()
+    scope = "all" if args.include_potential else "real"
     print(f"\n[+] Finding write-ups: {len(summary['written'])} generated, "
           f"{len(summary['skipped'])} kept (already edited), "
-          f"{summary['total']} finding(s) total.")
+          f"{summary['total']} {scope} finding(s) total.")
     print(f"    -> {out_dir}/  (open each .docx in Word to finish it)")
     if combined_path:
         print(f"[+] Combined report (summary table + all findings): {combined_path}")
+    if summary.get("dropped_potential"):
+        print(f"    ({summary['dropped_potential']} low-confidence 'potential' "
+              f"finding(s) skipped; add --include-potential to write them up too)")
     if summary["skipped"]:
         print("    (use --overwrite to regenerate the kept ones - loses edits)")
+    return 0
+
+
+def cmd_writeup(args: argparse.Namespace) -> int:
+    """Write up a SINGLE finding, pre-filled with looted/obtained evidence. With
+    no selector, list the findings so the tester can pick one."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = store.all_hosts()
+    from .report_docx import list_findings, build_one_writeup
+
+    if not args.selector:
+        findings = list_findings(hosts, min_severity="info")
+        if not findings:
+            print("[!] No findings yet. Run `vulns` (or `import`/`ingest`) first.")
+            store.close()
+            return 0
+        print(f"Findings ({len(findings)}) - pick one:  recce writeup <id|CVE|IP|word> "
+              f"-o {args.output_dir}\n")
+        for row in findings:
+            tag = "" if row["real"] else "  (potential)"
+            aff = ", ".join(row["affected"][:4]) + ("..." if len(row["affected"]) > 4 else "")
+            cve = f"  {row['cves'][0]}" if row["cves"] else ""
+            print(f"  {row['id']}  {row['severity'].upper():<8} {row['title']}{cve}")
+            print(f"          affected: {aff}{tag}")
+        store.close()
+        return 0
+
+    out_dir = os.path.join(args.output_dir, "writeups")
+    shots: dict = {}
+    if not args.no_screenshots:
+        from . import screenshot
+        if screenshot.available():
+            res = _match_one_host(hosts, args.selector)
+            for h in res:
+                grabbed = screenshot.capture_for_host(h)
+                if grabbed:
+                    shots[h.ip] = grabbed
+    result = build_one_writeup(hosts, out_dir, args.selector,
+                               screenshots=shots, overwrite=args.overwrite)
+    store.close()
+    if result["written"]:
+        m = result["matched"][0]
+        print(f"[+] Wrote {m['id']} ({m['severity'].upper()}): {m['title']}")
+        print(f"    -> {result['written']}")
+        if result.get("looted"):
+            print(f"    pre-filled with {result['looted']} looted/obtained item(s) "
+                  f"for the affected host(s).")
+        if not result.get("real", True):
+            print("    note: this is a low-confidence 'potential' (version-inferred) finding.")
+        print("    Open it in Word to finish the narrative, impact, and screenshots.")
+        return 0
+    # No single match: help the tester narrow it.
+    if result["reason"] == "exists":
+        print(f"[!] Write-up already exists: {result['path']}")
+        print("    Use --overwrite to regenerate it (loses any edits).")
+        return 0
+    cand = result["matched"]
+    if not cand:
+        print(f"[x] No finding matches '{args.selector}'. "
+              f"Run `recce writeup -o {args.output_dir}` to list them.")
+        return 1
+    print(f"[!] '{args.selector}' matches {len(cand)} findings - be more specific:")
+    for m in cand:
+        print(f"    {m['id']}  {m['severity'].upper():<8} {m['title']}  "
+              f"[{', '.join(m['affected'][:3])}]")
+    return 1
+
+
+def _match_one_host(hosts, selector):
+    """Best-effort: the host(s) an IP/IP:port selector points at (for screenshots)."""
+    sel = (selector or "").split(":")[0].strip()
+    return [h for h in hosts if h.ip == sel] if sel else []
+
+
+def cmd_services(args: argparse.Namespace) -> int:
+    """Print the exact per-service enumeration command to run for every open port
+    recce found - the bridge from the datastore to recce/scripts/. Answers 'what
+    do I type next?' for each service."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    hosts = _selected_hosts(store.all_hosts(), args)
+    store.close()
+    from . import serviceenum
+
+    print("Per-service enumeration - run these against the open ports recce found.")
+    print("Safe by default (banners, versions, anon/null checks, TLS, NSE 'safe');")
+    print("add -a to a command for the intrusive checks (brute / nikto / dir-bust).\n")
+    total = 0
+    unmapped: list[tuple[str, int, str]] = []
+    for h in hosts:
+        cmds = serviceenum.commands_for_host(h)
+        um = serviceenum.unmapped_ports(h)
+        if not cmds and not um:
+            continue
+        label = h.ip + (f"  ({h.hostname})" if h.hostname else "")
+        roles = f"   [{', '.join(h.roles)}]" if h.roles else ""
+        print(f"{label}{roles}")
+        for port, svc, _script, cmd in cmds:
+            print(f"  {port:<6}{svc:<14}{cmd}" + ("  -a" if args.aggressive else ""))
+            total += 1
+        for port, svc in um:
+            unmapped.append((h.ip, port, svc))
+        print()
+    if total == 0:
+        print("No enumerable open ports yet. Run `enum` (or `import`) first.")
+        return 0
+    print(f"{total} service command(s) across {len({h.ip for h in hosts})} host(s).")
+    raw_glob = os.path.join(args.output_dir, "raw", "*.xml")
+    print("Or sweep every open port in one go from recce's own scans:")
+    print(f"  {serviceenum.DRIVER} from-nmap {raw_glob}"
+          + ("  -a" if args.aggressive else ""))
+    if unmapped:
+        print(f"\n{len(unmapped)} open port(s) have no dedicated script - "
+              f"enumerate manually:")
+        for ip, port, svc in unmapped[:15]:
+            print(f"  {ip}:{port} ({svc or '?'})  ->  nmap -sV --script vuln -p {port} {ip}")
+        if len(unmapped) > 15:
+            print(f"  ... and {len(unmapped) - 15} more")
+    return 0
+
+
+def cmd_exploitplan(args: argparse.Namespace) -> int:
+    """Generate a per-finding exploitation PLAN: ready-to-run artifacts that drive
+    EXISTING published tools/modules with the discovered parameters filled in.
+    Confirmed findings only; safe by default (msf launch lines commented)."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    store.close()
+    from . import exploitplan
+
+    summary = exploitplan.build_plan(hosts, args.output_dir, lhost=args.lhost,
+                                     lport=args.lport, run=args.run)
+    if not summary["plans"]:
+        print("[!] No confirmed findings map to a published exploit/tool yet.")
+        print("    Plans cover CONFIRMED findings only (not 'potential' version "
+              "guesses). Run `vulns` for deeper detection, or `ingest` on-target loot.")
+        return 0
+    print(f"[+] Exploitation plan -> {summary['dir']}/")
+    print(f"    {summary['host_scripts']} per-host plan script(s), "
+          f"{summary['rc_files']} Metasploit resource (.rc) file(s), "
+          f"{summary['actions']} action(s) across {len(summary['plans'])} host(s).")
+    print("    Each artifact configures an EXISTING published tool/module with the")
+    print("    target's own parameters. recce authors no exploit code.")
+    if args.lhost == "<LHOST>":
+        print("    ! Set your callback with --lhost <IP> (payloads currently show "
+              "<LHOST>).")
+    if args.run:
+        print("    ! --run: Metasploit launch lines are ARMED. Rules of engagement only.")
+    else:
+        print("    Safe mode: .rc files run `check` only; edit them (or use --run) "
+              "to launch.")
+    print(f"    Review:  cat {summary['dir']}/README.txt")
+    return 0
+
+
+def cmd_attackpath(args: argparse.Namespace) -> int:
+    """Chain the confirmed findings into a prioritised attack path (foothold ->
+    priv-esc -> creds -> lateral -> domain), grounded in what recce found."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`vulns`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    store.close()
+    from . import attackpath as ap
+
+    steps = ap.build(hosts)
+    for line in ap.narrative(hosts, steps):
+        print(line)
+    if not steps:
+        return 0
+    print()
+    cur = None
+    for s in steps:
+        if s["stage"] != cur:
+            cur = s["stage"]
+            print(f"== {cur} ==")
+        tgt = s["ip"] + (f" ({s['hostname']})" if s["hostname"] else "")
+        print(f"  [{tgt}] {s['title']}")
+        print(f"       {s['tool']}:  {s['cmd']}")
+    print("\n  Full table on the Attack Path sheet; runnable artifacts via "
+          "`recce exploitplan`.")
+    return 0
+
+
+def _parse_cred_spec(spec: str):
+    """Parse 'user:secret', 'DOMAIN\\user:secret', or 'domain/user:secret'."""
+    from .models import Credential
+    idpart, secret = (spec.split(":", 1) + [""])[:2] if ":" in spec else (spec, "")
+    domain = ""
+    if "\\" in idpart:
+        domain, user = idpart.split("\\", 1)
+    elif "/" in idpart:
+        domain, user = idpart.split("/", 1)
+    else:
+        user = idpart
+    kind = "nthash" if re.fullmatch(r"[0-9a-fA-F]{32}", secret or "") else \
+        ("password" if secret else "blank")
+    return Credential(username=user, secret=secret, kind=kind, domain=domain,
+                      source="manual")
+
+
+def cmd_creds(args: argparse.Namespace) -> int:
+    """Stack credentials (auto-harvested + manually captured) and build a spray
+    plan across the discovered SMB/WinRM/LDAP/MSSQL/RDP/SSH surface."""
+    from . import credentials as cr
+    from .models import Credential
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+
+    # ADD captured credentials.
+    added = False
+    to_add = []
+    for spec in (args.add or []):
+        to_add.append(_parse_cred_spec(spec))
+    if args.user:
+        kind = "nthash" if args.hash else ("password" if getattr(args, "password", None) else "blank")
+        to_add.append(Credential(username=args.user, secret=(args.hash or args.password or ""),
+                                 kind=kind, domain=args.domain or "", source="manual"))
+    if to_add:
+        n = sum(1 for c in to_add if store.add_credential(c))
+        print(f"[+] Added {n} credential(s)"
+              + (f" ({len(to_add) - n} already stacked)" if n < len(to_add) else "") + ".")
+        added = True
+
+    hosts = _selected_hosts(store.all_hosts(), args)
+    stored = store.all_credentials()
+    stacked = cr.stack(hosts, stored)
+
+    # PLAN: write files + print the spray commands.
+    if args.plan:
+        if not stacked:
+            print("[!] No credentials to spray yet. Add one:  "
+                  "recce creds --add 'CORP\\alice:Passw0rd!'")
+            store.close()
+            return 0
+        summary = cr.build_spray(stacked, hosts, args.output_dir)
+        print(f"[+] Spray plan for {len(stacked)} credential(s) -> files in "
+              f"{summary['dir']}/")
+        if summary["files"]:
+            print("    " + ", ".join(sorted(summary["files"])))
+        print()
+        for line in summary["commands"] or ["  (no sprayable services in scope yet)"]:
+            print("  " + line if not line.startswith("#") else "\n  " + line)
+        print("\n  ! Check the account-lockout policy first. '--continue-on-success' "
+              "keeps going after a hit;")
+        print("    the paired (user<->pass) list avoids a cartesian brute. Rules of "
+              "engagement only.")
+        store.close()
+        return 0
+
+    # ADD then regenerate the workbook so the Credentials sheet reflects it.
+    if added:
+        title = store.get_meta("engagement") or getattr(args, "title", "") or "Recce Engagement"
+        _generate_reports(store, paths, title, quiet=True)
+
+    # LIST (default).
+    if not stacked:
+        print("No credentials stacked yet.")
+        print("  Capture then add:  recce creds --add 'CORP\\alice:Passw0rd!'  "
+              "(or --user alice --hash <nt> --domain CORP)")
+        print("  Then:              recce creds --plan   # netexec/impacket spray plan")
+        store.close()
+        return 0
+    print(f"Stacked credentials ({len(stacked)}):")
+    for c in stacked:
+        sec = c.secret or "(blank)"
+        if c.kind == "nthash" and len(sec) > 16:
+            sec = sec[:13] + "..."
+        origin = f" @{c.origin_ip}" if c.origin_ip else ""
+        print(f"  {c.label:<26} {c.kind:<8} {sec:<20} [{c.source}{origin}]")
+    print("\n  recce creds --plan   # build the spray plan (writes users/passwords/"
+          "hashes + commands)")
+    store.close()
     return 0
 
 
@@ -1258,6 +1602,52 @@ def _tag_host_os(host, parsed) -> None:
         host.os_family = parsed["os"].capitalize()
 
 
+def _ingest_service_output(svc: dict, paths: dict, args) -> int:
+    """Fold recce-service.sh per-service findings into the datastore as confirmed
+    service-enum Vulns on the matching host:port (creating a host entry if needed)."""
+    from . import ingest
+    from .models import Host, Port
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    vulns = ingest.service_findings_to_vulns(svc)
+    by_ip: dict[str, list] = {}
+    for v in vulns:
+        by_ip.setdefault(v.ip, []).append(v)
+    hosts_by_ip = {h.ip: h for h in store.all_hosts()}
+    added_total = created = touched = 0
+    for ip, vs in by_ip.items():
+        h = hosts_by_ip.get(ip)
+        if h is None:
+            h = Host(ip=ip, subnet=".".join(ip.split(".")[:3]) + ".0/24",
+                     enumerated=True)
+            for pnum in sorted({v.port for v in vs if v.port}):
+                h.ports.append(Port(portid=pnum, protocol="tcp", state="open",
+                                    vuln_scanned=True))
+            created += 1
+        have = {(x.title, x.port) for x in h.vulns}
+        added = [v for v in vs if (v.title, v.port) not in have]
+        if not added:
+            continue
+        h.vulns.extend(added)
+        aff = {v.port for v in added}
+        for p in h.ports:
+            if p.portid in aff:
+                p.vuln_scanned = True
+        store.upsert_host(h)
+        added_total += len(added)
+        touched += 1
+    print(f"[+] Ingested {added_total} service finding(s) across {touched} host(s)"
+          + (f" ({created} new host entry/entries)" if created else "") + ".")
+    print("    Source: recce-service.sh output -> Vulnerabilities sheet "
+          "(source 'service-enum'; advisory 'test X' lines kept as 'potential').")
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    return 0
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     from . import ingest
     paths = _open_paths(args.output_dir)
@@ -1272,6 +1662,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         text = fh.read()
     parsed = ingest.parse_loot(text)
     if not parsed["is_recce"]:
+        # Maybe it's per-service enumeration output (recce-service.sh) instead.
+        svc = ingest.parse_service_output(text)
+        if svc["is_service"] and svc["findings"]:
+            return _ingest_service_output(svc, paths, args)
         print("[!] This doesn't look like recce-enum.sh/.ps1 output (no "
               "'recce-enum host=...' banner). Parsing [!] lines anyway.")
     if not parsed["findings"]:
@@ -1296,6 +1690,13 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             have.add(key)
             added.append(r)
     host.local_findings.extend(added)
+    # AV/EDR + defensive posture the on-target sweep fingerprinted, so the tester
+    # knows what's watching this host (detection only - recce does not evade it).
+    known = set(host.defenses)
+    for d in ingest.extract_defenses(text):
+        if d not in known:
+            known.add(d)
+            host.defenses.append(d)
     # Promote the high-signal findings to first-class Vulns so they count toward
     # severity totals and get write-ups (deduped against existing vulns by key).
     have_v = {v.key for v in host.vulns}
@@ -1318,6 +1719,101 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
+    return 0
+
+
+def _collect_scan_files(paths: list[str]) -> list[str]:
+    """Expand files / directories / globs into a list of nmap scan files. For a
+    same-basename -oA set (base.xml + base.gnmap + base.nmap) keep only the richest
+    format (xml > grepable > normal) so one scan isn't imported three times."""
+    import glob
+    found: list[str] = []
+    for p in paths:
+        if os.path.isdir(p):
+            for pat in ("*.xml", "*.gnmap", "*.grep", "*.nmap"):
+                found += sorted(glob.glob(os.path.join(p, pat)))
+        elif os.path.exists(p):
+            found.append(p)
+        else:
+            found += sorted(glob.glob(p))          # maybe a glob pattern
+    rank = {".xml": 0, ".gnmap": 1, ".grep": 1, ".nmap": 2}
+    best: dict[str, tuple[int, str]] = {}
+    order: list[str] = []
+    for f in found:
+        base, ext = os.path.splitext(f)
+        r = rank.get(ext.lower(), 3)
+        if base not in best:
+            best[base] = (r, f)
+            order.append(base)
+        elif r < best[base][0]:
+            best[base] = (r, f)
+    return [best[b][1] for b in order]
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """Import an already-completed nmap scan (XML -oX or grepable -oG) and build /
+    update the workbook - no scanning, no network. Folds hosts into the datastore,
+    runs the offline enrichment (version->CVE, AD roles, SMB signing), sets the
+    checkmarks, and preserves any existing tracking."""
+    from . import vulndb
+    files = _collect_scan_files(args.files)
+    if not files:
+        print("[x] No nmap scan files found. Point at .xml (-oX) or .gnmap (-oG) "
+              "files, a directory, or a glob.")
+        return 1
+    parsed: list[Host] = []
+    for f in files:
+        hs = np.parse_nmap_file(f)
+        print(f"    {os.path.basename(f)}: {len(hs)} host(s)")
+        parsed.extend(hs)
+    if not parsed:
+        print("[x] Nothing parsed. Use nmap XML (-oX) or grepable (-oG) output - "
+              "the normal (-oN) text format can't be parsed reliably.")
+        return 1
+
+    paths = _open_paths(args.output_dir)
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)          # honour existing ticks first
+    if not store.get_meta("engagement"):
+        store.set_meta("engagement", args.title)
+
+    by_ip: dict[str, list[Host]] = {}
+    for h in parsed:
+        by_ip.setdefault(h.ip, []).append(h)
+    use_ss = getattr(args, "searchsploit", False) and exploits.available()
+    enum_only = getattr(args, "enum_only", False)
+    n_hosts = n_ports = n_findings = n_scanned = 0
+    for ip, group in by_ip.items():
+        subnet = ".".join(ip.split(".")[:3]) + ".0/24" if ip.count(".") == 3 else ""
+        host = _fold_host(ip, group, {ip: subnet})
+        host.enumerated = True
+        if not enum_only:
+            for p in host.ports:                  # scan ran scripts here -> vuln step done
+                if p.scripts and not p.vuln_scanned:
+                    p.vuln_scanned = True
+                    n_scanned += 1
+        ad.identify_roles(host)
+        ad.parse_signing_and_ntlm(host)
+        vulndb.assess_host_inplace(host)          # offline version->CVE/CWE findings
+        if use_ss:
+            exploits.enrich_hosts([host])
+        store.upsert_host(host)                    # merges with existing (tracking kept)
+        n_hosts += 1
+        n_ports += len(host.open_ports)
+        n_findings += len(host.vulns)
+
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print(f"\n[+] Imported {n_hosts} host(s) / {n_ports} open port(s) from "
+          f"{len(files)} file(s): {n_findings} offline finding(s), "
+          f"{n_scanned} port(s) marked vuln-scanned (had NSE output).")
+    print("    Checklist 'Enumerated'"
+          + ("" if enum_only else " + 'Vuln-scan' (where scripts ran)")
+          + " are ticked. Run `vulns` to add recce's deeper detection, or "
+          "`status` to see what's left.")
     return 0
 
 
@@ -1584,8 +2080,10 @@ def _add_discovery(pp) -> None:
     pp.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
     pp.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
     pp.add_argument("--min-rate", type=int, help="nmap --min-rate override")
-    pp.add_argument("--no-discovery", action="store_true",
-                    help="skip ping sweep; treat all targets as up (-Pn)")
+    pp.add_argument("-Pn", "--no-discovery", action="store_true", dest="no_discovery",
+                    help="skip the ping sweep and scan every target as if up (like "
+                         "nmap -Pn). Use this when hosts block ping - common on "
+                         "firewalled / Windows / AD networks.")
     pp.add_argument("--no-ad", action="store_true", help="skip SMB/LDAP AD scripts")
     pp.add_argument("--no-os", action="store_true", help="skip OS detection")
     pp.add_argument("--version-all", action="store_true",
@@ -1629,7 +2127,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-V", "--version", action="version",
                    version=f"recce {__version__}")
-    sub = p.add_subparsers(dest="command", required=True, metavar="<command>")
+    sub = p.add_subparsers(dest="command", required=False, metavar="<command>")
 
     # Phase 1: fast enumeration -> sheet.
     e = sub.add_parser("enum", help="discover hosts, scan ports, ID services -> sheet")
@@ -1705,6 +2203,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     choices=["critical", "high", "medium", "low", "info"],
                     help="only findings at or above this severity (default: low - "
                          "excludes informational items; use 'info' to include them)")
+    wu.add_argument("--include-potential", action="store_true",
+                    help="also write up low-confidence, version-inferred 'potential' "
+                         "findings (default: real findings only - those confirmed by "
+                         "an actual check/observation)")
     wu.add_argument("--no-screenshots", action="store_true",
                     help="don't auto-capture web screenshots (add them in Word)")
     wu.add_argument("--no-combined", action="store_true",
@@ -1712,6 +2214,75 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wu.add_argument("--overwrite", action="store_true",
                     help="regenerate even where a write-up exists (loses tester edits)")
     wu.set_defaults(func=cmd_writeups)
+
+    # Single-finding write-up, pre-filled with what's already looted/obtained.
+    w1 = sub.add_parser("writeup",
+                        help="write up ONE finding (pre-filled with looted/obtained "
+                             "evidence); run with no selector to list findings")
+    w1.add_argument("selector", nargs="?",
+                    help="which finding: an F-id (F-007 / 7), a CVE, an IP or IP:port, "
+                         "or a word from its title. Omit to list all findings.")
+    w1.add_argument("-o", "--output-dir", default="engagement")
+    w1.add_argument("--no-screenshots", action="store_true",
+                    help="don't auto-capture web screenshots (add them in Word)")
+    w1.add_argument("--overwrite", action="store_true",
+                    help="regenerate even if this write-up already exists")
+    w1.set_defaults(func=cmd_writeup)
+
+    # Bridge: per-open-port enumeration commands from recce/scripts/.
+    sv = sub.add_parser("services",
+                        help="print the per-service enum command to run for every "
+                             "open port recce found (bridges to recce/scripts/)")
+    sv.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    sv.add_argument("-o", "--output-dir", default="engagement")
+    sv.add_argument("-a", "--aggressive", action="store_true",
+                    help="append -a to each command (enable the intrusive checks)")
+    sv.set_defaults(func=cmd_services)
+
+    # Per-finding exploitation plan: runnable artifacts driving existing tools.
+    ep = sub.add_parser("exploitplan",
+                        help="generate ready-to-run exploitation artifacts (msf .rc + "
+                             "tool commands) for confirmed findings, params pre-filled")
+    ep.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    ep.add_argument("-o", "--output-dir", default="engagement")
+    ep.add_argument("--lhost", default="<LHOST>",
+                    help="your callback IP for reverse payloads (fills LHOST in the "
+                         ".rc files)")
+    ep.add_argument("--lport", type=int, default=4444, help="callback port (default 4444)")
+    ep.add_argument("--run", action="store_true",
+                    help="arm the Metasploit launch lines (default: check-only, safe). "
+                         "Use ONLY within your rules of engagement.")
+    ep.set_defaults(func=cmd_exploitplan)
+
+    # Attack-path synthesis: chain confirmed findings into a staged path.
+    ap = sub.add_parser("attackpath",
+                        help="chain confirmed findings into a prioritised attack path "
+                             "(foothold -> priv-esc -> creds -> lateral -> domain)")
+    ap.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    ap.add_argument("-o", "--output-dir", default="engagement")
+    ap.set_defaults(func=cmd_attackpath)
+
+    # Credential stacking + spray planning.
+    cd = sub.add_parser("creds",
+                        help="stack captured credentials and build a netexec/impacket "
+                             "spray plan across the discovered surface")
+    cd.add_argument("targets", nargs="*",
+                    help="restrict spray targets to these IPs / ranges / CIDRs / @file")
+    cd.add_argument("-o", "--output-dir", default="engagement")
+    cd.add_argument("--add", action="append", metavar="USER:SECRET",
+                    help="add a captured credential: 'user:secret', "
+                         "'DOMAIN\\user:secret' (a 32-hex secret => NT hash). Repeatable.")
+    cd.add_argument("--user", help="add a credential: username")
+    cd.add_argument("--pass", dest="password", help="add a credential: password")
+    cd.add_argument("--hash", help="add a credential: NT hash (for pass-the-hash)")
+    cd.add_argument("--domain", help="add a credential: AD domain (blank = local)")
+    cd.add_argument("--plan", action="store_true",
+                    help="build the spray plan (write users/passwords/hashes files "
+                         "+ print the netexec/impacket commands)")
+    cd.set_defaults(func=cmd_creds)
 
     # Convenience: enum + vulns in one shot.
     s = sub.add_parser("scan", help="run enum then vulns in one shot")
@@ -1730,6 +2301,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ing.add_argument("-o", "--output-dir", default="engagement")
     ing.add_argument("--title", default="Recce Engagement")
     ing.set_defaults(func=cmd_ingest)
+
+    # Import an existing nmap scan (XML / grepable) -> workbook, no scanning.
+    imp = sub.add_parser("import",
+                         help="import an existing nmap scan (-oX XML / -oG grepable) -> sheet")
+    imp.add_argument("files", nargs="+",
+                     help="nmap .xml / .gnmap file(s), a directory, or a glob")
+    imp.add_argument("-o", "--output-dir", default="engagement")
+    imp.add_argument("--title", default="Recce Engagement",
+                     help="engagement title (only used when starting a fresh datastore)")
+    imp.add_argument("--enum-only", action="store_true",
+                     help="mark hosts enumerated only; don't auto-mark ports vuln-scanned "
+                          "even if the imported scan ran NSE scripts")
+    imp.add_argument("--searchsploit", action="store_true",
+                     help="also map exploits via searchsploit (needs the tool)")
+    imp.set_defaults(func=cmd_import)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
@@ -1763,8 +2349,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+_QUICKSTART = r"""
+recce - phased enumeration & reporting. You mostly need three commands:
+
+  1.  recce doctor                         check this box can run everything
+  2.  recce enum   <targets> -o eng        find hosts, ports, services -> workbook
+  3.  recce vulns  -o eng                   vuln-scan what enum found
+
+Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options)
+and, when you want more depth, run any of:
+      recce db -o eng · privesc -o eng · credenum -u USER -p PASS -d DOMAIN -o eng
+      recce writeups -o eng · recce status -o eng
+
+Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
+
+Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
+Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.
+Run scans with sudo for SYN + OS detection.  `recce <command> -h` for options.
+"""
+
+
+def _print_quickstart() -> int:
+    print(BANNER)
+    print(_QUICKSTART)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    if getattr(args, "command", None) is None:
+        # Bare `recce` (no subcommand): a friendly quickstart beats an argparse error.
+        return _print_quickstart()
     try:
         return args.func(args)
     except KeyboardInterrupt:
