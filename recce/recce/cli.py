@@ -436,6 +436,17 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     # port like 5040 becomes 'Windows CDPSvc', not a dead 'unknown'.
     from . import svcdetect
     svcdetect.enrich_host(host, active=active_probe)
+    # Second opinion: for the handful of ports STILL unnamed, re-run nmap at max
+    # version effort (--version-all) aimed at just those - cheap because it's a few
+    # ports, and it's authoritative. Gated with the active probes (--no-probes).
+    if active_probe:
+        leftover = svcdetect.still_unknown_ports(host)
+        if leftover:
+            rp_xml = os.path.join(paths["raw"], f"{ip}_reprobe.xml")
+            _, riss = scanner.reprobe_services(ip, leftover, rp_xml, profile)
+            if riss:
+                issues.append(_mkissue(riss, "reprobe"))
+            svcdetect.apply_reprobe(host, np.parse_nmap_xml(rp_xml))
     ad.identify_roles(host)
     ad.parse_signing_and_ntlm(host)
     from . import vulndb

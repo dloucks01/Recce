@@ -201,6 +201,37 @@ def enrich_host(host: Host, active: bool = True) -> int:
     return n
 
 
+def still_unknown_ports(host: Host) -> list[int]:
+    """Open ports we STILL couldn't name after the passive + active layers - the
+    candidates for a second-opinion nmap re-probe."""
+    return [p.portid for p in host.open_ports if _needs_id(p)]
+
+
+def apply_reprobe(host: Host, parsed_hosts: list) -> int:
+    """Fold a second-opinion nmap `-sV --version-all` re-probe back in: upgrade any
+    port nmap has now concretely named (its answer is authoritative, so it wins
+    over our inferred/banner guesses). Returns the number of ports upgraded."""
+    idx = {(p.protocol, p.portid): p for p in host.ports}
+    upgraded = 0
+    for ph in parsed_hosts:
+        if ph.ip != host.ip:
+            continue
+        for rp in ph.ports:
+            cur = idx.get((rp.protocol, rp.portid))
+            if cur is None:
+                continue
+            if rp.service and rp.service not in ("unknown", "tcpwrapped"):
+                cur.service = rp.service
+                cur.product = rp.product or cur.product
+                cur.version = rp.version or cur.version
+                cur.extrainfo = rp.extrainfo or cur.extrainfo
+                if rp.cpe:
+                    cur.cpe = rp.cpe
+                cur.detect_source = "nmap"
+                upgraded += 1
+    return upgraded
+
+
 def suggest_id_command(ip: str, port: Port) -> str:
     """The next command a tester should run to positively ID a still-unknown port
     - so 'unknown' is an actionable to-do, not a shrug."""

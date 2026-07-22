@@ -2619,6 +2619,51 @@ class SvcDetectTest(unittest.TestCase):
         named = Port(portid=1234, service="cdpsvc", detect_source="inferred")
         self.assertEqual(sd.suggest_id_command("1.1.1.1", named), "")
 
+    def test_reprobe_upgrades_still_unknown_ports(self):
+        from recce import svcdetect as sd
+        host = Host(ip="10.0.0.7", ports=[
+            Port(portid=8888, service="unknown", state="open"),
+            Port(portid=5040, service="cdpsvc", detect_source="inferred", state="open"),
+        ])
+        self.assertEqual(sd.still_unknown_ports(host), [8888])
+        # nmap's second-opinion parse now names 8888 concretely.
+        parsed = [Host(ip="10.0.0.7", ports=[
+            Port(portid=8888, service="http", product="nginx", version="1.25",
+                 state="open")])]
+        n = sd.apply_reprobe(host, parsed)
+        self.assertEqual(n, 1)
+        p = next(p for p in host.ports if p.portid == 8888)
+        self.assertEqual((p.service, p.product, p.detect_source),
+                         ("http", "nginx", "nmap"))
+        # The inferred port nmap still can't name is left untouched.
+        self.assertEqual(sd.still_unknown_ports(host), [])
+
+    def test_reprobe_scanner_command_targets_only_leftover_ports(self):
+        from recce import scanner
+        seen = {}
+        orig = scanner._run
+
+        def fake_run(cmd, timeout=None):
+            seen["cmd"] = cmd
+            return scanner.RunOutcome(returncode=0)
+        scanner._run = fake_run
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "rp.xml")
+                scanner.reprobe_services("10.0.0.7", [8888, 3389], out,
+                                         scanner.PROFILES["standard"])
+        finally:
+            scanner._run = orig
+        cmd = seen["cmd"]
+        self.assertIn("--version-all", cmd)
+        self.assertIn("3389,8888", cmd)          # ports are sorted
+        # Empty leftover list -> no scan (returns an empty XML, never shells out).
+        seen.clear()
+        with tempfile.TemporaryDirectory() as d:
+            scanner.reprobe_services("10.0.0.7", [], os.path.join(d, "e.xml"),
+                                     scanner.PROFILES["standard"])
+        self.assertNotIn("cmd", seen)
+
     def test_new_port_fields_round_trip_through_store(self):
         # servicefp / detect_source / banner must survive a datastore round-trip.
         with tempfile.TemporaryDirectory() as d:

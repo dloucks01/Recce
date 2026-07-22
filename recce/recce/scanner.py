@@ -582,6 +582,27 @@ def nse_scan(ip: str, ports: list[int], out_xml: str, profile: ScanProfile,
     return out_xml, _issue_from(outcome, out_xml, "nse", profile.host_timeout)
 
 
+def reprobe_services(ip: str, ports: list[int], out_xml: str,
+                     profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Second-opinion service ID on a few still-unknown ports: max-effort `-sV
+    --version-all` (intensity 9, every probe) aimed at just those ports. Focused,
+    so it's cheap even though --version-all is exhaustive - the first enum pass
+    ran under a whole-host budget, this one spends it on the handful nmap couldn't
+    name. Returns the XML path + any scan issue."""
+    if not ports:
+        return _empty_xml(out_xml), None
+    scan_type = "-sS" if _is_root() else "-sT"
+    to_args, kill = _timeout_args(profile)
+    cmd = [
+        "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
+        "-sV", "--version-all",
+        "-p", ",".join(str(p) for p in sorted(set(ports))),
+        *to_args, ip, "-oX", out_xml,
+    ]
+    outcome = _run(cmd, timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "reprobe", profile.host_timeout)
+
+
 def udp_scan(ip: str, out_xml: str, profile: ScanProfile) -> tuple[str, ScanIssue | None]:
     """Optional top-N UDP scan with service detection + SNMP/DNS/NTP enumeration."""
     if not _is_root():
