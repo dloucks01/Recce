@@ -720,6 +720,11 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertNotIn("--min-rate", calls[1])              # reliable drops it
         self.assertEqual(calls[1][calls[1].index("--max-retries") + 1], "6")
         self.assertIn("-T3", calls[1])
+        # bounded: the adaptive re-scan keeps the SAME --host-timeout as any host
+        # (no silent extension), so it can't run for hours - it returns partial.
+        self.assertIn("--host-timeout", calls[1])
+        self.assertEqual(calls[1][calls[1].index("--host-timeout") + 1],
+                         f"{s.ScanProfile().host_timeout}m")
         self.assertTrue(issue and issue.level == "warning")   # rate-limit surfaced
 
     def test_reliable_flag_drops_min_rate_from_first_pass(self):

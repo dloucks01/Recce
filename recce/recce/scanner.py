@@ -298,8 +298,12 @@ def _portscan_cmd(ip: str, out_xml: str, profile: ScanProfile,
         # congestion control adapt - NO --min-rate floor (it would pin the send
         # rate above what the network tolerates and guarantee dropped SYNs to
         # open ports), normal -T3 timing, and retry dropped probes generously.
-        # Give it more wall-clock too, since an adaptive scan runs slower.
-        to_args, kill = _timeout_args(profile, minutes=max(profile.host_timeout, 30))
+        # Crucially this stays bounded by the SAME --host-timeout as any host:
+        # nmap abandons the host when it fires and writes what it found, so an
+        # adaptive scan can never run for hours/days - it just returns partial
+        # (still far better than the fast pass's zero). Raise --host-timeout for
+        # more completeness, or set a gentler --min-rate floor to bound it more.
+        to_args, kill = _timeout_args(profile)
         cmd = ["nmap", scan_type, "-Pn", "-n", "-T3", "--max-retries", "6", "--open",
                *to_args, *port_spec, ip, "-oX", out_xml]
     else:
