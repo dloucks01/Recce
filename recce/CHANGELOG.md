@@ -39,6 +39,15 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Changed
+- **`--help` is scannable instead of a flat wall of flags.** Every command's
+  options are now sorted into labelled groups — the one or two flags a normal run
+  uses (`-o`, `-Pn`, `--fast`, `-u/-p/-d`) stay up top, and the tuning knobs fold
+  into clearly-titled *(optional)* sections (`scan tuning`, `output & performance`,
+  `privileged & LDAP`, `deploy options`). No flags were added, removed, or renamed
+  and every existing invocation is unchanged — `recce <cmd> -h` just reads as
+  "here's what you need, advanced stuff is over there." The common runs stay
+  short: `recce enum 10.0.0.0/24 -o eng`, `recce vulns -o eng`,
+  `recce deploy -u USER -p PASS -o eng`.
 - **Port sweep is now completeness-first — it won't silently miss open ports.**
   The sweep is the foundation every later phase keys off, so three ways an open
   port could be silently dropped are closed:
