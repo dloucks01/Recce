@@ -309,6 +309,44 @@ class CoverageMathFidelityTest(unittest.TestCase):
         cov = tr.compute_coverage(hosts, {k: (True, "")})
         self.assertEqual(cov["services"]["done"], 1)
 
+    def test_overview_phase_table_honors_operator_override(self):
+        """Regression: the Overview per-subnet phase table must reflect an
+        operator un-tick the same way the Checklist does, or the two diverge."""
+        import openpyxl
+        from recce.report_excel import build_workbook
+
+        def enum_cell(path):
+            ov = openpyxl.load_workbook(path)["Overview"]
+            for row in ov.iter_rows(values_only=True):
+                if row and row[0] == "10.0.0.0/24":
+                    return row[3]   # "Enumerated" column
+        hosts = [Host(ip="10.0.0.5", subnet="10.0.0.0/24", enumerated=True, state="up",
+                      ports=[Port(portid=80, service="http", state="open")]),
+                 Host(ip="10.0.0.6", subnet="10.0.0.0/24", enumerated=True, state="up",
+                      ports=[Port(portid=80, service="http", state="open")])]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, p, tracking={})
+            self.assertEqual(enum_cell(p), "2/2")
+            build_workbook(hosts, p,
+                           tracking={tr.step_key("enum", "10.0.0.6"): (False, "redo")})
+            self.assertEqual(enum_cell(p), "1/2")
+
+    def test_accounts_differing_only_by_rid_dont_collide(self):
+        """Regression: the store keeps accounts distinct by rid, so acct_key must
+        include rid or two such accounts collapse to one row + undercount."""
+        from recce.models import Account
+        a = Account(ip="10.0.0.5", source="ldap", kind="user", name="svc", domain="corp", rid="1103")
+        b = Account(ip="10.0.0.5", source="ldap", kind="user", name="svc", domain="corp", rid="1104")
+        ka = tr.acct_key(a.source, a.kind, a.domain, a.name, a.rid)
+        kb = tr.acct_key(b.source, b.kind, b.domain, b.name, b.rid)
+        self.assertNotEqual(ka, kb)
+        # A rid-less account keeps its historical (colon-free) key.
+        self.assertEqual(tr.acct_key("ldap", "share", "corp", "SYSVOL"),
+                         "acct:ldap:share:corp:SYSVOL")
+        h = Host(ip="10.0.0.5", accounts=[a, b])
+        self.assertEqual(len(tr.item_keys([h])["accounts"]), 2)
+
 
 class WriteupPerIpFidelityTest(unittest.TestCase):
     def test_grouped_finding_lists_only_the_affected_ip(self):

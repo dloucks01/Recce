@@ -831,14 +831,17 @@ def _confidence(sig: dict) -> str:
 def assess_host(host: Host) -> list[Vuln]:
     """Match every service on a host against the offline knowledge base."""
     findings: list[Vuln] = []
-    seen = {v.title for v in host.vulns}
+    # Dedup per (title, port): a product exposed on two ports is two distinct
+    # exposures, so both are reported (keyed to their own port) instead of the
+    # second being silently dropped and its port missing from the write-up.
+    seen = {(v.title, v.port) for v in host.vulns}
     for port in host.open_ports:
         for sig in SIGNATURES:
             if not _matches(sig, port, host):
                 continue
-            if sig["title"] in seen:
+            if (sig["title"], port.portid) in seen:
                 continue
-            seen.add(sig["title"])
+            seen.add((sig["title"], port.portid))
             banner = f"{port.product} {port.version}".strip() or port.service
             findings.append(Vuln(
                 ip=host.ip, port=port.portid, protocol=port.protocol,
