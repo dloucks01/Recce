@@ -1864,5 +1864,122 @@ class EntryPointTest(unittest.TestCase):
         self.assertIn("recce", (r.stdout + r.stderr).lower())
 
 
+class EnumRobustnessTest(unittest.TestCase):
+    """The enum phase must be robust host-by-host: one host that crashes, times
+    out, or returns hostile data can never abort the run or corrupt the workbook.
+    """
+
+    def _args(self, d):
+        from types import SimpleNamespace
+        a = SimpleNamespace(workers=4, refresh_every=0, title="T", resume=False,
+                            user=None, hash=None, domain=None, output_dir=d)
+        setattr(a, "pass", None)
+        for k in ("ssh_user", "ssh_pass", "ssh_key", "admin_user", "admin_pass",
+                  "admin_domain", "dc_ip"):
+            setattr(a, k, None)
+        return a
+
+    def test_one_bad_host_does_not_abort_run_or_corrupt_workbook(self):
+        from recce import cli, scanner, xlsx
+        import zipfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        paths = cli._open_paths(d)
+        store = cli._open_store(paths["db"])
+        store.set_scope("10.0.0.0/24", 254)
+
+        def fake_worker(ip, profile, paths, creds, port_map, subnet_map):
+            if ip == "10.0.0.11":            # worker raises
+                raise RuntimeError("boom")
+            if ip == "10.0.0.12":            # timed out -> None + issue
+                return None, [{"phase": "enum", "level": "error",
+                               "message": "host timeout"}]
+            if ip == "10.0.0.13":            # hostile data: control chars, many ports
+                return Host(ip=ip, subnet="10.0.0.0/24", enumerated=True,
+                            hostnames=["odd\x01\x1f"], ports=[
+                                Port(portid=n, service="x\x02y", state="open")
+                                for n in range(1, 60)]), []
+            return Host(ip=ip, subnet="10.0.0.0/24", enumerated=True,
+                        ports=[Port(portid=445, service="microsoft-ds",
+                                    state="open")]), []
+
+        orig = cli._enum_worker
+        cli._enum_worker = fake_worker
+        try:
+            live = ["10.0.0.10", "10.0.0.11", "10.0.0.12", "10.0.0.13", "10.0.0.14"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli._phase_enum(store, paths, self._args(d),
+                                scanner.PROFILES["standard"],
+                                {"10.0.0.10": "10.0.0.0/24"}, live,
+                                {i: [] for i in live})
+                cli._generate_reports(store, paths, "T", quiet=True)
+        finally:
+            cli._enum_worker = orig
+
+        ips = {h.ip for h in store.all_hosts()}
+        # good + hostile-but-valid hosts persist; crashed/timed-out do not
+        self.assertEqual(ips, {"10.0.0.10", "10.0.0.13", "10.0.0.14"})
+        issue_ips = {i["ip"] for i in store.get_issues()}
+        self.assertTrue({"10.0.0.11", "10.0.0.12"} <= issue_ips)
+        # the workbook is valid despite the failures + control chars
+        self.assertTrue(zipfile.is_zipfile(paths["xlsx"]))
+        self.assertIn("Checklist", xlsx.read_sheets(paths["xlsx"]))
+        store.close()
+
+    def test_persist_failure_on_one_host_does_not_abort_the_phase(self):
+        from recce import cli, scanner
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        paths = cli._open_paths(d)
+        store = cli._open_store(paths["db"])
+        store.set_scope("10.0.0.0/24", 254)
+
+        def good_worker(ip, *a, **k):
+            return (Host(ip=ip, subnet="10.0.0.0/24", enumerated=True,
+                         ports=[Port(portid=445, service="microsoft-ds",
+                                     state="open")]), [])
+        # The datastore rejects exactly one host's write (a lock outlasting the
+        # busy_timeout, say); every other host must still persist.
+        real_upsert = store.upsert_host
+
+        def flaky_upsert(host):
+            if host.ip == "10.0.0.12":
+                raise RuntimeError("database is locked")
+            return real_upsert(host)
+        store.upsert_host = flaky_upsert
+
+        orig = cli._enum_worker
+        cli._enum_worker = good_worker
+        try:
+            live = ["10.0.0.10", "10.0.0.11", "10.0.0.12", "10.0.0.13"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli._phase_enum(store, paths, self._args(d),
+                                scanner.PROFILES["standard"],
+                                {"10.0.0.10": "10.0.0.0/24"}, live,
+                                {i: [] for i in live})
+        finally:
+            cli._enum_worker = orig
+        store.upsert_host = real_upsert
+        ips = {h.ip for h in store.all_hosts()}
+        self.assertEqual(ips, {"10.0.0.10", "10.0.0.11", "10.0.0.13"})
+        self.assertIn("10.0.0.12", {i["ip"] for i in store.get_issues()})
+        store.close()
+
+    def test_corrupt_existing_workbook_is_regenerated_not_fatal(self):
+        from recce.report_excel import update_workbook
+        from recce import xlsx
+        import zipfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p = os.path.join(d, "enumeration.xlsx")
+        with open(p, "wb") as f:            # a truncated / non-xlsx file
+            f.write(b"PK\x03\x04 not a real workbook \xff\x00")
+        hosts = [Host(ip="10.0.0.5", subnet="10.0.0.0/24", enumerated=True,
+                      ports=[Port(portid=80, service="http", state="open")])]
+        update_workbook(p, hosts, meta={"subtitle": "t"}, tracking={})
+        self.assertTrue(zipfile.is_zipfile(p))
+        self.assertIn("Checklist", xlsx.read_sheets(p))
+
+
 if __name__ == "__main__":
     unittest.main()
