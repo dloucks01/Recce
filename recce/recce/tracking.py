@@ -155,8 +155,13 @@ def exploit_key(ip: str, port: Any, edb_id: str) -> str:
     return f"exploit:{ip}:{port or 0}:{edb_id}"
 
 
-def acct_key(source: str, kind: str, domain: str, name: str) -> str:
-    return f"acct:{source}:{kind}:{domain}:{name}"
+def acct_key(source: str, kind: str, domain: str, name: str, rid: str = "") -> str:
+    # The store dedups accounts on (source, kind, name, domain, rid), so the key
+    # must include rid or two accounts identical but for their RID collapse to one
+    # Users & Accounts row and undercount. Appended only when present, so existing
+    # rid-less keys stay stable across an upgrade.
+    base = f"acct:{source}:{kind}:{domain}:{name}"
+    return f"{base}:{rid}" if rid else base
 
 
 def prod_key(product_version_key: str) -> str:
@@ -190,7 +195,7 @@ def item_keys(hosts: list) -> dict[str, list[str]]:
         for e in h.exploits:
             push("exploits", exploit_key(e.ip, e.port, e.edb_id))
         for a in h.accounts:
-            push("accounts", acct_key(a.source, a.kind, a.domain, a.name))
+            push("accounts", acct_key(a.source, a.kind, a.domain, a.name, a.rid))
 
     for qw in ad.quick_wins(hosts):
         push("quick_wins", qw["key"])

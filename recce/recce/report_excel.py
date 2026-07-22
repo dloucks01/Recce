@@ -465,7 +465,7 @@ def _spec_accounts(hosts: list[Host]) -> SheetSpec:
             roastable.append("kerberoast")
         if at.get("asrep_roastable") == "yes":
             roastable.append("AS-REP")
-        rows.append({"key": tr.acct_key(a.source, a.kind, a.domain, a.name), "data": {
+        rows.append({"key": tr.acct_key(a.source, a.kind, a.domain, a.name, a.rid), "data": {
             "Kind": a.kind, "Domain": a.domain, "Name": a.name, "RID": a.rid,
             "Enabled": at.get("enabled", ""), "AdminCount": at.get("admincount", ""),
             "Roastable": ", ".join(roastable), "Delegation": at.get("delegation", ""),
@@ -1015,7 +1015,13 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
 
     def phase(hs, step):
         applic = [h for h in hs if tr.step_applies(h, step)]
-        return cell(sum(1 for h in applic if tr.step_auto(h, step)), len(applic))
+
+        def done(h):
+            # Honor an operator tick/un-tick the same way the Checklist does, so
+            # the two tables can't disagree; fall back to tool auto-progress.
+            k = tr.step_key(step, h.ip)
+            return tracking[k][0] if k in tracking else tr.step_auto(h, step)
+        return cell(sum(1 for h in applic if done(h)), len(applic))
 
     for sn in sorted(set(agg) | set(scope or {}), key=_subnet_sort_key):
         hs = agg.get(sn, [])
