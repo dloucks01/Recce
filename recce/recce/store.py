@@ -133,6 +133,9 @@ class Store:
         merged.state = new.state or old.state
         merged.distance = new.distance or old.distance
         merged.enumerated = old.enumerated or new.enumerated
+        # Ports are unioned across scans, so the host is complete if ANY sweep
+        # finished; only incomplete when every scan of it was truncated.
+        merged.incomplete_scan = old.incomplete_scan and new.incomplete_scan
         merged.db_scanned = old.db_scanned or new.db_scanned
         merged.privesc_checked = old.privesc_checked or new.privesc_checked
         merged.cred_enumerated = old.cred_enumerated or new.cred_enumerated
