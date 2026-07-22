@@ -372,6 +372,29 @@ def deploy_one(host: Host, ssh_creds, win_creds, timeout: int = DEFAULT_TIMEOUT,
     return t, out, err
 
 
+def skip_reason(host: Host, ssh_creds, win_creds, authmap=None) -> str:
+    """Human-readable WHY transport_for() returned None - so a skipped host reads
+    as 'unable to complete because X', not just an unexplained omission."""
+    ports = {p.portid for p in host.open_ports}
+    svc = {(p.service or "").lower() for p in host.open_ports}
+    has_ssh = 22 in ports or "ssh" in svc
+    has_winrm = bool(ports & {5985, 5986})
+    has_smb = 445 in ports
+    if not (has_ssh or has_winrm or has_smb):
+        return "no remote-exec port open (need SSH 22 / WinRM 5985 / SMB 445)"
+    # There IS a reachable port, so it's a credential problem.
+    if authmap is not None and host.ip in authmap:
+        return "credentials did not authenticate (nxc precheck: no SMB-admin/WinRM/SSH)"
+    need = []
+    if has_ssh and not ssh_creds:
+        need.append("SSH creds (--ssh-user + --ssh-pass/--ssh-key)")
+    if (has_winrm or has_smb) and not win_creds:
+        need.append("Windows creds (-u/-p or --hash)")
+    if need:
+        return "port open but missing " + " and ".join(need)
+    return "no usable transport for the credentials given"
+
+
 def plan(hosts: list, ssh_creds, win_creds, authmap=None) -> list:
     """Preview: [(host, transport|None)] for every host, for --dry-run."""
     return [(h, transport_for(h, ssh_creds, win_creds, authmap)) for h in hosts]

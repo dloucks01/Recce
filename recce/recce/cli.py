@@ -1878,10 +1878,15 @@ def cmd_deploy(args: argparse.Namespace) -> int:
               "memory (no artifact); SMB drops to %TEMP% and deletes after.")
     print("    Confirm this is within your rules of engagement.")
     if getattr(args, "dry_run", False):
+        print(f"\n  WILL RUN ({len(deployable)}):")
         for h, t in sorted(deployable, key=lambda ht: _ip_key(ht[0].ip)):
             print(f"    {h.ip:<16} -> {t}" + ("  (+http stager if reachable)"
                                               if use_stager and t != "ssh" else ""))
-        print("[*] Dry run - nothing was executed. Drop --dry-run to deploy.")
+        if skipped:
+            print(f"\n  UNABLE / SKIPPED ({len(skipped)}):")
+            for h in sorted(skipped, key=lambda x: _ip_key(x.ip)):
+                print(f"    {h.ip:<16} -- {deploy.skip_reason(h, ssh_creds, win_creds, authmap or None)}")
+        print("\n[*] Dry run - nothing was executed. Drop --dry-run to deploy.")
         store.close()
         return 0
 
@@ -1957,15 +1962,35 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     finally:
         if stager is not None:
             stager.__exit__(None, None, None)
+    # Hosts we never attempted (no transport / creds didn't validate) are the
+    # "unable to complete" bucket - write them to the workbook too, so the report
+    # shows every host's outcome, not just the ones we reached.
+    for h in skipped:
+        _record_issues(store, paths, h.ip, [{"phase": "deploy", "level": "warning",
+                       "message": "not deployed: "
+                       + deploy.skip_reason(h, ssh_creds, win_creds, authmap or None)}])
     _final_report(store, paths, store.get_meta("engagement") or args.title)
     store.close()
+
     ok = total - len(errs)
-    print(f"\n[+] Local-enum deployed to {ok}/{total} host(s); loot saved in {loot_dir}/.")
+    print(f"\n{'=' * 60}")
+    print(f"  DEPLOY RESULTS: {ok} succeeded · {len(errs)} errored · "
+          f"{len(skipped)} unable")
+    print(f"{'=' * 60}")
     if errs:
-        print(f"[!] {len(errs)} host(s) failed (bad creds / not permitted / "
-              "unreachable) - see the Overview issues tab or the run log.")
-    print("    Findings folded into local_findings + the Priv-Esc tab. Next: "
-          f"recce attackpath -o {args.output_dir}  (or writeups).")
+        print(f"  ERRORED ({len(errs)}) - reached but did not complete:")
+        for ip, msg in sorted(errs, key=lambda x: _ip_key(x[0])):
+            print(f"    {ip:<16} -- {msg}")
+    if skipped:
+        print(f"  UNABLE ({len(skipped)}) - never attempted:")
+        for h in sorted(skipped, key=lambda x: _ip_key(x.ip)):
+            print(f"    {h.ip:<16} -- "
+                  f"{deploy.skip_reason(h, ssh_creds, win_creds, authmap or None)}")
+    print(f"\n[+] Loot saved in {loot_dir}/. Findings folded into local_findings "
+          "+ the Priv-Esc tab.")
+    if errs or skipped:
+        print("    Errored / unable hosts are logged on the Overview issues tab.")
+    print(f"    Next: recce attackpath -o {args.output_dir}  (or writeups).")
     return 0
 
 

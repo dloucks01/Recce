@@ -39,6 +39,17 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Changed
+- **`deploy` now reports every host's outcome: succeeded / errored / unable.**
+  Previously a host with no usable transport (no SSH/WinRM/SMB port, or creds that
+  didn't validate) was silently rolled into a single "N skipped" count. Now every
+  un-deployable host carries a plain-English reason (`skip_reason()` — e.g. "no
+  remote-exec port open", "port open but missing SSH creds", "credentials did not
+  authenticate"), and `deploy`: (1) lists both **WILL RUN** and **UNABLE / SKIPPED**
+  (with reasons) in `--dry-run`; (2) ends a real run with a three-way
+  **`DEPLOY RESULTS: X succeeded · Y errored · Z unable`** summary that lists the
+  errored and unable hosts; and (3) writes the unable hosts to the **Overview
+  issues tab** too, so the workbook shows what completed and what couldn't — not
+  just the successes.
 - **`--help` is scannable instead of a flat wall of flags.** Every command's
   options are now sorted into labelled groups — the one or two flags a normal run
   uses (`-o`, `-Pn`, `--fast`, `-u/-p/-d`) stay up top, and the tuning knobs fold

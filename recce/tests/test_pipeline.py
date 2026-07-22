@@ -2802,6 +2802,25 @@ class DeployTest(unittest.TestCase):
         self.assertIsNone(deploy.transport_for(self._host("5", "Linux", [80]), ssh, win))   # no exec port
         self.assertIsNone(deploy.transport_for(self._host("6", "Linux", [22]), None, None))  # no creds
 
+    def test_skip_reason_explains_why_a_host_is_unable(self):
+        from recce import deploy
+        ssh = {"username": "u", "password": "p"}
+        win = {"username": "a", "password": "b"}
+        # No remote-exec port at all.
+        self.assertIn("no remote-exec port",
+                      deploy.skip_reason(self._host("1", "Linux", [80]), ssh, win))
+        # SSH port open but no SSH creds held.
+        self.assertIn("SSH creds",
+                      deploy.skip_reason(self._host("2", "Linux", [22]), None, win))
+        # SMB/WinRM open but no Windows creds held.
+        self.assertIn("Windows creds",
+                      deploy.skip_reason(self._host("3", "Windows", [445]), ssh, None))
+        # nxc precheck said none of the protocols authenticated on this host.
+        amap = {"4": {"smb": False, "winrm": False, "ssh": False}}
+        self.assertIn("did not authenticate",
+                      deploy.skip_reason(self._host("4", "Windows", [445, 5985]),
+                                         ssh, win, amap))
+
     def test_ps_payload_is_utf16le_base64(self):
         import base64
         from recce import deploy
