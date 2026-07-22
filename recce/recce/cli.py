@@ -1353,9 +1353,11 @@ def cmd_exploitplan(args: argparse.Namespace) -> int:
     print(f"[+] Exploitation plan -> {summary['dir']}/")
     print(f"    {summary['host_scripts']} per-host plan script(s), "
           f"{summary['rc_files']} Metasploit resource (.rc) file(s), "
+          f"{summary.get('poc_files', 0)} benign PoC source file(s), "
           f"{summary['actions']} action(s) across {len(summary['plans'])} host(s).")
     print("    Each artifact configures an EXISTING published tool/module with the")
-    print("    target's own parameters. recce authors no exploit code.")
+    print("    target's own parameters. PoC sources build a benign proof (marker file /")
+    print("    throwaway account) - swap the ACTION for your ROE command.")
     if args.lhost == "<LHOST>":
         print("    ! Set your callback with --lhost <IP> (payloads currently show "
               "<LHOST>).")

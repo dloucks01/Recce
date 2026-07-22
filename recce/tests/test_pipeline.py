@@ -2486,6 +2486,76 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertTrue(any("Writable service binary/registry" in t for t in titles))
 
 
+class PocRecipeTest(unittest.TestCase):
+    def test_finding_text_selects_the_right_recipe(self):
+        from recce import poc
+        cases = {
+            "SUID env-injection candidate: /usr/bin/foo reads LD_PRELOAD": "ld_preload",
+            "/etc/passwd is WRITABLE -> add a UID 0 user": "linux_passwd",
+            "SUID PATH-hijack candidate: /usr/bin/foo invokes bare command(s) [backup]": "linux_root_job",
+            "Unquoted service path EXPLOITABLE: service 'Foo' runs as LocalSystem": "win_service_exe",
+            "Writable app dir (DLL hijack): C:\\Program Files\\App": "win_dll",
+            "AlwaysInstallElevated = 1 (HKLM+HKCU)": "win_msi",
+        }
+        for text, key in cases.items():
+            self.assertEqual(poc.recipe_key_for(text), key, text)
+
+    def test_select_for_host_covers_confirmed_findings(self):
+        from recce import poc
+        h = Host(ip="10.0.0.5", local_findings=[
+            {"category": "suid", "vector": "SUID env-injection candidate: /x reads LD_PRELOAD"},
+            {"category": "writable", "vector": "/etc/passwd is WRITABLE -> add a UID 0 user"}])
+        keys = set(poc.select_for_host(h))
+        self.assertEqual(keys, {"ld_preload", "linux_passwd"})
+
+    def test_write_files_and_plan_lines(self):
+        from recce import poc
+        with tempfile.TemporaryDirectory() as d:
+            recipes = {k: poc.RECIPES[k] for k in ("ld_preload", "win_dll")}
+            written = poc.write_files(d, recipes)
+            self.assertTrue(any(p.endswith("recce_poc_preload.c") for p in written))
+            self.assertTrue(any(p.endswith("recce_poc_dll.c") for p in written))
+            block = "\n".join(poc.plan_lines(recipes))
+            self.assertIn("PoC BUILD RECIPES", block)
+            self.assertIn("gcc -fPIC -shared", block)
+            self.assertIn("msfvenom", block)
+
+    def test_ld_preload_poc_source_actually_compiles(self):
+        # The emitted .so source must be valid C that builds - proves it's real,
+        # not pseudo-code. (Skipped where gcc is unavailable.)
+        import shutil
+        import subprocess
+        gcc = shutil.which("gcc")
+        if not gcc:
+            self.skipTest("gcc not available")
+        from recce import poc
+        with tempfile.TemporaryDirectory() as d:
+            poc.write_files(d, {"ld_preload": poc.RECIPES["ld_preload"]})
+            src = os.path.join(d, "recce_poc_preload.c")
+            so = os.path.join(d, "recce_poc.so")
+            r = subprocess.run([gcc, "-fPIC", "-shared", "-nostartfiles", "-o", so, src],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(os.path.exists(so))
+
+    def test_exploitplan_writes_poc_files(self):
+        from recce import exploitplan
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.5", os_family="Linux",
+                 local_findings=[{"category": "writable",
+                                  "vector": "/etc/passwd is WRITABLE -> add a UID 0 user"}])
+        h.vulns = [Vuln(ip="10.0.0.5", port=None, protocol="tcp", script_id="local-enum",
+                        title="Writable /etc/passwd (add a UID 0 user)", source="local",
+                        confidence="confirmed")]
+        with tempfile.TemporaryDirectory() as d:
+            summary = exploitplan.build_plan([h], d)
+            self.assertGreaterEqual(summary.get("poc_files", 0), 0)
+            script = os.path.join(summary["dir"], "10.0.0.5.sh")
+            self.assertTrue(os.path.exists(script))
+            with open(script) as fh:
+                self.assertIn("PoC BUILD RECIPES", fh.read())
+
+
 class ProofEngineTest(unittest.TestCase):
     def _vuln(self, **kw):
         base = dict(ip="10.0.0.5", port=None, protocol="tcp", script_id="s",

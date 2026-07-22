@@ -39,6 +39,21 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Added
+- **`exploitplan` now emits benign PoC build recipes — the payload source, the
+  build command, and the delivery — not just "drop a binary here."** For each
+  confirmed finding it writes the standard, documented artifact to
+  `exploit-plan/poc/` with the exact `gcc`/`x86_64-w64-mingw32-gcc`/`msfvenom`
+  line: the LD_PRELOAD `.so` (SUID env-injection / writable-lib), a root-job shell
+  PoC (writable cron/service/PATH-hijack), the `/etc/passwd` UID-0 recipe, a
+  Windows service/intercept exe (unquoted-path / writable-binary / autorun), a
+  hijack DLL (writable dir / COM), and an AlwaysInstallElevated MSI. Each per-host
+  plan script embeds the **build → deliver → proof** block. The payloads are
+  deliberately **benign proofs** (run `id`/`whoami` into a marker file, or add a
+  clearly-named throwaway `recce_poc` account) — you swap the single ACTION line
+  for your ROE command. Nothing is obfuscated or AV-evasive; a control that blocks
+  a plain PoC is a scoping/exclusion conversation, which recce still says to have
+  rather than engineering evasion. (The emitted `.so` source is covered by a test
+  that actually compiles it.)
 - **`recce prove` — is this finding real, or a false positive?** A new
   verification engine reasons over the evidence recce already collected (the exact
   version, the port state, the NSE detection result, the on-target privilege
