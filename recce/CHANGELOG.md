@@ -2,6 +2,19 @@
 
 All notable changes to recce are documented here. Dates are UTC.
 
+## [0.2.3] - 2026-07-22
+
+### Changed
+- **Enum hardened to be robust host-by-host.** A single host that crashes the
+  worker, times out, returns hostile data (control chars, huge port counts), or
+  fails to persist can no longer abort the run or corrupt the workbook. The
+  per-host datastore write is now isolated in every scan phase (enum, vulns, db,
+  privesc, credenum) the same way worker failures already were — a persist error
+  on one host is recorded as an issue and the phase continues (`_persist_host`).
+  Audited and fault-injection-tested end to end: good hosts persist, failures are
+  logged, the workbook stays valid (atomic write + illegal-char scrubbing), and
+  the final report always runs in `finally` (survives Ctrl-C and locked files).
+
 ## [0.2.2] - 2026-07-22
 
 ### Fixed
