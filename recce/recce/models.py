@@ -96,6 +96,36 @@ class Exploit:
 
 
 @dataclass
+class Credential:
+    """A captured/observed credential to stack and spray. Sources: manual capture
+    (secretsdump, gpp-decrypt, cracked hashes), AD accounts with a recovered
+    secret, default/blank service logins, autologon/stored creds from loot."""
+
+    username: str = ""
+    secret: str = ""             # cleartext password, NT hash, or key path
+    kind: str = "password"       # password | nthash | ssh-key | blank
+    domain: str = ""             # AD domain, or "" for a local account
+    source: str = "manual"       # manual / secretsdump / gpp / default / autologon / ad
+    origin_ip: str = ""          # host it was captured on
+    notes: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "Credential":
+        return cls(**data)
+
+    @property
+    def label(self) -> str:
+        u = f"{self.domain}\\{self.username}" if self.domain else self.username
+        return u or "(anonymous)"
+
+    def dedupe_key(self) -> str:
+        return f"{self.domain.lower()}\\{self.username.lower()}|{self.kind}|{self.secret}"
+
+
+@dataclass
 class Account:
     """A user / account / share / domain fact discovered during AD enrichment."""
 
@@ -157,6 +187,7 @@ class Host:
     roles: list[str] = field(default_factory=list)   # e.g. Domain Controller
     ntlm: dict[str, Any] = field(default_factory=dict)  # domain/fqdn/os from NTLM
     smb_signing: str = ""                            # required / not required / unknown
+    defenses: list[str] = field(default_factory=list)  # AV/EDR + posture (from recce-enum)
     enumerated: bool = False       # tool progress: service enumeration has run
     db_scanned: bool = False       # the `db` phase ran against this host
     privesc_checked: bool = False  # the `privesc` phase ran against this host

@@ -645,6 +645,21 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("1.2.3.4", cmd)
         self.assertIsNotNone(calls[0][1])         # subprocess timeout set
 
+    def test_pn_scan_fails_fast_on_dead_hosts(self):
+        # -Pn scans dead IPs too; retry once (not twice) to abandon them faster,
+        # while the per-host --host-timeout ceiling still applies.
+        import copy
+        import recce.scanner as s
+        prof = copy.copy(s.PROFILES["standard"])
+        prof.assume_up = True
+        with tempfile.TemporaryDirectory() as d:
+            calls = self._capture(s.full_port_scan, "1.2.3.4",
+                                  os.path.join(d, "p.xml"), prof)
+        cmd = calls[0][0]
+        self.assertEqual(cmd[cmd.index("--max-retries") + 1], "1")   # fail-fast
+        self.assertIn("--host-timeout", cmd)                         # cap still applies
+        self.assertIn("--min-rate", cmd)                             # packet floor
+
     def test_enum_scan_flags(self):
         import recce.scanner as s
         with tempfile.TemporaryDirectory() as d:
@@ -1069,6 +1084,67 @@ class TargetingFormE2ETest(unittest.TestCase):
         self.assertEqual(self._run_vulns([]), self.ALL)
 
 
+class UsabilityAndDiscoveryTest(unittest.TestCase):
+    def test_pn_alias_parses(self):
+        from recce import cli
+        for argv in (["enum", "10.0.0.0/24", "-Pn"],
+                     ["enum", "10.0.0.0/24", "--no-discovery"],
+                     ["scan", "10.0.0.5", "-Pn"]):
+            self.assertTrue(cli.build_arg_parser().parse_args(argv).no_discovery, argv)
+
+    def test_bare_recce_prints_quickstart_not_error(self):
+        from recce import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main([])
+        self.assertEqual(rc, 0)                        # no argparse error exit
+        out = buf.getvalue()
+        self.assertIn("recce enum", out)
+        self.assertIn("-Pn", out)                      # the ping-blocking hint
+
+    def test_zero_discovery_auto_falls_back_to_pn(self):
+        # The killer field bug: hosts that block ping got dropped -> zero ports.
+        # Now 0 discovery responses must auto-fall-back to scanning all as up.
+        from recce import cli
+        import recce.scanner as s
+        from recce.store import Store
+
+        def empty_disc(tf, out):
+            with open(out, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun></nmaprun>')
+            return out, None
+
+        def fps(ip, out, profile):
+            with open(out, "w") as fh:
+                fh.write(f'<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                         f'<address addr="{ip}" addrtype="ipv4"/><ports><port '
+                         f'protocol="tcp" portid="445"><state state="open"/>'
+                         f'<service name="microsoft-ds"/></port></ports></host></nmaprun>')
+            return out, None
+
+        def enum(ip, ports, out, profile, creds=None):
+            return fps(ip, out, profile)
+
+        saved = (s.check_environment, s.discover_hosts, s.full_port_scan, s.enum_scan)
+        s.check_environment = lambda p: []
+        s.discover_hosts, s.full_port_scan, s.enum_scan = empty_disc, fps, enum
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["enum", "10.0.10.10", "10.0.10.11",
+                                   "-o", d, "--workers", "1"])
+                self.assertEqual(rc, 0)
+                self.assertIn("Falling back to -Pn", buf.getvalue())
+                hosts = Store(os.path.join(d, "results.sqlite")).all_hosts()
+                # Both ping-blocking hosts still got enumerated with their ports.
+                self.assertEqual(len(hosts), 2)
+                self.assertTrue(all(h.open_ports for h in hosts))
+        finally:
+            (s.check_environment, s.discover_hosts,
+             s.full_port_scan, s.enum_scan) = saved
+
+
 class PhaseIdempotencyTest(unittest.TestCase):
     """Re-running a phase must NOT duplicate rows. Guards the core store-merge
     contract: hosts/vulns/accounts/exploits/issues dedupe on re-scan."""
@@ -1185,6 +1261,209 @@ recce-enum  host=DBSRV01  user=svc_sql  07/20/2026 12:00:00
 ==== AlwaysInstallElevated ====
 [!] AlwaysInstallElevated is set (HKLM+HKCU) -> install a malicious MSI as SYSTEM
 """
+
+
+_GNMAP = ("# Nmap 7.94 scan initiated\n"
+          "Host: 10.0.20.6 (web02)\tStatus: Up\n"
+          "Host: 10.0.20.6 (web02)\tPorts: 21/open/tcp//ftp//vsftpd 2.3.4/, "
+          "22/open/tcp//ssh//OpenSSH 7.4/, 80/open/tcp//http//Apache httpd 2.4.49/"
+          "\tIgnored State: closed (997)\n"
+          "Host: 10.0.20.6 (web02)\tOS: Linux 5.4\n")
+
+
+class NmapImportTest(unittest.TestCase):
+    def test_split_product_version(self):
+        from recce.parser import _split_product_version
+        self.assertEqual(_split_product_version("OpenSSH 8.2p1 Ubuntu"),
+                         ("OpenSSH", "8.2p1"))
+        self.assertEqual(_split_product_version("Apache httpd 2.4.49"),
+                         ("Apache httpd", "2.4.49"))
+        self.assertEqual(_split_product_version("Microsoft Windows RPC"),
+                         ("Microsoft Windows RPC", ""))
+
+    def test_parse_gnmap(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.gnmap")
+            with open(f, "w") as fh:
+                fh.write(_GNMAP)
+            hosts = parser.parse_gnmap(f)
+            self.assertEqual(len(hosts), 1)
+            h = hosts[0]
+            self.assertEqual(h.ip, "10.0.20.6")
+            self.assertIn("web02", h.hostnames)
+            self.assertEqual({p.portid for p in h.ports}, {21, 22, 80})
+            ftp = next(p for p in h.ports if p.portid == 21)
+            self.assertEqual(ftp.product, "vsftpd")
+            self.assertEqual(ftp.version, "2.3.4")
+            self.assertEqual(h.os_family, "Linux")
+
+    def test_parse_normal_text(self):
+        from recce import parser
+        normal = ("Nmap scan report for web02 (10.0.20.6)\n"
+                  "Host is up (0.00042s latency).\n"
+                  "PORT   STATE SERVICE VERSION\n"
+                  "21/tcp open  ftp     vsftpd 2.3.4\n"
+                  "80/tcp open  http    Apache httpd 2.4.49\n"
+                  "445/tcp closed microsoft-ds\n")
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.nmap")
+            with open(f, "w") as fh:
+                fh.write(normal)
+            hosts = parser.parse_normal(f)
+            self.assertEqual(len(hosts), 1)
+            h = hosts[0]
+            self.assertEqual(h.ip, "10.0.20.6")
+            self.assertIn("web02", h.hostnames)
+            self.assertEqual({p.portid for p in h.ports}, {21, 80})  # closed dropped
+            ftp = next(p for p in h.ports if p.portid == 21)
+            self.assertEqual((ftp.product, ftp.version), ("vsftpd", "2.3.4"))
+
+    def test_parse_normal_bare_ip(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.nmap")
+            with open(f, "w") as fh:
+                fh.write("Nmap scan report for 10.0.0.9\n22/tcp open ssh\n")
+            hosts = parser.parse_normal(f)
+            self.assertEqual(hosts[0].ip, "10.0.0.9")
+            self.assertEqual(hosts[0].hostnames, [])
+
+    def test_parse_nmap_file_autodetects_all_formats(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            # grepable content, no extension -> sniffed
+            g = os.path.join(d, "noext_grep")
+            with open(g, "w") as fh:
+                fh.write(_GNMAP)
+            self.assertTrue(parser.parse_nmap_file(g))
+            # normal text, no extension -> sniffed
+            n = os.path.join(d, "noext_normal")
+            with open(n, "w") as fh:
+                fh.write("Nmap scan report for 1.2.3.9\n80/tcp open http\n")
+            self.assertEqual(parser.parse_nmap_file(n)[0].ip, "1.2.3.9")
+            # xml
+            x = os.path.join(d, "s.xml")
+            with open(x, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun><host><status state="up"/>'
+                         '<address addr="1.2.3.4" addrtype="ipv4"/><ports>'
+                         '<port protocol="tcp" portid="80"><state state="open"/>'
+                         '<service name="http"/></port></ports></host></nmaprun>')
+            self.assertEqual(parser.parse_nmap_file(x)[0].ip, "1.2.3.4")
+
+    def test_masscan_xml_is_nmap_compatible(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "mass.xml")
+            with open(f, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun scanner="masscan"><host>'
+                         '<address addr="10.0.30.9" addrtype="ipv4"/><ports>'
+                         '<port protocol="tcp" portid="5432"><state state="open"/>'
+                         '<service name="postgresql"/></port></ports></host></nmaprun>')
+            hosts = parser.parse_nmap_file(f)
+            self.assertEqual(hosts[0].ip, "10.0.30.9")
+            self.assertEqual(hosts[0].open_ports[0].portid, 5432)
+
+    def test_oa_directory_imports_once_prefers_xml(self):
+        # A -oA set (base.xml + base.gnmap + base.nmap) must import once, from xml.
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            for ext, body in ((".gnmap", _GNMAP),
+                              (".nmap", "Nmap scan report for x (10.0.20.6)\n"
+                                        "21/tcp open ftp vsftpd 2.3.4\n"),
+                              (".xml", '<?xml version="1.0"?><nmaprun><host>'
+                                       '<status state="up"/><address addr="10.0.20.6" '
+                                       'addrtype="ipv4"/><ports><port protocol="tcp" '
+                                       'portid="21"><state state="open"/><service '
+                                       'name="ftp" product="vsftpd" version="2.3.4"/>'
+                                       '</port></ports></host></nmaprun>')):
+                with open(os.path.join(d, "scan" + ext), "w") as fh:
+                    fh.write(body)
+            files = cli._collect_scan_files([d])
+            self.assertEqual(len(files), 1)
+            self.assertTrue(files[0].endswith(".xml"))
+
+    def test_import_builds_workbook_with_checkmarks_and_findings(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.gnmap")
+            with open(f, "w") as fh:
+                fh.write(_GNMAP)
+            eng = os.path.join(d, "eng")
+            argv = ["import", f, "-o", eng, "--title", "T"]
+            args = cli.build_arg_parser().parse_args(argv)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(args.func(args), 0)
+            h = Store(os.path.join(eng, "results.sqlite")).get_host("10.0.20.6")
+            self.assertTrue(h.enumerated)                  # checkmark set
+            self.assertEqual(len(h.open_ports), 3)
+            # offline version->CVE engine fired on the imported versions
+            titles = " ".join(v.title for v in h.vulns)
+            self.assertIn("vsftpd 2.3.4 backdoor", titles)
+            self.assertIn("path traversal", titles.lower())
+            self.assertTrue(os.path.exists(os.path.join(eng, "enumeration.xlsx")))
+
+    def test_import_appends_subnets_and_merges_overlap(self):
+        # Several scans (different subnets, then an overlapping host) must APPEND
+        # new hosts and MERGE overlaps - never duplicate a host or a port.
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            eng = os.path.join(d, "eng")
+
+            def imp(text):
+                f = os.path.join(d, "s.gnmap")
+                with open(f, "w") as fh:
+                    fh.write(text)
+                a = cli.build_arg_parser().parse_args(["import", f, "-o", eng])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    a.func(a)
+
+            imp("Host: 10.0.10.10 (dc01)\tPorts: 445/open/tcp//microsoft-ds//, "
+                "3389/open/tcp//ms-wbt-server//\tIgnored State: closed\n"
+                "Host: 10.0.10.25 (ws01)\tPorts: 445/open/tcp//microsoft-ds//"
+                "\tIgnored State: closed\n")                       # subnet .10
+            imp("Host: 10.0.20.5 (web01)\tPorts: 22/open/tcp//ssh//OpenSSH 8.2p1/"
+                "\tIgnored State: closed\n")                       # subnet .20 (appended)
+            imp("Host: 10.0.10.10 (dc01)\tPorts: 88/open/tcp//kerberos-sec//, "
+                "445/open/tcp//microsoft-ds//\tIgnored State: closed\n")  # overlap
+            s = Store(os.path.join(eng, "results.sqlite"))
+            hosts = s.all_hosts()
+            self.assertEqual(len(hosts), 3)                        # dc01 not duplicated
+            self.assertEqual({h.subnet for h in hosts},
+                             {"10.0.10.0/24", "10.0.20.0/24"})     # both subnets present
+            dc = s.get_host("10.0.10.10")
+            self.assertEqual(sorted(p.portid for p in dc.open_ports), [88, 445, 3389])
+            s.close()
+
+    def test_import_merges_and_preserves_tracking(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "s.gnmap")
+            with open(f, "w") as fh:
+                fh.write(_GNMAP)
+            eng = os.path.join(d, "eng")
+            def run():
+                a = cli.build_arg_parser().parse_args(["import", f, "-o", eng])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    a.func(a)
+            run()
+            # Tick via the `review` command (writes tracking AND regenerates the
+            # workbook, the real path a tester's edits take).
+            rv = cli.build_arg_parser().parse_args(
+                ["review", "--host", "10.0.20.6", "--note", "manually reviewed",
+                 "-o", eng])
+            with contextlib.redirect_stdout(io.StringIO()):
+                rv.func(rv)
+            run()                                          # re-import same scan
+            s = Store(os.path.join(eng, "results.sqlite"))
+            h = s.get_host("10.0.20.6")
+            self.assertEqual(len(h.open_ports), 3)         # not duplicated
+            self.assertEqual(s.get_tracking().get("host:10.0.20.6"),
+                             (True, "manually reviewed"))  # tick preserved
+            s.close()
 
 
 class IngestParserTest(unittest.TestCase):
@@ -1368,10 +1647,36 @@ class IngestCommandTest(unittest.TestCase):
             import openpyxl
             ws = openpyxl.load_workbook(os.path.join(d, "enumeration.xlsx"))["Priv-Esc"]
             hdr = [c.value for c in ws[1]]
-            hi = hdr.index("How-to / command")
-            on_target = sum(1 for r in ws.iter_rows(min_row=2, values_only=True)
-                            if r[hi] and "on-target" in str(r[hi]))
+            ti = hdr.index("Type")
+            rows = list(ws.iter_rows(min_row=2, values_only=True))
+            # The 5 ingested findings each become a row verdicted as an escalation
+            # path or an observation (this fresh host has no remote findings).
+            on_target = sum(1 for r in rows if r[ti] in ("Escalation path", "Finding"))
             self.assertEqual(on_target, 5)
+            # ...and at least some are verdicted as actual escalation paths.
+            self.assertGreater(sum(1 for r in rows if r[ti] == "Escalation path"), 0)
+            # The generic OS checklist is clearly marked, not mixed in as findings.
+            self.assertGreater(sum(1 for r in rows if r[ti] == "Checklist"), 0)
+
+    def test_triaged_vuln_counts_toward_coverage(self):
+        """Regression: the Vulnerabilities sheet's row key and the coverage
+        counter's key must be identical, or ticking Triaged is never counted."""
+        from recce import tracking as tr
+        from recce.models import Vuln
+        from recce.report_excel import _spec_vulns
+        h = Host(ip="10.0.0.5", ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                             script_id="smb-vuln-ms17-010", title="ms17-010 RCE",
+                             severity="high", source="nse")])
+        sheet_key = _spec_vulns([h]).rows[0]["key"]
+        # the sheet key, the canonical key, and the coverage key all agree
+        self.assertEqual(sheet_key, tr.vuln_row_key(h.vulns[0]))
+        self.assertIn(sheet_key, tr.item_keys([h])["vulns"])
+        # untriaged -> 0/1; triaging the sheet's key -> 1/1 (was stuck at 0 before)
+        self.assertEqual(tr.compute_coverage([h], {})["vulns"],
+                         {"total": 1, "done": 0, "pct": 0})
+        cov = tr.compute_coverage([h], {sheet_key: (True, "")})["vulns"]
+        self.assertEqual(cov, {"total": 1, "done": 1, "pct": 100})
 
 
 class ProgressAndAuthTest(unittest.TestCase):

