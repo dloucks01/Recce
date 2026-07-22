@@ -43,6 +43,19 @@ class TargetsTest(unittest.TestCase):
         hosts, _ = load_targets(["10.0.0.1", "10.0.0.1", "10.0.0.0/30"])
         self.assertEqual(hosts.count("10.0.0.1"), 1)
 
+    def test_range_drops_network_and_broadcast(self):
+        # A full-octet range means "the subnet", not "scan .0 and .255".
+        hosts, _ = load_targets(["10.200.37.0-255"])
+        self.assertNotIn("10.200.37.0", hosts)
+        self.assertNotIn("10.200.37.255", hosts)
+        self.assertIn("10.200.37.1", hosts)
+        self.assertIn("10.200.37.254", hosts)
+
+    def test_explicit_single_dot_zero_is_respected(self):
+        # An explicitly-typed single address is kept (the user asked for it).
+        hosts, _ = load_targets(["10.200.37.0"])
+        self.assertEqual(hosts, ["10.200.37.0"])
+
 
 class ParserTest(unittest.TestCase):
     def setUp(self):
@@ -1788,20 +1801,30 @@ class DatabaseModuleTest(unittest.TestCase):
 
 class PrivescModuleTest(unittest.TestCase):
     def test_windows_playbook(self):
+        # The generic OS checklist now lives on the separate reference sheet
+        # (playbook_rows), scoped to the OSes present in the engagement.
         from recce import privesc
         h = Host(ip="10.0.0.5", os_family="Windows",
                  ports=[Port(portid=445, service="microsoft-ds")])
-        cats = {r["category"] for r in privesc.plan(h)}
-        self.assertIn("windows", cats)
-        self.assertNotIn("linux", cats)
+        oses = {r["os"] for r in privesc.playbook_rows([h])}
+        self.assertEqual(oses, {"windows"})
 
     def test_linux_playbook(self):
         from recce import privesc
         h = Host(ip="10.0.0.6", os_family="Linux",
                  ports=[Port(portid=22, service="ssh")])
-        cats = {r["category"] for r in privesc.plan(h)}
-        self.assertIn("linux", cats)
-        self.assertNotIn("windows", cats)
+        oses = {r["os"] for r in privesc.playbook_rows([h])}
+        self.assertEqual(oses, {"linux"})
+
+    def test_playbook_shows_both_oses_for_mixed_or_unknown_scope(self):
+        from recce import privesc
+        mixed = [Host(ip="10.0.0.5", os_family="Windows"),
+                 Host(ip="10.0.0.6", os_family="Linux")]
+        self.assertEqual({r["os"] for r in privesc.playbook_rows(mixed)},
+                         {"windows", "linux"})
+        unknown = [Host(ip="10.0.0.9")]
+        self.assertEqual({r["os"] for r in privesc.playbook_rows(unknown)},
+                         {"windows", "linux"})
 
     def test_remote_finding_from_vuln(self):
         from recce import privesc
@@ -1820,16 +1843,17 @@ class PrivescModuleTest(unittest.TestCase):
                              product="Microsoft IIS httpd", version="10.0"),
                         Port(portid=1433, service="ms-sql-s",
                              product="Microsoft SQL Server")])
-        rows = privesc.plan(h)
-        blob = " ".join(f"{r['vector']} {r['howto']} {r['note']}" for r in rows)
-        # Current, still-working-on-patched-Win11 Potatoes are named as exploits.
+        # The Potato playbook is reference material (playbook sheet)...
+        pb_blob = " ".join(f"{r['vector']} {r['howto']} {r['note']}"
+                           for r in privesc.playbook_rows([h]))
         for tool in ("GodPotato", "PrintSpoofer", "EfsPotato", "JuicyPotatoNG",
                      "RoguePotato", "LocalPotato"):
-            self.assertIn(tool, blob)
-        self.assertIn("CVE-2023-21746", blob)                 # LocalPotato CVE
-        self.assertIn("SeImpersonate", blob)                  # precondition named
-        # recce flags the opportunity remotely from the IIS + MSSQL services.
-        findings = [r for r in rows if r["category"] == "finding"]
+            self.assertIn(tool, pb_blob)
+        self.assertIn("CVE-2023-21746", pb_blob)              # LocalPotato CVE
+        self.assertIn("SeImpersonate", pb_blob)               # precondition named
+        # ...but recce flags the opportunity remotely from the IIS + MSSQL services
+        # as real findings on the Priv-Esc tab.
+        findings = [r for r in privesc.plan(h) if r["category"] == "finding"]
         self.assertTrue(any("IIS" in r["vector"] for r in findings))
         self.assertTrue(any("MSSQL" in r["vector"] for r in findings))
 
@@ -2316,26 +2340,32 @@ class PrivEscVerdictTest(unittest.TestCase):
              "vector": "recently modified config /opt/app/settings.conf",
              "section": "Files", "source": "recce-enum"}])
         rows = pe.plan(h)
-        # escalation sorts first; both finding and checklist are present.
+        # escalation sorts first; the unmappable observation is a finding. The
+        # generic checklist is NOT here anymore (it's the Playbook sheet), and a
+        # swept host gets no 'run recce deploy' to-do.
         self.assertEqual(rows[0]["type"], "escalation")
         self.assertIn("GTFOBins", rows[0]["howto"])       # verdict shows the tool
         types = [r["type"] for r in rows]
         self.assertIn("finding", types)                   # the unmappable observation
-        self.assertIn("checklist", types)                 # generic OS reference
-        # ordering: no checklist row precedes a finding/escalation row.
-        order = {"escalation": 0, "finding": 1, "checklist": 2}
+        self.assertNotIn("checklist", types)
+        self.assertNotIn("action", types)                 # already swept -> no to-do
+        order = {"escalation": 0, "finding": 1, "action": 2}
         idx = [order[t] for t in types]
         self.assertEqual(idx, sorted(idx))
-        # checklist notes that the host was already swept.
-        cl = next(r for r in rows if r["type"] == "checklist")
-        self.assertIn("already swept", cl["note"])
 
-    def test_no_ingest_is_checklist_only(self):
+    def test_unswept_host_with_ports_gets_a_deploy_todo_not_a_checklist(self):
         from recce import privesc as pe
-        rows = pe.plan(Host(ip="10.0.0.6", os_family="Windows"))
-        self.assertTrue(rows)
-        self.assertTrue(all(r["type"] == "checklist" for r in rows))
-        self.assertNotIn("already swept", rows[0]["note"])  # no sweep claimed
+        rows = pe.plan(Host(ip="10.0.0.6", os_family="Windows",
+                            ports=[Port(portid=445, service="microsoft-ds")]))
+        self.assertEqual([r["type"] for r in rows], ["action"])
+        self.assertIn("recce deploy", rows[0]["howto"])
+
+    def test_dead_ip_produces_no_privesc_rows(self):
+        # A host with no open ports and nothing observed (e.g. a network/broadcast
+        # address that slipped into scope) must not fabricate privesc entries.
+        from recce import privesc as pe
+        self.assertEqual(pe.plan(Host(ip="10.200.37.0")), [])
+        self.assertEqual(pe.all_rows([Host(ip="10.200.37.0")]), [])
 
 
 class CredentialsTest(unittest.TestCase):

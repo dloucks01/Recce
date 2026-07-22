@@ -173,20 +173,22 @@ def _os_kind(host: Host) -> str:
 
 
 def plan(host: Host) -> list[dict]:
-    """Per-host privesc rows, each tagged with a `type`:
+    """Per-host privesc rows - EVIDENCE only, each tagged with a `type`:
 
-      * "escalation" - a CONFIRMED on-target finding that maps to a real escalation
-        technique (verdicted with the same engine as the Exploitation sheet); the
-        How-to shows the exact existing tool + command. This is "what is actually
+      * "escalation" - a CONFIRMED on-target finding (from a `recce deploy` /
+        `ingest` local sweep) that maps to a real escalation technique; the How-to
+        shows the exact existing tool + command. This is "what is actually
         priv-escable" on this host.
       * "finding"    - an observation (on-target or remote) with no auto-mapped
         escalation - worth a look, not a confirmed path.
-      * "checklist"  - the generic OS playbook: what to RUN once you have a shell.
-        Reference only, never a confirmed finding.
+      * "action"     - the host has a foothold surface (open ports) but hasn't been
+        locally swept yet: a single pointer to run `recce deploy`, instead of
+        dumping the generic playbook for every host.
 
-    Rows are ordered escalation -> finding -> checklist, so the real paths sit on
-    top. The checklist only implies "here's what to try" - it is not evidence of
-    anything until you ingest a recce-enum.sh/.ps1 run."""
+    A host with no open ports and nothing observed produces NO rows (so a dead IP
+    or a network/broadcast address never fabricates privesc entries). The generic
+    OS checklist lives on the separate 'Priv-Esc Playbook' reference sheet now -
+    see playbook_rows() - so this tab stays real findings, not boilerplate."""
     kind = _os_kind(host)
     os_hint = kind if kind != "unknown" else ""
     swept = bool(getattr(host, "local_findings", None))
@@ -214,18 +216,18 @@ def plan(host: Host) -> list[dict]:
         rows.append({"type": "finding", "category": "finding", "vector": f["signal"],
                      "howto": f["detail"], "note": f["refs"]})
 
-    # 3. OS checklist - what to run once you have a foothold (reference only).
-    vectors = []
-    if kind in ("windows", "unknown"):
-        vectors += [("windows", v) for v in WINDOWS_VECTORS]
-    if kind in ("linux", "unknown"):
-        vectors += [("linux", v) for v in LINUX_VECTORS]
-    tail = " (host already swept - see the findings above)" if swept else ""
-    for os_kind, (vector, howto, note) in vectors:
-        rows.append({"type": "checklist", "category": os_kind, "vector": vector,
-                     "howto": howto, "note": note + tail})
+    # 3. Not swept but there IS a foothold surface -> one actionable pointer at the
+    #    mass-deploy path, not the whole generic checklist. (No ports = no row.)
+    if not swept and host.open_ports:
+        rows.append({
+            "type": "action", "category": kind if kind != "unknown" else "host",
+            "vector": "Local privesc enum not yet run",
+            "howto": "recce deploy -u USER -p PASS -o eng   (or: recce ingest <loot>)",
+            "note": "Run the read-only local sweep (recce-enum.sh/.ps1) to populate "
+                    "real escalation findings here. Manual checklist: see the "
+                    "'Priv-Esc Playbook' sheet."})
 
-    order = {"escalation": 0, "finding": 1, "checklist": 2}
+    order = {"escalation": 0, "finding": 1, "action": 2}
     rows.sort(key=lambda r: order.get(r.get("type"), 3))
     return rows
 
@@ -239,3 +241,24 @@ def all_rows(hosts: list[Host]) -> list[dict]:
                         "os": h.os_family or h.os_name,
                         "key": f"privesc:{h.ip}:{r['category']}:{r['vector']}"})
     return out
+
+
+def playbook_rows(hosts: list[Host]) -> list[dict]:
+    """The generic OS privesc checklist for the 'Priv-Esc Playbook' reference sheet
+    - listed ONCE per OS present in the engagement (both if the scope is mixed or
+    the OS is unknown), not repeated per host. Reference material: what to RUN once
+    you have a shell, never evidence of anything."""
+    kinds = {_os_kind(h) for h in hosts}
+    known = kinds & {"windows", "linux"}
+    show_win = "windows" in kinds or not known
+    show_lin = "linux" in kinds or not known
+    rows: list[dict] = []
+    if show_win:
+        for vector, howto, note in WINDOWS_VECTORS:
+            rows.append({"os": "windows", "vector": vector, "howto": howto, "note": note,
+                         "key": f"playbook:windows:{vector}"})
+    if show_lin:
+        for vector, howto, note in LINUX_VECTORS:
+            rows.append({"os": "linux", "vector": vector, "howto": howto, "note": note,
+                         "key": f"playbook:linux:{vector}"})
+    return rows

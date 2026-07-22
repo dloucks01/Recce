@@ -26,7 +26,14 @@ def _expand_token(token: str) -> list[str]:
         base, _, tail = token.rpartition(".")
         lo_s, _, hi_s = tail.partition("-")
         lo, hi = int(lo_s), int(hi_s)
-        return [f"{base}.{o}" for o in range(lo, hi + 1)]
+        octets = list(range(lo, hi + 1))
+        # Drop the /24 network (.0) and broadcast (.255) when the range spans them
+        # but has other hosts too - a range like 10.0.0.0-254 means "the subnet",
+        # not "scan the network address". A range that is ONLY .0 or .255 is left
+        # alone (respect an explicit single-address request).
+        if len(octets) > 1:
+            octets = [o for o in octets if o not in (0, 255)]
+        return [f"{base}.{o}" for o in octets]
     return [token]  # single IP or hostname
 
 

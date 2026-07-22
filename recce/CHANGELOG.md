@@ -75,6 +75,26 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   privileged `--admin-user` account.
 
 ### Changed
+- **Priv-Esc tab is real findings now, not boilerplate.** It used to emit the
+  generic Windows/Linux privesc *playbook* for every host in the datastore — so a
+  host you'd never touched (even a network/broadcast address like `10.200.37.0`
+  that slipped into scope) showed ~18 rows of "what to run once you have a shell,"
+  making the whole tab read as filler. Fixed three ways:
+  - **The tab is driven by the local sweep.** Confirmed escalation paths and
+    on-target observations come from `recce deploy` / `ingest` folding the
+    read-only `recce-enum.sh/.ps1` output into `local_findings` — that's what the
+    Priv-Esc tab shows, plus remotely-observed signals (MS17-010, SMB signing off,
+    IIS/MSSQL SeImpersonate, …).
+  - **Un-swept hosts get one actionable to-do**, not a checklist: a host with open
+    ports but no local sweep shows a single "Local privesc enum not yet run → run
+    `recce deploy`" row. A host with no open ports and nothing observed produces
+    **no rows at all** (so dead IPs never fabricate entries).
+  - **The generic playbook moved to a new `Priv-Esc Playbook` reference sheet**,
+    listed once per OS in scope instead of repeated per host.
+- **Target hygiene: ranges drop the network / broadcast address.** A full-octet
+  range like `10.200.37.0-255` now expands to `.1`–`.254` (it means "the subnet",
+  not "scan `.0` and `.255`"), matching how CIDR expansion already behaved. An
+  explicitly-typed single `…​.0` is still respected.
 - **`deploy` now reports every host's outcome: succeeded / errored / unable.**
   Previously a host with no usable transport (no SSH/WinRM/SMB port, or creds that
   didn't validate) was silently rolled into a single "N skipped" count. Now every

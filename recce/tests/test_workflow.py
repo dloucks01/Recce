@@ -1763,8 +1763,14 @@ class IngestCommandTest(unittest.TestCase):
             self.assertEqual(on_target, 5)
             # ...and at least some are verdicted as actual escalation paths.
             self.assertGreater(sum(1 for r in rows if r[ti] == "Escalation path"), 0)
-            # The generic OS checklist is clearly marked, not mixed in as findings.
-            self.assertGreater(sum(1 for r in rows if r[ti] == "Checklist"), 0)
+            # The Priv-Esc tab is now findings-only: NO generic checklist rows
+            # (a swept host also gets no 'run recce deploy' to-do).
+            self.assertEqual(sum(1 for r in rows if r[ti] in ("Checklist", "To do")), 0)
+            # The generic OS checklist lives on the separate reference sheet.
+            wb = openpyxl.load_workbook(os.path.join(d, "enumeration.xlsx"))
+            self.assertIn("Priv-Esc Playbook", wb.sheetnames)
+            pb = wb["Priv-Esc Playbook"]
+            self.assertGreater(pb.max_row, 1)         # has playbook rows
 
     def test_triaged_vuln_counts_toward_coverage(self):
         """Regression: the Vulnerabilities sheet's row key and the coverage
