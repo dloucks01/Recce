@@ -2,6 +2,19 @@
 
 All notable changes to recce are documented here. Dates are UTC.
 
+## [0.2.5] - 2026-07-22
+
+### Fixed
+- **`doctor` LDAP check was a false negative.** It reported `ldapsearch` missing
+  when only the `ldap3` Python package was installed, even though LDAP
+  enumeration works fine via ldap3 (the runtime gate `ad.ldap_available()` accepts
+  either). The check now mirrors that gate and is labelled `ldap` (shows which
+  backend it found — `ldapsearch` or the `ldap3 package`). Companion to the 0.2.4
+  browser/summary fixes; an audit confirmed the remaining checks (nmap, masscan,
+  ssh, netexec, impacket, openpyxl) already match their runtime gates.
+- **`doctor` searchsploit check** now calls `exploits.available()` (the runtime
+  gate) instead of a standalone `which()`, so it can't drift from actual behavior.
+
 ## [0.2.4] - 2026-07-22
 
 ### Fixed

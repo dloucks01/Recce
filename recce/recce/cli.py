@@ -1445,7 +1445,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("nmap", True, "core scanning / service+OS detection / NSE vuln+AD+DB"),
         ("masscan", False, "--fast network-wide sweep"),
         ("searchsploit", False, "offline exploit mapping (Exploits sheet)"),
-        ("ldapsearch", False, "credentialed AD LDAP enumeration"),
+        ("ldap", False, "credentialed AD LDAP enum (ldapsearch or the ldap3 package)"),
         ("netexec", False, "credentialed SMB/AD enum (credenum phase)"),
         ("ssh", False, "credentialed Linux local checks (credenum phase)"),
         ("browser", False, "auto web screenshots in write-ups (firefox/chromium)"),
@@ -1454,6 +1454,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     presence: dict[str, bool] = {}   # reused for the summary, so it can't disagree
     for name, required, desc in tools:
         present = shutil.which(name) is not None
+        if name == "searchsploit":
+            from . import exploits
+            present = exploits.available()               # mirror the runtime gate
+        if name == "ldap":
+            from . import ad
+            present = ad.ldap_available()                # ldapsearch OR ldap3 package
+            if present:
+                backend = "ldapsearch" if shutil.which("ldapsearch") else "ldap3 package"
+                desc = f"credentialed AD LDAP enum (using {backend})"
         if name == "netexec":
             from . import credenum
             present = credenum.smb_tool() is not None   # nxc / crackmapexec too
