@@ -2023,6 +2023,40 @@ class CliSmokeTest(unittest.TestCase):
         rc = cli.cmd_doctor(SimpleNamespace(no_self_scan=True))
         self.assertIn(rc, (0, 1))  # 0 if nmap present, 1 if not - never raises
 
+    def test_doctor_ldap_uses_capability_gate_not_just_binary(self):
+        """Regression: doctor reports LDAP via ad.ldap_available() (ldapsearch OR
+        the ldap3 package), not a raw which('ldapsearch') - else a box with only
+        the ldap3 package is falsely told LDAP is missing, and the detail line
+        and the summary disagree."""
+        import io
+        import contextlib
+        import shutil
+        from recce import cli, ad
+        orig_avail, orig_which = ad.ldap_available, shutil.which
+
+        def run():
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli.cmd_doctor(SimpleNamespace(no_self_scan=True))
+            return buf.getvalue()
+        try:
+            # ldap3 present, ldapsearch binary absent -> capability IS available
+            ad.ldap_available = lambda: True
+            shutil.which = lambda n: None if n == "ldapsearch" else orig_which(n)
+            out = run()
+            self.assertTrue(any(l.strip().startswith("ldap") and "OK" in l
+                                for l in out.splitlines()), out)
+            missing = next((l for l in out.splitlines()
+                            if "Optional tools missing" in l), "")
+            self.assertNotIn("ldap", missing)
+            # neither backend present -> reported missing (detail + summary agree)
+            ad.ldap_available = lambda: False
+            out = run()
+            self.assertTrue(any(l.strip().startswith("ldap") and "-   (optional)" in l
+                                for l in out.splitlines()), out)
+        finally:
+            ad.ldap_available, shutil.which = orig_avail, orig_which
+
 
 class ExploitPlanTest(unittest.TestCase):
     @staticmethod
