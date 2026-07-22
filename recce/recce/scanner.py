@@ -44,6 +44,13 @@ class ScanProfile:
     reliable: bool = False            # rate-limited/lossy net: no --min-rate floor,
                                       # more retries, let nmap's congestion control
                                       # adapt (auto-enabled when probe drops seen)
+    max_retries: int = 3              # nmap --max-retries on the port sweep. 3 (not
+                                      # nmap's 1-2 fast default) so a single dropped
+                                      # SYN doesn't silently lose an open port
+    verify: bool = True               # re-scan a host that came back with 0 ports to
+                                      # confirm it's really empty vs a missed sweep
+    verify_all: bool = False          # also verify 0-port hosts under -Pn (not just
+                                      # discovered-live ones) - slower on dead-IP scopes
 
 
 PROFILES: dict[str, ScanProfile] = {
@@ -63,6 +70,8 @@ class ScanIssue:
 
     level: str        # "error" (nothing usable) | "warning" (partial results)
     message: str
+    kind: str = ""    # classifier, e.g. "host-timeout" (scan truncated -> port
+                      # list is partial); "" = unclassified
 
 
 @dataclass
@@ -234,12 +243,14 @@ def _issue_from(outcome: RunOutcome, out_xml: str, phase: str,
     if outcome.timed_out:
         return ScanIssue("error",
                          f"{phase}: hard-timed-out (nmap unresponsive); results "
-                         f"may be missing")
+                         f"may be missing", kind="host-timeout")
     blob = f"{outcome.stdout}\n{outcome.stderr}".lower()
     if "host timeout" in blob or "due to host timeout" in blob:
         span = f" after {minutes}m" if minutes else ""
         return ScanIssue("warning",
-                         f"{phase}: host timed out{span} - partial results kept")
+                         f"{phase}: host timed out{span} - partial results kept "
+                         "(port list is INCOMPLETE; raise --host-timeout or narrow "
+                         "scope with --top-ports)", kind="host-timeout")
     if outcome.returncode not in (0, None) and (
             not os.path.exists(out_xml) or os.path.getsize(out_xml) < 80):
         err = (outcome.stderr or outcome.stdout or "").strip().splitlines()
@@ -308,11 +319,13 @@ def _portscan_cmd(ip: str, out_xml: str, profile: ScanProfile,
                *to_args, *port_spec, ip, "-oX", out_xml]
     else:
         to_args, kill = _timeout_args(profile)
-        # -Pn / discovery fallback scans dead IPs too, so retry less to abandon
-        # non-responders faster; a discovered-live set is retried more thoroughly.
-        retries = "1" if profile.assume_up else "2"
+        # A dropped SYN with too few retries silently loses an open port, so retry
+        # enough to survive minor loss (default 3, not nmap's fast 1-2). Dead -Pn
+        # IPs are still bounded by --host-timeout, and a 0-port host gets a
+        # verification re-scan, so completeness no longer hinges on this alone.
         cmd = ["nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
-               "--min-rate", str(profile.min_rate), "--max-retries", retries, "--open",
+               "--min-rate", str(profile.min_rate),
+               "--max-retries", str(profile.max_retries), "--open",
                *to_args, *port_spec, ip, "-oX", out_xml]
     return cmd, kill
 
@@ -341,6 +354,16 @@ def full_port_scan(ip: str, out_xml: str,
                          "adaptive timing (no --min-rate, more retries). If ports "
                          "still look low, raise --host-timeout or pass --reliable.")
     return out_xml, _issue_from(outcome, out_xml, "port-sweep", profile.host_timeout)
+
+
+def verify_port_scan(ip: str, out_xml: str,
+                     profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Independent confirmation sweep for a host the fast pass found 0 ports on -
+    always congestion-adaptive (no --min-rate floor, more retries), so it catches
+    ports a fast/lossy first pass dropped. Bounded by the same --host-timeout."""
+    cmd, kill = _portscan_cmd(ip, out_xml, profile, reliable=True)
+    outcome = _run(cmd, timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "verify", profile.host_timeout)
 
 
 def _masscan_ports(ip: str, out_xml: str,

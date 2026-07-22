@@ -683,9 +683,10 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("1.2.3.4", cmd)
         self.assertIsNotNone(calls[0][1])         # subprocess timeout set
 
-    def test_pn_scan_fails_fast_on_dead_hosts(self):
-        # -Pn scans dead IPs too; retry once (not twice) to abandon them faster,
-        # while the per-host --host-timeout ceiling still applies.
+    def test_pn_scan_retries_for_completeness_bounded_by_host_timeout(self):
+        # -Pn no longer drops to a single retry (that silently lost open ports on
+        # any lossy link). It uses the profile's max_retries (default 3) so a
+        # dropped SYN doesn't lose a port; dead IPs are bounded by --host-timeout.
         import copy
         import recce.scanner as s
         prof = copy.copy(s.PROFILES["standard"])
@@ -694,8 +695,8 @@ class ScannerCommandTest(unittest.TestCase):
             calls = self._capture(s.full_port_scan, "1.2.3.4",
                                   os.path.join(d, "p.xml"), prof)
         cmd = calls[0][0]
-        self.assertEqual(cmd[cmd.index("--max-retries") + 1], "1")   # fail-fast
-        self.assertIn("--host-timeout", cmd)                         # cap still applies
+        self.assertEqual(cmd[cmd.index("--max-retries") + 1], "3")   # completeness
+        self.assertIn("--host-timeout", cmd)                         # bounds dead IPs
         self.assertIn("--min-rate", cmd)                             # packet floor
 
     def test_port_sweep_auto_retries_reliably_on_dropped_probes(self):
@@ -2021,6 +2022,77 @@ class EnumRobustnessTest(unittest.TestCase):
         self.assertEqual(ips, {"10.0.0.10", "10.0.0.11", "10.0.0.13"})
         self.assertIn("10.0.0.12", {i["ip"] for i in store.get_issues()})
         store.close()
+
+    def test_zero_port_host_gets_verification_rescan(self):
+        """A host the fast pass found 0 ports on is re-verified with an adaptive
+        re-scan (discovered-live always; -Pn only with --verify-all), so a missed
+        sweep isn't silently trusted as 'no ports'."""
+        from recce import cli, scanner
+        from recce.models import Host
+        calls = {"verify": 0}
+        saved = (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+                 scanner.verify_port_scan, scanner.enum_scan, cli.np.parse_nmap_xml)
+
+        def fake_ports(path, ip):
+            return [80, 443] if "verify" in path else []   # fast=0, verify finds some
+
+        def fake_verify(ip, out, profile):
+            calls["verify"] += 1
+            return out, None
+        cli._ports_for_host = fake_ports
+        cli._fold_host = lambda ip, parsed, sm: Host(ip=ip, subnet="s")
+        scanner.full_port_scan = lambda ip, out, profile: (out, None)
+        scanner.verify_port_scan = fake_verify
+        scanner.enum_scan = lambda ip, ports, out, profile, creds=None: (out, None)
+        cli.np.parse_nmap_xml = lambda p: []
+        try:
+            d = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+            paths = {"raw": d}
+            # discovered-live 0-port host -> verified
+            cli._enum_worker("1.2.3.4", scanner.ScanProfile(ping_discovery=True),
+                             paths, None, None, {})
+            self.assertEqual(calls["verify"], 1)
+            # -Pn (assume-up) without --verify-all -> NOT re-scanning every dead IP
+            calls["verify"] = 0
+            cli._enum_worker("1.2.3.5",
+                             scanner.ScanProfile(ping_discovery=False, verify_all=False),
+                             paths, None, None, {})
+            self.assertEqual(calls["verify"], 0)
+            # -Pn WITH --verify-all -> verified
+            cli._enum_worker("1.2.3.6",
+                             scanner.ScanProfile(ping_discovery=False, verify_all=True),
+                             paths, None, None, {})
+            self.assertEqual(calls["verify"], 1)
+            # verify disabled -> never
+            calls["verify"] = 0
+            cli._enum_worker("1.2.3.7",
+                             scanner.ScanProfile(ping_discovery=True, verify=False),
+                             paths, None, None, {})
+            self.assertEqual(calls["verify"], 0)
+        finally:
+            (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+             scanner.verify_port_scan, scanner.enum_scan,
+             cli.np.parse_nmap_xml) = saved
+
+    def test_truncated_sweep_incomplete_flag_round_trips_and_clears_on_recompletion(self):
+        """A truncated sweep flags the host incomplete_scan (persisted); a later
+        complete sweep clears it, and ports union across the two scans."""
+        from recce.store import Store
+        from recce.models import Host, Port
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        st = Store(os.path.join(d, "s.sqlite"))
+        st.upsert_host(Host(ip="1.2.3.4", incomplete_scan=True,
+                            ports=[Port(portid=80, service="http", state="open")]))
+        self.assertTrue(st.all_hosts()[0].incomplete_scan)   # persisted
+        # a later, complete sweep of the same host
+        st.upsert_host(Host(ip="1.2.3.4", incomplete_scan=False,
+                            ports=[Port(portid=443, service="https", state="open")]))
+        h = st.all_hosts()[0]
+        self.assertFalse(h.incomplete_scan)                  # complete once either finished
+        self.assertEqual({p.portid for p in h.open_ports}, {80, 443})   # union
+        st.close()
 
     def test_corrupt_existing_workbook_is_regenerated_not_fatal(self):
         from recce.report_excel import update_workbook

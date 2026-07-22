@@ -6,6 +6,25 @@ All notable changes to recce are documented here. Dates are UTC.
 
 _Accumulating fixes since 0.2.3; folded into the next tagged release._
 
+### Changed
+- **Port sweep is now completeness-first — it won't silently miss open ports.**
+  The sweep is the foundation every later phase keys off, so three ways an open
+  port could be silently dropped are closed:
+  - **Retries.** `-Pn` used `--max-retries 1` ("fail fast on dead IPs"), so a
+    single dropped SYN lost an open port. The sweep now uses `--max-retries 3` by
+    default (tunable with `--max-retries`); dead IPs stay bounded by
+    `--host-timeout`, not by starving retries.
+  - **Verification re-scan.** A host that comes back with **0 open ports** is now
+    re-scanned with an independent congestion-adaptive sweep before "no ports" is
+    trusted — discovered-live hosts always, `-Pn` hosts with `--verify-all`. If
+    the re-scan finds ports, the fast pass under-reported and the re-scan wins.
+    `--no-verify` opts out.
+  - **Truncation is no longer silent.** A sweep cut short by `--host-timeout`
+    returns a *partial* port list; the host is now flagged `incomplete_scan`,
+    called out in `status` and marked `⚠ PARTIAL` on the Checklist, so a truncated
+    host is never mistaken for a fully-scanned empty one. (Ports union across
+    scans, so a later complete sweep clears the flag.)
+
 ### Fixed
 - **Port sweep missed open ports on rate-limiting / lossy networks.** The sweep
   pinned `nmap --min-rate 1500` (with `--max-retries` 1–2), which prevents nmap's

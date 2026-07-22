@@ -279,6 +279,12 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.os_detect = False
     if g("min_rate"):
         profile.min_rate = args.min_rate
+    if g("max_retries") is not None:
+        profile.max_retries = args.max_retries
+    if g("no_verify"):
+        profile.verify = False
+    if g("verify_all"):
+        profile.verify_all = True
     if g("reliable"):
         profile.reliable = True
     if g("udp_top"):
@@ -361,6 +367,7 @@ def _mkissue(scan_issue, phase: str) -> dict:
 def _enum_worker(ip, profile, paths, creds, port_map, subnet_map):
     """Returns (host|None, issues)."""
     issues: list[dict] = []
+    truncated = False
     if port_map is not None:
         open_ports = port_map.get(ip, [])
     else:
@@ -368,7 +375,28 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map):
         _, iss = scanner.full_port_scan(ip, fp_xml, profile)
         if iss:
             issues.append(_mkissue(iss, "port-sweep"))
+            truncated = iss.kind == "host-timeout"
         open_ports = _ports_for_host(fp_xml, ip)
+        # Completeness safeguard: a host that came back with ZERO ports may be
+        # genuinely empty - or the fast pass dropped every probe. Confirm it with
+        # an independent congestion-adaptive re-scan before we trust "no ports"
+        # (everything downstream keys off this). Gated so dead -Pn IPs on a clean
+        # network aren't all re-scanned: verify discovered-live hosts always, and
+        # -Pn hosts only with --verify-all.
+        if (not open_ports and profile.verify and not truncated
+                and (profile.ping_discovery or profile.verify_all)):
+            vx = os.path.join(paths["raw"], f"{ip}_verify.xml")
+            _, viss = scanner.verify_port_scan(ip, vx, profile)
+            vports = _ports_for_host(vx, ip)
+            if viss and viss.kind == "host-timeout":
+                truncated = True
+            if vports:
+                open_ports = vports
+                issues.append(_mkissue(scanner.ScanIssue(
+                    "warning", f"port-sweep: fast pass found 0 ports but a "
+                    f"verification re-scan found {len(vports)} - the first sweep "
+                    "under-reported (network likely lossy); used the re-scan"),
+                    "port-sweep"))
 
     enum_xml = os.path.join(paths["raw"], f"{ip}_enum.xml")
     _, iss = scanner.enum_scan(ip, open_ports, enum_xml, profile, creds=creds)
@@ -376,6 +404,7 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map):
         issues.append(_mkissue(iss, "enum"))
     host = _fold_host(ip, np.parse_nmap_xml(enum_xml), subnet_map)
     host.enumerated = True
+    host.incomplete_scan = truncated
     ad.identify_roles(host)
     ad.parse_signing_and_ntlm(host)
     from . import vulndb
@@ -1963,6 +1992,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         if any(v.severity in ("critical", "high") for v in h.vulns)
         and not tracking.get(tr.host_key(h.ip), (False, ""))[0]
     ]
+    incomplete = [h for h in hosts if getattr(h, "incomplete_scan", False)]
+    if incomplete:
+        print("\n  !! INCOMPLETE port sweeps (host-timeout) - these port lists are "
+              "PARTIAL, so downstream phases may be missing services:")
+        print("     " + ", ".join(h.ip for h in sorted(incomplete, key=lambda x: _ip_key(x.ip))))
+        print("     Re-scan with a larger --host-timeout (or --top-ports to narrow "
+              "scope) to complete them.")
     if unreviewed_dc:
         print("\n  ! Unreviewed Domain Controllers: "
               + ", ".join(h.ip for h in unreviewed_dc))
@@ -2115,6 +2151,16 @@ def _add_discovery(pp) -> None:
     pp.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
     pp.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
     pp.add_argument("--min-rate", type=int, help="nmap --min-rate override")
+    pp.add_argument("--max-retries", type=int, metavar="N",
+                    help="nmap --max-retries on the port sweep (default 3; raise for "
+                         "lossy links, lower for speed on clean ones)")
+    pp.add_argument("--no-verify", action="store_true",
+                    help="skip the confirmation re-scan of hosts that come back with "
+                         "0 open ports (faster; may trust a missed sweep)")
+    pp.add_argument("--verify-all", action="store_true",
+                    help="also re-verify 0-port hosts under -Pn (not just discovered-"
+                         "live ones) - catches every missed sweep, slower on dead-IP "
+                         "scopes")
     pp.add_argument("--reliable", action="store_true",
                     help="rate-limited / lossy network: drop the --min-rate floor, "
                          "retry dropped probes more, let nmap's congestion control "

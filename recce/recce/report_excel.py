@@ -139,6 +139,10 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
                            tr.step_applies(h, step))
                   for header, step in tr.STEP_COLUMNS.items()}
         open_ports = ", ".join(str(p.portid) for p in sorted(h.open_ports, key=lambda p: p.portid))
+        if getattr(h, "incomplete_scan", False):
+            # the sweep was truncated - flag the list as partial so it's never read
+            # as authoritative (downstream phases key off these ports)
+            open_ports = (open_ports + "  ⚠ PARTIAL (sweep timed out)").strip()
         rows.append({"key": tr.host_key(h.ip), "checks": checks, "data": {
             "Subnet": h.subnet, "IP": h.ip, "Hostname": h.hostname, "OS": h.os_guess,
             "Hops": (str(h.distance) if h.distance else ""),
