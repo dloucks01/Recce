@@ -312,6 +312,33 @@ foreach($br in @("$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data",
   if(Test-Path $br){ Finding ("Browser saved-login DB: " + $br + " (DPAPI-protected; decrypt on the host)"); Flag BROWSER_CREDS $br }
 }
 Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles" -Recurse -Include logins.json,key4.db -ErrorAction SilentlyContinue | ForEach-Object { Finding ("Firefox creds: " + $_.FullName); Flag BROWSER_CREDS $_.FullName }
+# SSH / PEM private keys in the profile (triaged: encrypted vs ready-to-use).
+Get-ChildItem "$env:USERPROFILE\.ssh" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'id_|identity|\.pem$|\.key$' } | ForEach-Object {
+  $enc = Select-String -Path $_.FullName -Pattern 'ENCRYPTED' -Quiet
+  Finding ("SSH/PEM private key: " + $_.FullName + $(if($enc){" (ENCRYPTED - ssh2john + john)"}else{" (UNENCRYPTED, ready to use)"})); Flag SSH_KEY $_.FullName
+}
+# Dev / cloud credential stores.
+foreach($cf in @("$env:USERPROFILE\.git-credentials","$env:USERPROFILE\.netrc","$env:USERPROFILE\.npmrc",
+                 "$env:USERPROFILE\.docker\config.json","$env:APPDATA\gcloud\credentials.db","$env:USERPROFILE\_netrc")){
+  if(Test-Path $cf){ Finding ("Credential store file: " + $cf); Flag CRED_FILE $cf }
+}
+# IIS applicationHost.config connection strings / passwords.
+$ah = "$env:WINDIR\System32\inetsrv\config\applicationHost.config"
+if((Test-Path $ah) -and (Select-String -Path $ah -Pattern 'password|connectionString' -Quiet)){ Finding "IIS applicationHost.config holds credentials / connection strings"; Flag STORED_CREDS $ah }
+# Scheduled-task XML with an embedded password.
+Get-ChildItem "$env:WINDIR\System32\Tasks" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 300 | ForEach-Object {
+  if(Select-String -Path $_.FullName -Pattern '<Password>|LogonType>Password' -Quiet){ Finding ("Scheduled-task stored credential: " + $_.FullName); Flag STORED_CREDS $_.FullName }
+}
+# PowerShell transcripts + saved RDP files may capture typed credentials.
+Get-ChildItem "$env:USERPROFILE\Documents" -Recurse -Filter 'PowerShell_transcript*' -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { Info ("PS transcript (may hold typed creds): " + $_.FullName) }
+Get-ChildItem $env:USERPROFILE -Recurse -Filter *.rdp -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { Info ("saved RDP connection: " + $_.FullName) }
+# High-signal secret sweep over the user profile (cloud keys / tokens / private keys / JWTs).
+$hsre = 'AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|ghp_[0-9A-Za-z]{36}|xox[baprs]-[0-9A-Za-z-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+|(password|secret|token|api[_-]?key)\s*[:=]\s*\S{4,}'
+Get-ChildItem $env:USERPROFILE -Recurse -Include *.txt,*.xml,*.json,*.ps1,*.config,*.ini,*.yml,*.yaml,*.env -ErrorAction SilentlyContinue |
+  Select-Object -First 400 | Select-String -Pattern $hsre -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object {
+    $ln = $_.Line.Trim(); if($ln.Length -gt 160){ $ln = $ln.Substring(0,160) }
+    Finding ("Secret in " + $_.Path + ": " + $ln); Flag SECRETS_FOUND $_.Path
+  }
 
 # ============================================================ hardening state
 Sec "OS hardening & defences"

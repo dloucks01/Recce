@@ -39,6 +39,29 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Added
+- **On-target scripts now identify the EXACT exploit, not just the vector.** The
+  goal is to beat lin/winPEAS at turning a finding into an action:
+  - **Embedded GTFOBins-lite engine.** A SUID or NOPASSWD-sudo binary no longer
+    says "look it up on gtfobins" — it prints the precise command for *that*
+    binary (`find . -exec /bin/sh -p \; -quit`, `sudo vim -c ':!/bin/sh'`,
+    `python3 -c 'import os;os.setuid(0);os.system("/bin/sh -p")'`, …), for ~50
+    binaries in both SUID and sudo contexts. Capabilities (`cap_setuid`,
+    `cap_dac_*`) print their exact commands too.
+  - **Deeper analysis of custom SUID binaries.** A non-standard SUID root binary
+    is statically analysed (read-only, `strings` only — never executed) to find
+    the *actual* vector: which command it shells out to by bare name (**PATH
+    hijack**, with the exact planting command), whether it reads `LD_*` (**env
+    injection**), and any **writable file/config it opens** — each surfaced as its
+    own finding with the concrete exploit.
+  - **Serious credential & secret hunting.** SSH/PEM private keys are triaged
+    (encrypted → `ssh2john`; unencrypted → ready-to-use, with the matching pubkey/
+    host), plus a high-signal sweep for cloud keys (`AKIA…`, `AIza…`), tokens
+    (`ghp_…`, `xox…`, GitLab PATs), JWTs, private-key blocks and `password=`/`api_key=`
+    assignments across the likely locations, and named credential stores
+    (`.git-credentials`, `.netrc`, `.npmrc`, `.aws`, docker/gcloud, mail spools).
+    Windows gains the same: profile SSH keys, IIS `applicationHost.config`,
+    scheduled-task passwords, PS transcripts, RDP files, and a profile-wide secret
+    regex sweep. Everything remains 100% read-only.
 - **On-target enum scripts go well beyond privesc: lateral movement, shell
   escape, persistence.** `recce-enum.sh` / `recce-enum.ps1` (run via `deploy` /
   `ingest`) gained whole new read-only sections, and their findings flow through

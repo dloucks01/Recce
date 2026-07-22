@@ -2425,6 +2425,48 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         r = subprocess.run([bash, "-n", script], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_gtfobins_lite_returns_exact_technique(self):
+        # The script's embedded GTFOBins-lite must resolve a specific binary to a
+        # precise command (this is the "dive deeper into the exact exploit" logic).
+        import shutil
+        import subprocess
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash not available")
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "recce", "local", "recce-enum.sh")
+        harness = (
+            f"source <(sed -n '/^gtfo_suid()/,/^}}/p;/^gtfo_sudo()/,/^}}/p' {script})\n"
+            "echo SUID_FIND:$(gtfo_suid /usr/bin/find)\n"
+            "echo SUID_PY:$(gtfo_suid /usr/bin/python3)\n"
+            "echo SUDO_VIM:$(gtfo_sudo /usr/bin/vim)\n"
+            "echo UNKNOWN:[$(gtfo_suid /usr/bin/nope)]\n")
+        r = subprocess.run([bash, "-c", harness], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SUID_FIND:/usr/bin/find . -exec /bin/sh -p", r.stdout)
+        self.assertIn("os.setuid(0)", r.stdout)                 # python technique
+        self.assertIn("SUDO_VIM:sudo /usr/bin/vim -c ':!/bin/sh'", r.stdout)
+        self.assertIn("UNKNOWN:[]", r.stdout)                   # no false technique
+
+    def test_suid_static_analysis_and_secret_phrasings_map(self):
+        from recce import ingest, playbook as pb
+        # The static-analysis SUID findings promote and map to a play.
+        promoted = ingest.promote_to_vulns("10.0.0.5", [
+            {"vector": "SUID PATH-hijack candidate: /usr/bin/foo invokes bare "
+                       "command(s) [backup] -> plant a malicious binary earlier in PATH"}])
+        self.assertTrue(any("Custom SUID" in v.title for v in promoted))
+        play = pb.for_text("SUID PATH-hijack candidate: /usr/bin/foo invokes bare "
+                           "command(s) [backup] -> plant", "linux")
+        self.assertEqual(play["id"], "lin-suid-pathhijack")
+        self.assertIn("backup", play["cmd"])                    # {X} filled in
+        # Encrypted vs ready-to-use private keys are both surfaced as SSH_KEY-ish
+        # credential findings and categorized under creds.
+        parsed = ingest.parse_loot(
+            "recce-enum  host=h  user=u  now\n"
+            "==== Credential & secret hunting ====\n"
+            "[!] Private key (UNENCRYPTED, ready): /home/u/.ssh/id_rsa\n")
+        self.assertEqual(parsed["findings"][0]["category"], "creds")
+
 
 class CredentialsTest(unittest.TestCase):
     def _hosts(self):
