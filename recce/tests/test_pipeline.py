@@ -2467,6 +2467,24 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
             "[!] Private key (UNENCRYPTED, ready): /home/u/.ssh/id_rsa\n")
         self.assertEqual(parsed["findings"][0]["category"], "creds")
 
+    def test_windows_exact_exploit_findings_map_and_promote(self):
+        from recce import ingest, playbook as pb
+        unq = ("Unquoted service path EXPLOITABLE: service 'Foo' runs as LocalSystem "
+               "-> plant your payload at  C:\\Program Files\\Sub.exe  (dir 'C:\\Program "
+               "Files' is writable), then: sc stop Foo & sc start Foo")
+        p = pb.for_text(unq, "windows")
+        self.assertEqual(p["id"], "win-unquoted")
+        self.assertIn("C:\\Program Files\\Sub.exe", p["cmd"])       # exact intercept
+        dll = ("Writable app dir (DLL hijack): C:\\Program Files\\App -> exe(s): app.exe. "
+               "The app dir is searched FIRST, so drop a DLL...")
+        self.assertEqual(pb.for_text(dll, "windows")["id"], "win-dll-hijack")
+        titles = {v.title for v in ingest.promote_to_vulns("10.0.0.5", [
+            {"vector": unq}, {"vector": dll},
+            {"vector": "Writable service binary EXPLOITABLE: C:\\svc\\a.exe (service X)"}])}
+        self.assertTrue(any("Unquoted service path" in t for t in titles))
+        self.assertTrue(any("DLL hijack" in t for t in titles))
+        self.assertTrue(any("Writable service binary/registry" in t for t in titles))
+
 
 class CredentialsTest(unittest.TestCase):
     def _hosts(self):

