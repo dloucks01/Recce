@@ -39,6 +39,27 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Added
+- **Windows privesc: fully-qualified exploits, not just flagged classes.** Where
+  the script used to say "unquoted service path" or "DLL hijack," it now computes
+  and prints the exact artifact and the precise steps:
+  - **Unquoted service paths** are resolved to the exact intercept exe Windows
+    would load first (e.g. `C:\Program Files\Sub.exe`), the script checks which
+    candidate directory *this* user can actually write, and the finding names the
+    plant path, the service, its run-as account, and the `sc stop/start` line.
+  - **Writable service binary / registry key** findings carry the exact
+    `copy /Y … "<binPath>"` or `reg add … /v ImagePath …` command plus the
+    service account.
+  - **DLL hijacking** distinguishes writable **SYSTEM PATH** vs user PATH, names
+    the writable Program-Files app dirs **and the exe(s) in them**, and flags
+    **services whose binary sits in a writable dir** — each with the exact planting
+    procedure (ProcMon → `NAME NOT FOUND` → `msfvenom -f dll`).
+  - **COM hijack** prints the exact `reg add …\InprocServer32 /ve /d C:\evil.dll`.
+  - Deeper Windows credential hunting: profile SSH/PEM keys (triaged), IIS
+    `applicationHost.config`, scheduled-task passwords, PS transcripts, RDP files,
+    and a profile-wide high-signal secret sweep.
+  - All new findings promote to first-class Vulnerabilities and map to
+    Exploitation-sheet plays (win-unquoted / win-writable-service / win-dll-hijack).
+    Still 100% read-only.
 - **On-target scripts now identify the EXACT exploit, not just the vector.** The
   goal is to beat lin/winPEAS at turning a finding into an action:
   - **Embedded GTFOBins-lite engine.** A SUID or NOPASSWD-sudo binary no longer
