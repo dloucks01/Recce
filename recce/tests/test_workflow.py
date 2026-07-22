@@ -698,6 +698,58 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("--host-timeout", cmd)                         # cap still applies
         self.assertIn("--min-rate", cmd)                             # packet floor
 
+    def test_port_sweep_auto_retries_reliably_on_dropped_probes(self):
+        """A rate-limiting network (nmap drops probes) must trigger an automatic
+        congestion-adaptive re-scan - no --min-rate floor, more retries, -T3 -
+        which is what actually finds the ports (the fast pass under-reports)."""
+        import recce.scanner as s
+        calls = []
+        outs = iter([
+            s.RunOutcome(returncode=0, stderr="Increasing send delay for 1.2.3.4 "
+                         "from 0 to 5 due to 11 out of 11 dropped probes"),
+            s.RunOutcome(returncode=0),
+        ])
+        orig = s._run
+        s._run = lambda cmd, timeout=None: (calls.append(cmd) or next(outs))
+        try:
+            _, issue = s.full_port_scan("1.2.3.4", "/tmp/x.xml", s.ScanProfile())
+        finally:
+            s._run = orig
+        self.assertEqual(len(calls), 2)                       # fast pass + reliable re-scan
+        self.assertIn("--min-rate", calls[0])                 # fast pass keeps the floor
+        self.assertNotIn("--min-rate", calls[1])              # reliable drops it
+        self.assertEqual(calls[1][calls[1].index("--max-retries") + 1], "6")
+        self.assertIn("-T3", calls[1])
+        self.assertTrue(issue and issue.level == "warning")   # rate-limit surfaced
+
+    def test_reliable_flag_drops_min_rate_from_first_pass(self):
+        import recce.scanner as s
+        calls = []
+        orig = s._run
+        s._run = lambda cmd, timeout=None: (calls.append(cmd)
+                                            or s.RunOutcome(returncode=0))
+        prof = s.ScanProfile(reliable=True)
+        try:
+            s.full_port_scan("1.2.3.4", "/tmp/y.xml", prof)
+        finally:
+            s._run = orig
+        self.assertEqual(len(calls), 1)                       # no wasted fast pass
+        self.assertNotIn("--min-rate", calls[0])
+        self.assertEqual(calls[0][calls[0].index("--max-retries") + 1], "6")
+
+    def test_clean_fast_pass_does_not_rescan(self):
+        """No dropped probes -> a single scan, no wasteful reliable re-run."""
+        import recce.scanner as s
+        calls = []
+        orig = s._run
+        s._run = lambda cmd, timeout=None: (calls.append(cmd)
+                                            or s.RunOutcome(returncode=0))
+        try:
+            s.full_port_scan("1.2.3.4", "/tmp/z.xml", s.ScanProfile())
+        finally:
+            s._run = orig
+        self.assertEqual(len(calls), 1)
+
     def test_enum_scan_flags(self):
         import recce.scanner as s
         with tempfile.TemporaryDirectory() as d:

@@ -7,6 +7,17 @@ All notable changes to recce are documented here. Dates are UTC.
 _Accumulating fixes since 0.2.3; folded into the next tagged release._
 
 ### Fixed
+- **Port sweep missed open ports on rate-limiting / lossy networks.** The sweep
+  pinned `nmap --min-rate 1500` (with `--max-retries` 1–2), which prevents nmap's
+  congestion control from backing off; on a network that drops probes the SYNs to
+  open ports were dropped and never retried, so hosts came back with "no open
+  ports" even though a manual nmap (which slows down — "increasing send delay due
+  to dropped probes") found them. recce now **detects the drop condition in
+  nmap's output and automatically re-scans that host congestion-adaptively** (no
+  `--min-rate` floor, `--max-retries 6`, `-T3`, more wall-clock), which is what
+  finds the ports. New `--reliable` flag forces that mode from the first pass for
+  networks you already know rate-limit. Clean scans are unaffected (no second
+  pass).
 - **Browser detection missed installed browsers off PATH.** `doctor` (and the
   auto-screenshot feature) reported "browser not present" when Firefox/Chromium
   were installed but not on the PATH recce sees — common on Kali when scans run

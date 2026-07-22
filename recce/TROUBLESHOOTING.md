@@ -57,6 +57,30 @@ few live hosts or lots of "zero ports."
   comments ok). `--exclude` carves hosts back out.
 - **Everything excluded?** Check your `--exclude`.
 
+### Zero ports even with `-Pn`, but a manual nmap finds them → the network is rate-limiting
+
+If a host comes back with **no/few open ports under `-Pn`** yet a manual `nmap`
+**does** find them — especially if that manual scan prints *"increasing send delay
+… due to N out of M dropped probes"* — the network (a firewall / IPS / switch) is
+**rate-limiting and dropping probes**. A fast scan that pins a send-rate floor
+can't back off, so the dropped SYNs to open ports are never retried and the ports
+look closed.
+
+recce handles this two ways:
+
+- **Automatic:** when recce sees nmap dropping probes, it **re-scans that host
+  congestion-adaptively** on its own — no `--min-rate` floor, more retries (`6`),
+  gentler `-T3` timing, more time — which is exactly how a manual nmap eventually
+  finds the ports. You'll see a `port-sweep: network rate-limiting detected …`
+  note on the host.
+- **`--reliable`:** if you already know the network is lossy, force that mode from
+  the first pass (skips the wasted fast attempt):
+  ```bash
+  sudo recce enum 10.0.10.0/24 -Pn --reliable -o eng
+  ```
+  Pair with a larger **`--host-timeout`** if the adaptive scan needs more wall-clock
+  on a big `-p-` sweep.
+
 ## 5. Scans are too slow
 
 For a time-boxed engagement, in rough order of impact:

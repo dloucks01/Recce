@@ -279,6 +279,8 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.os_detect = False
     if g("min_rate"):
         profile.min_rate = args.min_rate
+    if g("reliable"):
+        profile.reliable = True
     if g("udp_top"):
         profile.udp_top = args.udp_top
     if g("masscan") or g("fast"):
@@ -2113,6 +2115,11 @@ def _add_discovery(pp) -> None:
     pp.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
     pp.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
     pp.add_argument("--min-rate", type=int, help="nmap --min-rate override")
+    pp.add_argument("--reliable", action="store_true",
+                    help="rate-limited / lossy network: drop the --min-rate floor, "
+                         "retry dropped probes more, let nmap's congestion control "
+                         "adapt (recce also switches to this automatically when it "
+                         "sees nmap dropping probes)")
     pp.add_argument("-Pn", "--no-discovery", action="store_true", dest="no_discovery",
                     help="skip the ping sweep and scan every target as if up (like "
                          "nmap -Pn). Use this when hosts block ping - common on "

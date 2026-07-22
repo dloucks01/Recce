@@ -41,6 +41,9 @@ class ScanProfile:
     host_timeout: int = 20            # minutes; per-host ceiling (nmap --host-timeout)
     version_intensity: int = 8        # -sV probe intensity 0-9 (higher = better ID)
     version_all: bool = False         # --version-all: try every probe (thorough)
+    reliable: bool = False            # rate-limited/lossy net: no --min-rate floor,
+                                      # more retries, let nmap's congestion control
+                                      # adapt (auto-enabled when probe drops seen)
 
 
 PROFILES: dict[str, ScanProfile] = {
@@ -275,25 +278,64 @@ def discover_hosts(targets_file: str, out_xml: str) -> tuple[str, ScanIssue | No
 
 # --- phase 2: full port sweep ----------------------------------------------------
 
+# nmap runtime warnings that mean it's dropping probes / backing off - i.e. the
+# network is rate-limiting or lossy, so a fast pass under-reports open ports.
+_DROP_MARKERS = ("increasing send delay", "dropped probes", "giving up on port",
+                 "packet drop", "successful_tryno")
+
+
+def _congested(outcome: RunOutcome) -> bool:
+    blob = f"{outcome.stdout}\n{outcome.stderr}".lower()
+    return any(m in blob for m in _DROP_MARKERS)
+
+
+def _portscan_cmd(ip: str, out_xml: str, profile: ScanProfile,
+                  reliable: bool) -> tuple[list, int | None]:
+    scan_type = "-sS" if _is_root() else "-sT"
+    port_spec = ["-p-"] if profile.all_ports else ["--top-ports", str(profile.top_ports)]
+    if reliable:
+        # Mirror what a manual nmap does on a rate-limiting / lossy network: let
+        # congestion control adapt - NO --min-rate floor (it would pin the send
+        # rate above what the network tolerates and guarantee dropped SYNs to
+        # open ports), normal -T3 timing, and retry dropped probes generously.
+        # Give it more wall-clock too, since an adaptive scan runs slower.
+        to_args, kill = _timeout_args(profile, minutes=max(profile.host_timeout, 30))
+        cmd = ["nmap", scan_type, "-Pn", "-n", "-T3", "--max-retries", "6", "--open",
+               *to_args, *port_spec, ip, "-oX", out_xml]
+    else:
+        to_args, kill = _timeout_args(profile)
+        # -Pn / discovery fallback scans dead IPs too, so retry less to abandon
+        # non-responders faster; a discovered-live set is retried more thoroughly.
+        retries = "1" if profile.assume_up else "2"
+        cmd = ["nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
+               "--min-rate", str(profile.min_rate), "--max-retries", retries, "--open",
+               *to_args, *port_spec, ip, "-oX", out_xml]
+    return cmd, kill
+
+
 def full_port_scan(ip: str, out_xml: str,
                    profile: ScanProfile) -> tuple[str, ScanIssue | None]:
-    """Full/top TCP port sweep for one host; returns (xml path, issue|None)."""
+    """Full/top TCP port sweep for one host; returns (xml path, issue|None).
+
+    If the fast pass trips nmap's congestion control (it starts dropping probes
+    on a rate-limiting network), the port list is unreliable - so we re-scan the
+    host letting nmap adapt (no --min-rate, more retries), which is what actually
+    finds the ports. `--reliable` forces that mode from the first pass.
+    """
     if profile.scanner == "masscan" and _have("masscan"):
         return _masscan_ports(ip, out_xml, profile)
 
-    scan_type = "-sS" if _is_root() else "-sT"
-    port_spec = ["-p-"] if profile.all_ports else ["--top-ports", str(profile.top_ports)]
-    to_args, kill = _timeout_args(profile)
-    # When we're scanning every target as up (-Pn / discovery fallback), dead IPs
-    # get scanned too - so retry less to abandon non-responders roughly twice as
-    # fast. With real discovery the set is already live, so retry more thoroughly.
-    retries = "1" if profile.assume_up else "2"
-    cmd = [
-        "nmap", scan_type, "-Pn", "-n", f"-T{profile.timing}",
-        "--min-rate", str(profile.min_rate), "--max-retries", retries, "--open",
-        *to_args, *port_spec, ip, "-oX", out_xml,
-    ]
+    reliable = profile.reliable
+    cmd, kill = _portscan_cmd(ip, out_xml, profile, reliable)
     outcome = _run(cmd, timeout=kill)
+    if not reliable and _congested(outcome):
+        cmd, kill = _portscan_cmd(ip, out_xml, profile, reliable=True)
+        outcome = _run(cmd, timeout=kill)
+        return out_xml, _issue_from(outcome, out_xml, "port-sweep", profile.host_timeout) \
+            or ScanIssue("warning", "port-sweep: network rate-limiting detected "
+                         "(dropped probes); re-scanned this host with congestion-"
+                         "adaptive timing (no --min-rate, more retries). If ports "
+                         "still look low, raise --host-timeout or pass --reliable.")
     return out_xml, _issue_from(outcome, out_xml, "port-sweep", profile.host_timeout)
 
 
