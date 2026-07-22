@@ -247,7 +247,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     ordered.sort(key=lambda hv: (order.get(hv[1].severity, 9), _ip_sort_key(hv[0].ip)))
     for h, v in ordered:
         out = v.output if len(v.output) < 700 else v.output[:700] + " ..."
-        rows.append({"key": tr.vuln_key(v.ip, v.port, f"{v.script_id}:{v.title[:40]}"),
+        rows.append({"key": tr.vuln_row_key(v),
                      "data": {
             "Severity": v.severity.upper(), "IP": h.ip, "Hostname": h.hostname,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,

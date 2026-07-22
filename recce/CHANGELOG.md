@@ -191,6 +191,19 @@ All notable changes to recce are documented here. Dates are UTC.
 - Removed the interactive authorization prompt and the `--yes` flag.
 
 ### Fixed
+- **Triaged findings now count toward coverage.** The Vulnerabilities sheet keyed
+  each row as `vuln:<ip>:<port>:<script_id>:<title>` but coverage counting
+  enumerated `vuln:<ip>:<port>:<script_id>` (no title), so the two keys never
+  matched and ticking a finding's *Triaged* box was invisible to `compute_coverage`
+  — the vulns %, the Overview rollup, and `status` stayed at 0% however many you
+  triaged. The key is now defined once in `tracking.vuln_row_key(v)` and used by
+  both the sheet writer and the counter.
+- **OpenSSH `pN` patch level no longer dropped in version comparison.** The greedy
+  `[a-z]*` in `vulndb._ver_tuple` swallowed the `p`, so `9.3p1` and `9.3p2`
+  collapsed to the same tuple and the *OpenSSH 8.5–9.3 double-free (< 9.3p2)*
+  signature never fired on `9.3p1` (a real false negative). Matching `pN` before
+  the trailing letter fixes the ordering (`8.2p1 -> (8,2,1)`, `9.3p1 < 9.3p2`)
+  while leaving OpenSSL-style suffixes (`1.0.2k`) unchanged.
 - **Checkbox ticks on the Exploitation, Attack Path, and Credentials sheets now
   persist.** Their checkbox columns use the headers *Done* / *Worked*, which the
   workbook read-back didn't recognise (only *Reviewed*/*Checked*/*Triaged*), so an

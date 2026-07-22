@@ -2122,6 +2122,33 @@ class CheckboxPersistenceTest(unittest.TestCase):
                               "CHECKBOX_HEADERS -> ticks won't persist")
 
 
+class VersionTupleTest(unittest.TestCase):
+    def test_openssh_patch_level_preserved(self):
+        """Regression: greedy [a-z]* used to swallow the 'p', collapsing 9.3p1 and
+        9.3p2 to the same tuple and losing the OpenSSH < 9.3p2 finding."""
+        from recce.vulndb import _ver_tuple, _cmp
+        self.assertEqual(_ver_tuple("8.2p1"), (8, 2, 1))      # docstring example
+        self.assertEqual(_ver_tuple("9.3p1"), (9, 3, 1))
+        self.assertEqual(_ver_tuple("9.3p2"), (9, 3, 2))
+        self.assertEqual(_cmp("9.3p1", "9.3p2"), -1)          # p1 sorts below p2
+        self.assertEqual(_ver_tuple("1.0.2k"), (1, 0, 2, 11))  # letter suffix intact
+        self.assertEqual(_cmp("2.3.4", "2.3.4a"), -1)          # ...still < a-suffix
+
+    def test_openssh_9_3p1_flags_double_free(self):
+        from recce import vulndb
+        h = Host(ip="10.0.0.9", os_family="Linux",
+                 ports=[Port(portid=22, service="ssh", product="OpenSSH",
+                             version="9.3p1")])
+        vulndb.assess_host_inplace(h)
+        self.assertTrue(any("double-free" in v.title for v in h.vulns))
+        # 9.3p2 (patched) must NOT flag it
+        h2 = Host(ip="10.0.0.10", os_family="Linux",
+                  ports=[Port(portid=22, service="ssh", product="OpenSSH",
+                              version="9.3p2")])
+        vulndb.assess_host_inplace(h2)
+        self.assertFalse(any("double-free" in v.title for v in h2.vulns))
+
+
 class HtmlReportTest(unittest.TestCase):
     def _hosts(self):
         from recce.models import Vuln

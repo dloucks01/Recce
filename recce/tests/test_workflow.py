@@ -1658,6 +1658,26 @@ class IngestCommandTest(unittest.TestCase):
             # The generic OS checklist is clearly marked, not mixed in as findings.
             self.assertGreater(sum(1 for r in rows if r[ti] == "Checklist"), 0)
 
+    def test_triaged_vuln_counts_toward_coverage(self):
+        """Regression: the Vulnerabilities sheet's row key and the coverage
+        counter's key must be identical, or ticking Triaged is never counted."""
+        from recce import tracking as tr
+        from recce.models import Vuln
+        from recce.report_excel import _spec_vulns
+        h = Host(ip="10.0.0.5", ports=[Port(portid=445, service="microsoft-ds")],
+                 vulns=[Vuln(ip="10.0.0.5", port=445, protocol="tcp",
+                             script_id="smb-vuln-ms17-010", title="ms17-010 RCE",
+                             severity="high", source="nse")])
+        sheet_key = _spec_vulns([h]).rows[0]["key"]
+        # the sheet key, the canonical key, and the coverage key all agree
+        self.assertEqual(sheet_key, tr.vuln_row_key(h.vulns[0]))
+        self.assertIn(sheet_key, tr.item_keys([h])["vulns"])
+        # untriaged -> 0/1; triaging the sheet's key -> 1/1 (was stuck at 0 before)
+        self.assertEqual(tr.compute_coverage([h], {})["vulns"],
+                         {"total": 1, "done": 0, "pct": 0})
+        cov = tr.compute_coverage([h], {sheet_key: (True, "")})["vulns"]
+        self.assertEqual(cov, {"total": 1, "done": 1, "pct": 100})
+
 
 class ProgressAndAuthTest(unittest.TestCase):
     def test_fmt_dur(self):
