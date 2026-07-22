@@ -76,7 +76,7 @@ TAB_COLORS = {
     "Start Here": _TAB_GUIDE, "Runbook": _TAB_GUIDE, "Overview": _TAB_GUIDE,
     "Checklist": _TAB_WORK, "Services": _TAB_WORK,
     "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND,
-    "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
+    "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND, "Credentials": _TAB_FIND,
     "Exploitation": _TAB_FIND, "Attack Path": _TAB_FIND,
     "Services by Product": _TAB_INV, "Databases": _TAB_INV,
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
@@ -1076,7 +1076,27 @@ def _build_active_directory(wb, hosts: list[Host], domains: list[Domain]) -> Non
 
 # --- public entry points --------------------------------------------------------
 
-def _ordered_specs(hosts: list[Host], scope: dict | None = None):
+def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
+    """The stacked credential set (auto-harvested + manually captured), ready to
+    spray. Empty (sheet skipped) until there are credentials. `recce creds --plan`
+    writes the users/passwords/hashes files + the netexec/impacket spray commands."""
+    from . import credentials as cr
+    stacked = cr.stack(hosts, creds_stored or [])
+    cols = [
+        ("Worked", "checkbox", 9), ("User", "data", 22), ("Domain", "data", 14),
+        ("Kind", "data", 10), ("Secret", "data", 34), ("Source", "data", 14),
+        ("Captured on", "data", 15), ("Notes", "notes", 26), ("Key", "key", 4),
+    ]
+    rows = [{"key": f"cred:{c.dedupe_key()}", "data": {
+        "User": c.username, "Domain": c.domain, "Kind": c.kind,
+        "Secret": c.secret or "(blank)", "Source": c.source,
+        "Captured on": c.origin_ip, "Notes": c.notes}}
+        for c in stacked]
+    return SheetSpec("Credentials", cols, rows, skip_if_empty=True)
+
+
+def _ordered_specs(hosts: list[Host], scope: dict | None = None,
+                   creds_stored: list | None = None):
     """Specs in final left-to-right order, following the engagement flow:
     orient -> track -> find -> exploit -> pivot -> AD -> post-exploitation.
 
@@ -1097,8 +1117,9 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None):
     return [_spec_checklist(hosts), _spec_services(hosts), _spec_vulns(hosts),
             _spec_exploits(hosts), _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
-           [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_privesc(hosts),
-            _spec_exploitation(hosts), _spec_attackpath(hosts), _spec_raw_nse(hosts)]
+           [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_credentials(hosts, creds_stored),
+            _spec_privesc(hosts), _spec_exploitation(hosts), _spec_attackpath(hosts),
+            _spec_raw_nse(hosts)]
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
@@ -1107,14 +1128,15 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
                    order_map: dict | None = None,
                    scope: dict | None = None,
                    statuses: dict | None = None,
-                   issues: list | None = None) -> str:
+                   issues: list | None = None,
+                   credentials: list | None = None) -> str:
     meta = meta or {}
     domains = domains or []
     tracking = tracking or {}
     order_map = order_map or {}
     statuses = statuses or {}
     wb = xlsx.Workbook()
-    pre, post = _ordered_specs(hosts, scope)
+    pre, post = _ordered_specs(hosts, scope, credentials)
     # Which sheets will actually exist (skip_if_empty ones may not), in tab order,
     # so the Overview's jump bar only links to sheets that are really there.
     ad_present = bool(domains or ad.domain_controllers(hosts))
@@ -1162,7 +1184,8 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
                     tracking: Tracking | None = None,
                     scope: dict | None = None,
                     statuses: dict | None = None,
-                    issues: list | None = None) -> str:
+                    issues: list | None = None,
+                    credentials: list | None = None) -> str:
     """Regenerate preserving existing row order (new rows appended) + tracking.
 
     The tool re-lays-out the sheet each time; the operator's checkboxes, notes and
@@ -1171,7 +1194,7 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
     """
     order_map = read_key_order(path) if os.path.exists(path) else {}
     return build_workbook(hosts, path, meta, domains, tracking, order_map, scope,
-                          statuses, issues)
+                          statuses, issues, credentials)
 
 
 def read_key_order(path: str) -> dict[str, list[str]]:

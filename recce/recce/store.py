@@ -11,7 +11,7 @@ import json
 import sqlite3
 from contextlib import closing
 
-from .models import Domain, Host
+from .models import Credential, Domain, Host
 
 
 class StoreError(RuntimeError):
@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS tracking (
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
+);
+CREATE TABLE IF NOT EXISTS credentials (
+    ukey TEXT PRIMARY KEY,
+    data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS issues (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,6 +230,23 @@ class Store:
         with closing(self.conn.cursor()) as cur:
             rows = cur.execute("SELECT data FROM domains ORDER BY name").fetchall()
         return [Domain.from_json(json.loads(r[0])) for r in rows]
+
+    # --- credentials (stacking) -------------------------------------------------
+
+    def add_credential(self, cred: Credential) -> bool:
+        """Insert a credential, deduped by (domain, user, kind, secret). Returns
+        True if it was new."""
+        with closing(self.conn.cursor()) as cur:
+            cur.execute("INSERT OR IGNORE INTO credentials(ukey, data) VALUES(?,?)",
+                        (cred.dedupe_key(), json.dumps(cred.to_json())))
+            added = cur.rowcount > 0
+        self.conn.commit()
+        return added
+
+    def all_credentials(self) -> list[Credential]:
+        with closing(self.conn.cursor()) as cur:
+            rows = cur.execute("SELECT data FROM credentials").fetchall()
+        return [Credential.from_json(json.loads(r[0])) for r in rows]
 
     # --- coverage tracking ------------------------------------------------------
 

@@ -5,6 +5,17 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.2.0]
 
 ### Added
+- **`creds` command — credential stacking + spray planning.** Accumulates every
+  credential recce has seen — auto-harvested from AD accounts with a recovered
+  secret, default/blank service logins, and autologon/stored creds in ingested
+  loot — together with any you captured by hand (`--add 'CORP\alice:Pw!'`, or
+  `--user/--pass/--hash/--domain`; a 32-hex secret is auto-detected as an NT
+  hash), deduped into one set (a **Credentials** workbook sheet). `--plan` writes
+  `creds/users.txt|passwords.txt|nthashes.txt` and prints the exact **netexec /
+  impacket** commands to validate and spray the set across the discovered
+  SMB/WinRM/LDAP/MSSQL/RDP/SSH surface (pass-the-hash variants where the protocol
+  supports it, paired lists to avoid a cartesian brute, and a lockout caution).
+  Credentials persist in the datastore (new `credentials` table).
 - **`attackpath` command + Attack Path sheet** — chains the **confirmed** findings
   into a prioritised, client-ready attack path: *foothold → privilege escalation →
   credential access → lateral movement → domain dominance*. Grounded entirely in

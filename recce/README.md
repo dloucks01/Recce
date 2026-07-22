@@ -718,6 +718,7 @@ Every command takes targets as a single IP, several IPs, a range
 | `services [targets]` | Print the per-service enum command (`recce/scripts/`) for every open port found | `-a` (append the intrusive flag) |
 | `exploitplan [targets]` | Ready-to-run artifacts (msf `.rc` + tool commands) for **confirmed** findings, params pre-filled | `--lhost`, `--lport`, `--run` |
 | `attackpath [targets]` | Chain confirmed findings into a staged attack path (foothold → priv-esc → creds → lateral → domain) | — |
+| `creds [targets]` | Stack captured credentials + build a netexec/impacket spray plan | `--add`, `--user/--pass/--hash/--domain`, `--plan` |
 | `report` | Rebuild the workbook/reports from the datastore | — |
 | `status` | Print live coverage + suggested next command | — |
 | `review` | Mark hosts/services/items reviewed from the CLI | `--host`, `--service IP:PORT`, `--key`, `--cascade`, `--note`, `--undo` |
@@ -779,6 +780,7 @@ recce/               the package (python -m recce)
   playbook.py        confirmed finding -> exact existing tool + command + validate
   exploitplan.py     confirmed finding -> runnable msf .rc / tool cmd (existing tools)
   attackpath.py      confirmed findings -> staged attack path (the "so what")
+  credentials.py     stack captured creds -> netexec/impacket spray plan
   serviceenum.py     open port -> per-service enum command (bridge to scripts/)
   screenshot.py      optional headless-browser web screenshots (tool-gated)
   xlsx.py            standard-library .xlsx writer/reader (no openpyxl)

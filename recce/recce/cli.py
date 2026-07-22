@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import tempfile
 import time
@@ -225,7 +226,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     domains = _resolve_domains(store, hosts)
     update_workbook(paths["xlsx"], hosts, meta={"subtitle": title},
                     domains=domains, tracking=tracking, scope=store.get_scope(),
-                    statuses=store.get_statuses(), issues=store.get_issues())
+                    statuses=store.get_statuses(), issues=store.get_issues(),
+                    credentials=store.all_credentials())
     build_markdown(hosts, paths["md"], title=title, domains=domains)
     build_csv(hosts, paths["csv"])
     if not quiet:
@@ -1297,6 +1299,103 @@ def cmd_attackpath(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_cred_spec(spec: str):
+    """Parse 'user:secret', 'DOMAIN\\user:secret', or 'domain/user:secret'."""
+    from .models import Credential
+    idpart, secret = (spec.split(":", 1) + [""])[:2] if ":" in spec else (spec, "")
+    domain = ""
+    if "\\" in idpart:
+        domain, user = idpart.split("\\", 1)
+    elif "/" in idpart:
+        domain, user = idpart.split("/", 1)
+    else:
+        user = idpart
+    kind = "nthash" if re.fullmatch(r"[0-9a-fA-F]{32}", secret or "") else \
+        ("password" if secret else "blank")
+    return Credential(username=user, secret=secret, kind=kind, domain=domain,
+                      source="manual")
+
+
+def cmd_creds(args: argparse.Namespace) -> int:
+    """Stack credentials (auto-harvested + manually captured) and build a spray
+    plan across the discovered SMB/WinRM/LDAP/MSSQL/RDP/SSH surface."""
+    from . import credentials as cr
+    from .models import Credential
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+
+    # ADD captured credentials.
+    added = False
+    to_add = []
+    for spec in (args.add or []):
+        to_add.append(_parse_cred_spec(spec))
+    if args.user:
+        kind = "nthash" if args.hash else ("password" if getattr(args, "password", None) else "blank")
+        to_add.append(Credential(username=args.user, secret=(args.hash or args.password or ""),
+                                 kind=kind, domain=args.domain or "", source="manual"))
+    if to_add:
+        n = sum(1 for c in to_add if store.add_credential(c))
+        print(f"[+] Added {n} credential(s)"
+              + (f" ({len(to_add) - n} already stacked)" if n < len(to_add) else "") + ".")
+        added = True
+
+    hosts = _selected_hosts(store.all_hosts(), args)
+    stored = store.all_credentials()
+    stacked = cr.stack(hosts, stored)
+
+    # PLAN: write files + print the spray commands.
+    if args.plan:
+        if not stacked:
+            print("[!] No credentials to spray yet. Add one:  "
+                  "recce creds --add 'CORP\\alice:Passw0rd!'")
+            store.close()
+            return 0
+        summary = cr.build_spray(stacked, hosts, args.output_dir)
+        print(f"[+] Spray plan for {len(stacked)} credential(s) -> files in "
+              f"{summary['dir']}/")
+        if summary["files"]:
+            print("    " + ", ".join(sorted(summary["files"])))
+        print()
+        for line in summary["commands"] or ["  (no sprayable services in scope yet)"]:
+            print("  " + line if not line.startswith("#") else "\n  " + line)
+        print("\n  ! Check the account-lockout policy first. '--continue-on-success' "
+              "keeps going after a hit;")
+        print("    the paired (user<->pass) list avoids a cartesian brute. Rules of "
+              "engagement only.")
+        store.close()
+        return 0
+
+    # ADD then regenerate the workbook so the Credentials sheet reflects it.
+    if added:
+        title = store.get_meta("engagement") or getattr(args, "title", "") or "Recce Engagement"
+        _generate_reports(store, paths, title, quiet=True)
+
+    # LIST (default).
+    if not stacked:
+        print("No credentials stacked yet.")
+        print("  Capture then add:  recce creds --add 'CORP\\alice:Passw0rd!'  "
+              "(or --user alice --hash <nt> --domain CORP)")
+        print("  Then:              recce creds --plan   # netexec/impacket spray plan")
+        store.close()
+        return 0
+    print(f"Stacked credentials ({len(stacked)}):")
+    for c in stacked:
+        sec = c.secret or "(blank)"
+        if c.kind == "nthash" and len(sec) > 16:
+            sec = sec[:13] + "..."
+        origin = f" @{c.origin_ip}" if c.origin_ip else ""
+        print(f"  {c.label:<26} {c.kind:<8} {sec:<20} [{c.source}{origin}]")
+    print("\n  recce creds --plan   # build the spray plan (writes users/passwords/"
+          "hashes + commands)")
+    store.close()
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check that this box can run the tool, and optionally prove it with a
     real localhost self-scan. Run this on any system before an engagement."""
@@ -2160,6 +2259,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
     ap.add_argument("-o", "--output-dir", default="engagement")
     ap.set_defaults(func=cmd_attackpath)
+
+    # Credential stacking + spray planning.
+    cd = sub.add_parser("creds",
+                        help="stack captured credentials and build a netexec/impacket "
+                             "spray plan across the discovered surface")
+    cd.add_argument("targets", nargs="*",
+                    help="restrict spray targets to these IPs / ranges / CIDRs / @file")
+    cd.add_argument("-o", "--output-dir", default="engagement")
+    cd.add_argument("--add", action="append", metavar="USER:SECRET",
+                    help="add a captured credential: 'user:secret', "
+                         "'DOMAIN\\user:secret' (a 32-hex secret => NT hash). Repeatable.")
+    cd.add_argument("--user", help="add a credential: username")
+    cd.add_argument("--pass", dest="password", help="add a credential: password")
+    cd.add_argument("--hash", help="add a credential: NT hash (for pass-the-hash)")
+    cd.add_argument("--domain", help="add a credential: AD domain (blank = local)")
+    cd.add_argument("--plan", action="store_true",
+                    help="build the spray plan (write users/passwords/hashes files "
+                         "+ print the netexec/impacket commands)")
+    cd.set_defaults(func=cmd_creds)
 
     # Convenience: enum + vulns in one shot.
     s = sub.add_parser("scan", help="run enum then vulns in one shot")

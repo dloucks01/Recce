@@ -1926,6 +1926,7 @@ class CliSmokeTest(unittest.TestCase):
                      ["services", "-o", "eng", "-a"],
                      ["exploitplan", "-o", "eng", "--lhost", "10.0.0.1", "--run"],
                      ["attackpath", "-o", "eng"],
+                     ["creds", "--add", "CORP\\alice:Pw!", "--plan", "-o", "eng"],
                      ["ingest", "loot.txt", "--host", "1.2.3.4"],
                      ["import", "scan.xml", "-o", "eng"],
                      ["report"], ["status"], ["review", "--host", "1.2.3.4"],
@@ -2092,6 +2093,76 @@ class IngestServiceTest(unittest.TestCase):
             self.assertIn("10.0.0.9", hosts)            # new host created from output
             titles = [v.title for v in hosts["10.0.0.5"].vulns]
             self.assertTrue(any("signing" in t for t in titles))
+
+
+class CredentialsTest(unittest.TestCase):
+    def _hosts(self):
+        return [Host(ip="10.0.10.5", subnet="10.0.10.0/24", os_family="Windows",
+                     ports=[Port(portid=445, service="microsoft-ds"),
+                            Port(portid=5985, service="http"),
+                            Port(portid=389, service="ldap")]),
+                Host(ip="10.0.20.9", subnet="10.0.20.0/24", os_family="Linux",
+                     ports=[Port(portid=22, service="ssh")])]
+
+    def test_parse_and_stack_dedupe(self):
+        from recce import cli, credentials as cr
+        a = cli._parse_cred_spec("CORP\\alice:Passw0rd!")
+        self.assertEqual((a.domain, a.username, a.kind), ("CORP", "alice", "password"))
+        b = cli._parse_cred_spec("administrator:aad3b435b51404eeaad3b435b51404ee")
+        self.assertEqual(b.kind, "nthash")             # 32-hex -> hash
+        c = cli._parse_cred_spec("bob")
+        self.assertEqual(c.kind, "blank")
+        stacked = cr.stack([], [a, b, a])              # duplicate a collapses
+        self.assertEqual(len(stacked), 2)
+
+    def test_spray_plan_files_and_commands(self):
+        from recce import credentials as cr
+        from recce.models import Credential
+        creds = [Credential(username="alice", secret="Pw!", kind="password", domain="CORP"),
+                 Credential(username="administrator",
+                            secret="aad3b435b51404eeaad3b435b51404ee", kind="nthash")]
+        with tempfile.TemporaryDirectory() as d:
+            s = cr.build_spray(creds, self._hosts(), d)
+            self.assertIn("users.txt", s["files"])
+            self.assertIn("passwords.txt", s["files"])
+            self.assertIn("nthashes.txt", s["files"])
+            cmds = "\n".join(s["commands"])
+            self.assertIn("netexec smb 10.0.10.0/24", cmds)
+            self.assertIn("-H nthashes.txt", cmds)     # pass-the-hash line
+            self.assertIn("netexec ssh 10.0.20.0/24", cmds)
+            self.assertNotIn("netexec ssh 10.0.20.0/24 -u users.txt -H", cmds)  # no PtH over ssh
+
+    def test_harvest_from_accounts(self):
+        from recce import credentials as cr
+        from recce.models import Account
+        h = Host(ip="10.0.0.5", accounts=[
+            Account(ip="10.0.0.5", source="secretsdump", kind="user", name="svc",
+                    domain="CORP", attrs={"password": "S3cret"})])
+        got = cr.harvest([h])
+        self.assertEqual(len(got), 1)
+        self.assertEqual((got[0].username, got[0].secret), ("svc", "S3cret"))
+
+    def test_creds_add_list_plan_via_cli(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            db = os.path.join(d, "results.sqlite")
+            st = Store(db)
+            st.upsert_host(Host(ip="10.0.10.5", subnet="10.0.10.0/24",
+                                ports=[Port(portid=445, service="microsoft-ds")]))
+            st.close()
+            def ns(**kw):
+                base = dict(output_dir=d, targets=[], host=[], subnet=[], add=None,
+                            user=None, password=None, hash=None, domain=None,
+                            plan=False, title="t")
+                base.update(kw)
+                return SimpleNamespace(**base)
+            self.assertEqual(cli.cmd_creds(ns(add=["CORP\\alice:Pw!"])), 0)
+            st = Store(db)
+            self.assertEqual(len(st.all_credentials()), 1)
+            st.close()
+            self.assertEqual(cli.cmd_creds(ns(plan=True)), 0)
+            self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
 
 
 class AttackPathTest(unittest.TestCase):
