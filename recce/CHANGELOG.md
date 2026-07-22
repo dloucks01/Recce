@@ -53,6 +53,12 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   3. **active banner grab** — a timeout-bounded connect-and-read (plus a few
      protocol nudges: HTTP HEAD, Redis PING, RDP X.224) fingerprints what the
      first two missed. Only touches the target; runs on a stock airgapped Kali.
+  4. **second-opinion re-probe** — any ports STILL unnamed get one focused nmap
+     `-sV --version-all` (intensity 9, every probe) aimed at just those. It's
+     cheap because it's a handful of ports, and nmap's answer is authoritative
+     (it upgrades our inferred/banner guess and is marked `nmap`). The first enum
+     pass spends its version-detection budget across the whole host; this spends a
+     fresh one on only the leftovers.
 
   The Services tab gains an **"ID source"** column (nmap / inferred / banner) so
   you can see *how confident* each label is, and a still-unknown port now shows a
