@@ -1362,6 +1362,21 @@ class VulnDbTest(unittest.TestCase):
         self.assertLess(vulndb._cmp("8.2p1", "8.5"), 0)
         self.assertGreater(vulndb._cmp("1.0.2k", "1.0.2"), 0)
         self.assertEqual(vulndb._cmp("2.3.4", "2.3.4"), 0)
+        # OpenSSH-style 'pN' patch levels must order correctly (regression: the
+        # patch number used to be dropped, collapsing p1 and p2 to equal).
+        self.assertEqual(vulndb._ver_tuple("8.2p1"), (8, 2, 1))
+        self.assertLess(vulndb._cmp("9.3p1", "9.3p2"), 0)
+        self.assertGreater(vulndb._cmp("9.3p2", "9.3p1"), 0)
+
+    def test_openssh_patch_level_in_range(self):
+        # OpenSSH 9.3p1 is inside [8.5, 9.3p2) and must be flagged; before the
+        # _ver_tuple fix it was silently missed because 9.3p1 == 9.3p2.
+        from recce import vulndb
+        h = Host(ip="10.0.0.22", os_name="Linux", ports=[
+            Port(portid=22, state="open", service="ssh",
+                 product="OpenSSH", version="9.3p1")])
+        titles = [v.title for v in vulndb.assess_host(h)]
+        self.assertTrue(any("8.5-9.3 double-free" in t for t in titles), titles)
 
     def test_exact_and_range_matches(self):
         from recce import vulndb
