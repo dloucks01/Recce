@@ -74,7 +74,7 @@ _TAB_GUIDE, _TAB_WORK = "FF8497B0", "FF0E7C75"
 _TAB_FIND, _TAB_INV, _TAB_RAW = "FFC00000", "FF548235", "FF7F7F7F"
 TAB_COLORS = {
     "Start Here": _TAB_GUIDE, "Runbook": _TAB_GUIDE, "Overview": _TAB_GUIDE,
-    "Checklist": _TAB_WORK, "Services": _TAB_WORK,
+    "Checklist": _TAB_WORK, "Services": _TAB_WORK, "Web": _TAB_WORK,
     "Vulnerabilities": _TAB_FIND, "Exploits": _TAB_FIND, "Verification": _TAB_FIND,
     "AD Quick Wins": _TAB_FIND, "Priv-Esc": _TAB_FIND,
     "Priv-Esc Playbook": _TAB_RAW, "Credentials": _TAB_FIND,
@@ -227,6 +227,26 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
                 "Product": p.product, "Version": p.version, "Extra info": p.extrainfo,
                 "CPE": ", ".join(p.cpe), "Enum command": enum_cmd}})
     return SheetSpec("Services", cols, rows, group_by="IP")
+
+
+def _spec_web(hosts: list[Host]) -> SheetSpec:
+    """Every web-facing endpoint (HTTP/HTTPS on ANY port), categorized in one place,
+    with its tech stack, how many web findings it carries, and the exact Kali
+    deep-scan commands to run against it. Populated deeper by `recce web`."""
+    from . import web
+    cols = [
+        ("Status", "status", 15), ("IP", "data", 16), ("Hostname", "data", 20),
+        ("URL", "data", 30), ("Scheme", "data", 7), ("Tech / server", "data", 34),
+        ("Web findings", "data", 12), ("Deep-scan commands (Kali)", "data", 80),
+        ("Notes", "notes", 24), ("Key", "key", 4),
+    ]
+    rows = []
+    for e in web.web_endpoints(hosts):
+        rows.append({"key": f"web:{e['ip']}:{e['port']}", "group": e["ip"], "data": {
+            "IP": e["ip"], "Hostname": e["hostname"], "URL": e["url"],
+            "Scheme": e["scheme"], "Tech / server": e["tech"],
+            "Web findings": e["findings"], "Deep-scan commands (Kali)": e["commands"]}})
+    return SheetSpec("Web", cols, rows, group_by="IP", skip_if_empty=True)
 
 
 def _spec_services_by_product(hosts: list[Host]) -> SheetSpec:
@@ -794,6 +814,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("Services", "The other working tab: every open port with a per-port Status "
                      "(not started / in progress / done) and Notes - track each "
                      "port you work (incl. SMB, remote access, mail, SNMP)."),
+        ("Web", "Every HTTP/HTTPS endpoint (any port), its tech stack, web-finding "
+                "count, and the exact Kali deep-scan commands. Run `recce web`."),
         ("Vulnerabilities", "Findings by severity: CVE + remediation (offline engine)."),
         ("Exploits", "searchsploit matches (EDB-ID, type, CVEs, local path)."),
         ("Verification", "Is it REAL? Per-finding verdict (CONFIRMED / LIKELY / "
@@ -1246,7 +1268,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
     Active Directory (a computed sheet) is inserted between Databases and AD
     Quick Wins by build_workbook, giving the final tab order:
 
-        Start Here, Overview, Checklist, Services, Vulnerabilities, Exploits,
+        Start Here, Overview, Checklist, Services, Web, Vulnerabilities, Exploits,
         Verification, Services by Product, Databases, Active Directory,
         AD Quick Wins, Users & Accounts, Priv-Esc, Priv-Esc Playbook, Raw NSE.
 
@@ -1257,7 +1279,8 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
       * Active Directory <-> AD Quick Wins <-> Users & Accounts - the AD cluster.
       * Priv-Esc last - post-exploitation, reached after a foothold.
     """
-    return [_spec_checklist(hosts), _spec_services(hosts), _spec_vulns(hosts),
+    return [_spec_checklist(hosts), _spec_services(hosts), _spec_web(hosts),
+            _spec_vulns(hosts),
             _spec_exploits(hosts), _spec_verification(hosts),
             _spec_services_by_product(hosts),
             _spec_databases(hosts)], \
