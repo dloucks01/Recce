@@ -152,12 +152,14 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
             return None
         out["tls"] = tls
         out["version"] = (ver[1] or {}).get("gitVersion", "") if isinstance(ver[1], dict) else ""
+        # Reuse the scheme /version answered on - re-probing TLS-then-plaintext for
+        # every follow-up doubles the connects (and wrong-scheme timeouts) per host.
         # Anonymous authorization: can system:anonymous LIST namespaces?
-        ns, _ = _try_get(ip, port, "/api/v1/namespaces", timeout)
+        ns = _get(ip, port, "/api/v1/namespaces", tls=tls, timeout=timeout)
         out["anon_status"] = ns[0] if ns else None
         out["anon_list"] = bool(ns and ns[0] == 200 and _is_list(ns[1]))
         if out["anon_list"]:
-            sec, _ = _try_get(ip, port, "/api/v1/secrets", timeout)
+            sec = _get(ip, port, "/api/v1/secrets", tls=tls, timeout=timeout)
             out["anon_secrets"] = bool(sec and sec[0] == 200 and _is_list(sec[1]))
         return out
     if r == "etcd":
@@ -167,8 +169,8 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
         out["tls"] = tls
         out["etcd_version"] = _etcd_version(ver[1])
         # v2 keys API (disabled by default since etcd 3.4, but still seen on older
-        # clusters).
-        keys, _ = _try_get(ip, port, "/v2/keys/?recursive=true", timeout)
+        # clusters). Reuse the scheme /version answered on (etcd serves both over it).
+        keys = _get(ip, port, "/v2/keys/?recursive=true", tls=tls, timeout=timeout)
         out["v2_readable"] = bool(keys and keys[0] == 200
                                   and isinstance(keys[1], dict) and "node" in keys[1])
         # v3 gRPC-gateway (what every modern Kubernetes ships): an unauthenticated
