@@ -3285,6 +3285,106 @@ class CredentialsTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
 
 
+class DockerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        import json as _json
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                m = {"/version": {"Version": "24.0.5", "ApiVersion": "1.43",
+                                  "Os": "linux", "KernelVersion": "6.1"},
+                     "/info": {"Name": "node1", "Containers": 2, "ContainersRunning": 1,
+                               "Images": 5, "ServerVersion": "24.0.5"},
+                     "/containers/json": [{"Image": "nginx", "Names": ["/web"],
+                                           "Command": "nginx", "State": "running"}],
+                     "/images/json": [{"RepoTags": ["nginx:latest", "app:1.2"]}]}
+                b = _json.dumps(m.get(self.path, {})).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def test_probe_and_findings(self):
+        from recce import docker
+        from recce.report_docx import _vuln_type
+        pr = docker.probe("127.0.0.1", self.port)
+        self.assertTrue(pr and pr["exposed"])
+        self.assertEqual(pr["server_version"], "24.0.5")
+        # findings() needs is_docker(port) True; the test server is on a random port,
+        # so exercise the finding path on a canonical 2375 host with the same probe.
+        h2 = Host(ip="127.0.0.1", ports=[Port(portid=2375, state="open")])
+        fs = docker.findings([h2], {("127.0.0.1", 2375): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("exposed without authentication", titles)
+        by = docker.findings_to_vulns(fs)
+        for v in by["127.0.0.1"]:
+            vt, _ = _vuln_type(v.cwes)
+            self.assertTrue(vt, v.cwes)
+
+    def test_prove_engine_confirms_exposure(self):
+        from recce import docker, proofs
+        pr = docker.probe("127.0.0.1", self.port)
+        h = Host(ip="127.0.0.1", ports=[Port(portid=2375, state="open")])
+        h.vulns = docker.findings_to_vulns(
+            docker.findings([h], {("127.0.0.1", 2375): pr}))["127.0.0.1"]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)
+
+    def test_cmd_docker_end_to_end(self):
+        from recce import cli, xlsx, docker
+        from recce.store import Store
+        orig = docker.is_docker
+        docker.is_docker = lambda p: (p.state == "open"
+                                      and (p.portid == self.port or orig(p)))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="docker")]))
+                st.close()
+                rc = cli.main(["docker", "-o", out])
+                self.assertEqual(rc, 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("Docker", sheets)
+                vtxt = "\n".join(" ".join(map(str, r))
+                                 for r in sheets["Vulnerabilities"])
+                self.assertIn("Docker Engine API", vtxt)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                self.assertTrue([v for v in h.vulns if v.source == "docker"])
+        finally:
+            docker.is_docker = orig
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.7", ports=[Port(portid=22, service="ssh")]))
+            st.close()
+            self.assertEqual(cli.main(["docker", "-o", out, "--no-probe"]), 0)
+
+
 class FtpTest(unittest.TestCase):
     def _host(self):
         return Host(ip="10.0.0.80", subnet="10.0.0.0/24", hostnames=["FTP01"],

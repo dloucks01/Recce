@@ -50,6 +50,17 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   the "no AV/EDR evasion" boundary stays.)
 
 ### Added
+- **`recce docker` — exposed Docker Engine API detection + tab.** An unauthenticated
+  Docker Engine API (TCP 2375, or 2376 without mutual-TLS) is remote **root** RCE on
+  the host — anyone who reaches it can run a container that bind-mounts the host root
+  as root. recce reads the API unauthenticated with stdlib HTTP (`/version`, `/info`,
+  `/containers/json`, `/images/json`) and, if it answers, reports a **CONFIRMED
+  critical** exposure plus a container/image-inventory info-leak finding — the
+  successful unauthenticated read *is* the proof; recce deliberately does **not**
+  create a container. The prove engine adjudicates it CONFIRMED, findings fold into
+  the main totals / Vulnerabilities sheet / write-ups, and a new **Docker** tab
+  carries the escape command (`docker -H … run -v /:/host … chroot /host sh`).
+  Airgapped-safe, stdlib only.
 - **`recce ftp` — FTP gets its own deep offensive module + tab.** Credential-free
   stdlib control-channel probe: reads the banner (→ product/version for the offline
   CVE DB and a narrow **known-backdoor map** — vsFTPd 2.3.4 CVE-2011-2523, ProFTPD

@@ -167,6 +167,7 @@ _SOURCE_TOOL = {
     "mssql": "MSSQL enum (recce probes + nxc / impacket-mssqlclient)",
     "smb": "SMB enum (recce stdlib negotiate probe + nxc / smbclient)",
     "ftp": "FTP enum (recce stdlib control-channel probe + ftplib)",
+    "docker": "Docker Engine API enum (recce stdlib HTTP probe)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.
