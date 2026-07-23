@@ -77,7 +77,9 @@ def _sh_web() -> str:
         "echo \"[*] graphql introspection:\"; curl -sk -X POST -H 'Content-Type: application/json' "
         "-d '{\"query\":\"{__schema{queryType{name}}}\"}' \"$U/graphql\" | head -c 200; echo\n"
         "echo \"[*] CORS reflect:\";     curl -skI -H 'Origin: https://recce.example' \"$U/\" | grep -i '^access-control-'\n"
+        "echo \"[*] SSTI (expect 49):\"; curl -sk \"$U/?rc=recceA%7B%7B7*7%7D%7D\" | grep -o 'recceA49'\n"
         "echo \"[*] allowed methods:\";  curl -skI -X OPTIONS \"$U/\" | grep -i '^allow:'\n"
+        "# JWT: decode with  jwt_tool <token> ;  forge alg=none with  jwt_tool <token> -X a\n"
         "echo \"[*] PUT test (writes a marker if enabled):\"\n"
         "curl -sk -X PUT \"$U/recce_poc.txt\" -d 'recce_poc'; curl -sk \"$U/recce_poc.txt\"; echo\n"
         "# For a confirmed .git:  git-dumper \"$U/.git\" ./loot\n")
@@ -180,7 +182,8 @@ _MATCH = [
     (r"exposed (git|\.git|\.env|svn|\.ds_store|aws)|\.env file|mod_status exposed|"
      r"mod_info exposed|actuator|phpinfo|directory listing enabled|dangerous http methods|"
      r"web\.config readable|crossdomain|prometheus /metrics|\.htpasswd|graphql introspection|"
-     r"cors reflects", "web"),
+     r"cors reflects|server-side template injection|jwt (accepts|uses)|secret in client-side js|"
+     r"backup/source file", "web"),
     (r"unquoted service|writable service binary|writable autorun|writable scheduled-task|"
      r"writable service registry", "win_service_exe"),
     (r"dll hijack|writable directory in (system|user) path|writable app dir|com inprocserver|com hijack|"

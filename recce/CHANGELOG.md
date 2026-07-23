@@ -98,6 +98,21 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **Opt-in default-credential probe** (`recce web --creds`): a tiny documented
       list against HTTP Basic-auth endpoints, capped at ≤5 tries/endpoint
       (lockout-aware).
+    - **JWT weaknesses** — JWTs seen in cookies/headers/body are decoded and
+      flagged: **`alg:none`** (forgeable, high), HS* (offline-crackable secret),
+      RS*/ES* (algorithm-confusion). Free (reads the root response), so it runs even
+      passively.
+    - **SSTI / reflected-input quick check** — injects `{{7*7}}` / `${7*7}` /
+      `<%=7*7%>` into a throwaway param; **`49` evaluating next to the canary is a
+      strong, low-false-positive SSTI hit** (CONFIRMED in `prove`), and an
+      unencoded `<i>` reflection is flagged as a reflected-XSS lead. One request,
+      non-destructive.
+    - **Client-side JS secret scraping** — same-origin `<script src>` files are
+      fetched (bounded) and scanned for Google/AWS/Stripe/GitHub/Slack keys,
+      private-key blocks and hardcoded `apiKey`s.
+    - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
+      `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
+      version from its `readme.txt` Stable tag.
 - **`exploitplan` now emits benign PoC build recipes — the payload source, the
   build command, and the delivery — not just "drop a binary here."** For each
   confirmed finding it writes the standard, documented artifact to

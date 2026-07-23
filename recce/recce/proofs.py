@@ -273,6 +273,29 @@ def _v_web_exposure(host, port, vuln):
                        "(whatweb / nikto / nuclei). For .git, dump it: git-dumper <url>/.git ./loot."]
 
 
+def _v_ssti(host, port, vuln):
+    return CONFIRMED, ["recce injected a template expression and the engine evaluated it (7*7 -> 49 "
+                       "next to our canary) - that IS code execution in the template context, "
+                       "directly confirmed.",
+                       "Identify the engine and escalate to full RCE with tplmap or the engine-specific "
+                       "payloads (Jinja2/Twig/Freemarker/ERB) - within ROE."]
+
+
+def _v_jwt(host, port, vuln):
+    t = (vuln.title or "").lower()
+    if "alg:none" in t or "alg=none" in t:
+        return LIKELY, ["The token advertises alg=none (observed). If the server honours it, tokens are "
+                        "forgeable with any claims.",
+                        "Prove: jwt_tool <token> -X a  (strip the signature, set alg=none) and replay it - "
+                        "a 200/authorized response = real; rejected = the server pins the algorithm (FP)."]
+    if "symmetric" in t or "hs256" in t or "hs384" in t:
+        return LIKELY, ["HMAC-signed JWT: if the secret is weak it cracks offline, then you forge tokens.",
+                        "Prove: jwt_tool <token> -C -d rockyou.txt  (or hashcat -m 16500). A crack = real."]
+    return LIKELY, ["Asymmetric JWT: test the RS256->HS256 algorithm-confusion attack.",
+                    "Prove: jwt_tool <token> -X k -pk public.pem  (sign with the public key as an HS256 "
+                    "secret); an accepted forged token = real."]
+
+
 def _v_web_methods(host, port, vuln):
     return LIKELY, ["The server advertised the method(s) in its OPTIONS Allow header (observed).",
                     "Prove impact non-destructively: curl -sk -X PUT <url>/recce_poc.txt -d 'recce_poc' "
@@ -404,7 +427,8 @@ _RECIPES: list[dict] = [
                                     r"actuator|heapdump|gateway actuator|backup/source file|phpinfo|"
                                     r"web\.config readable|directory listing enabled|swagger|"
                                     r"\.ds_store|crossdomain|prometheus /metrics|\.htpasswd|"
-                                    r"graphql introspection|cors reflects|user enumeration via rest",
+                                    r"graphql introspection|cors reflects|user enumeration via rest|"
+                                    r"secret in client-side js|wordpress .*(present|detected)|xml-rpc",
      "name": "Web exposure (VCS / config / status endpoint)",
      "pre": ["The resource is reachable and returns the sensitive content"],
      "finish": "curl -sk <url>/<path> to re-read it; for a .git repo: git-dumper <url>/.git ./loot "
@@ -412,6 +436,20 @@ _RECIPES: list[dict] = [
      "fp": "It's an observation - the probe already fetched it. The only nuance is whether the exposed "
            "content is actually sensitive.",
      "fn": _v_web_exposure},
+    {"id": "web-ssti", "match": r"server-side template injection|\bssti\b|template engine (executed|evaluated)",
+     "name": "Server-Side Template Injection (SSTI)",
+     "pre": ["User input is rendered by a server-side template engine"],
+     "finish": "tplmap -u '<url>?rc=*'  to identify the engine and get RCE; or the engine-specific "
+               "payload (Jinja2 {{config}}, Freemarker, ERB) - within ROE.",
+     "fp": "Very low - the engine already evaluated 7*7 to 49. Confirm the engine for the RCE payload.",
+     "fn": _v_ssti},
+    {"id": "web-jwt", "match": r"jwt (accepts|uses)|alg:none|algorithm-confusion|json web token",
+     "name": "JWT weakness (alg:none / weak secret / confusion)",
+     "pre": ["The app trusts a JWT whose signature can be forged or cracked"],
+     "finish": "jwt_tool <token> -X a (alg:none) / -C -d rockyou.txt (crack HS256) / -X k (RS256->HS256), "
+               "then replay the forged token.",
+     "fp": "The server pins the algorithm / rejects the forged token, or the secret is strong.",
+     "fn": _v_jwt},
     {"id": "web-methods", "match": r"dangerous http methods|http method.*enabled|put.*enabled",
      "name": "Dangerous HTTP methods (PUT/DELETE/TRACE)",
      "pre": ["The server advertises a write/dangerous method in OPTIONS Allow"],
