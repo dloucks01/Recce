@@ -2535,7 +2535,15 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
-    print("    -> AD Findings + AD Attack Paths sheets written to the workbook.")
+    written = []
+    if analysis["findings"]:
+        written.append("AD Findings")
+    if analysis["paths"] or analysis["kerberos"]:
+        written.append("AD Attack Paths")
+    if written:
+        print(f"    -> {' + '.join(written)} sheet(s) written to the workbook.")
+    else:
+        print("    -> Nothing to import (no AD findings or paths in the input).")
     return 0
 
 

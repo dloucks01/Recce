@@ -10,8 +10,10 @@ It is designed for mixed **Linux + Windows / Active Directory** environments:
 full TCP port sweeps, service/version + OS detection, vulnerability
 identification (curated detection NSE + a built-in **offline** version→CVE/CWE
 database, so it works airgapped), and deep **Active Directory** analysis — DC
-identification, NTLM-relay target discovery, and credentialed LDAP enumeration of
-users, SPNs, roastable accounts, delegation, groups and trusts.
+identification, NTLM-relay target discovery, credentialed LDAP enumeration of
+users, SPNs, roastable accounts, delegation, groups and trusts, and offline
+**BloodHound (SharpHound) + Certipy (ADCS/ESC)** import that maps the shortest
+paths from your account to Domain Admin.
 
 > 🚀 **New here? Read [QUICKSTART.md](QUICKSTART.md)** — a one-page guide that
 > gets you from zero to a filled-in workbook in five commands. Prefer a
@@ -684,11 +686,42 @@ Everything lands in the **Active Directory** and **AD Quick Wins** sheets (see
 below), plus an enriched **Users & Accounts** sheet (roastable/delegation cells
 are color-flagged).
 
+**Tier 3 — offline BloodHound + Certipy import (`recce ad`).** Bring back a
+**SharpHound** collection and/or a **`certipy find -json`** file and recce parses
+the AD object graph offline (stdlib `json`/`zipfile` — no BloodHound/neo4j) into a
+provable runbook:
+
+- **AD misconfigurations / vulnerabilities** — Kerberoastable & AS-REP-roastable
+  accounts, **DCSync** rights held off tier-0, unconstrained/constrained
+  delegation, **RBCD**, **shadow-credential** (`AddKeyCredentialLink`) edges,
+  dangerous ACLs from low-priv principals, passwords in descriptions,
+  `PASSWD_NOTREQD`, non-zero `MachineAccountQuota`, and **ADCS ESC1–ESC15** from
+  Certipy — each with the exact `impacket`/`certipy`/`bloodyAD` command to prove it.
+- **Attack paths to Domain Admin** — the shortest path (BFS over the graph) from
+  **your account** (or any authenticated user) to Domain Admins / the domain
+  object / a DC, rendered as an edge chain with the abuse per hop.
+- **Kerberos actions for effect** — roast, AS-REP, DCSync, delegation ticket
+  forging, staged with your credential.
+
+Credentials-first and copy-paste-ready — give it `-u/-p/-d` (no NT hash needed)
+and every generated command is pre-filled with your account. Findings feed the
+main **Overview** totals, the **Vulnerabilities** sheet, and the write-ups, and
+also populate the dedicated **AD Findings** and **AD Attack Paths** sheets.
+
+```bash
+# SharpHound + Certipy, credentialed — paths start from your account:
+python -m recce ad loot.zip 20260101_Certipy.json \
+     -u alice -p 'Passw0rd!' -d corp.local --dc-ip 10.0.10.10 -o eng
+
+# Re-import after remediating some findings (drop the ones that are now fixed):
+python -m recce ad loot.zip -u alice -p 'Passw0rd!' -d corp.local --replace-ad -o eng
+```
+
 ## Output (`<output-dir>/`)
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Vulnerabilities** · **Exploits** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · Users & Accounts · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |
