@@ -2512,6 +2512,8 @@ class WebModuleTest(unittest.TestCase):
                 self._send(200, extra={"Allow": "GET, POST, PUT, OPTIONS"})
 
             def do_GET(self):
+                if self.path == "/reflect":
+                    return self._send(200, (self.headers.get("X-Test", "none")).encode())
                 if self.path == "/.git/HEAD":
                     return self._send(200, b"ref: refs/heads/main\n")
                 if self.path == "/.env":
@@ -2572,6 +2574,22 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(len(eps), 1)                    # only the http port
         self.assertIn("whatweb", eps[0]["commands"])
         self.assertIn("nikto", eps[0]["commands"])
+
+    def test_auth_headers_are_sent(self):
+        from recce import web
+        r = web._fetch("127.0.0.1", self._port(), "/reflect", auth={"X-Test": "hello"})
+        self.assertIsNotNone(r)
+        self.assertEqual(r[2], "hello")            # server echoed our auth header
+        r2 = web._fetch("127.0.0.1", self._port(), "/reflect")
+        self.assertEqual(r2[2], "none")            # no header without auth
+
+    def test_non_http_port_skips_active_probes(self):
+        from recce import web
+        # A closed/non-HTTP port: root fetch fails -> no path probes, no crash.
+        dead = Port(portid=1, service="https", state="open")     # nothing listening
+        profile, findings = web.scan_endpoint("127.0.0.1", dead, active=True)
+        self.assertIsNone(profile["status"])
+        self.assertNotIn("web-git", {v.script_id for v in findings})
 
     def test_web_proof_and_poc_wiring(self):
         from recce import proofs, poc
