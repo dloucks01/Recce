@@ -3388,6 +3388,107 @@ class MssqlTest(unittest.TestCase):
         self.assertFalse([f for f in fs3 if "TRUSTWORTHY" in f["title"]
                           or "CONFIRMED" in f["title"]])
 
+    def test_datamine_finds_tables_and_sensitive_columns(self):
+        from recce import mssql
+        dbs = ["master", "payroll", "appdb"]
+        script = mssql.build_datamine_script(dbs)
+        self.assertIn("USE [payroll]", script)
+        self.assertIn("c.name LIKE '%ssn%'", script)             # interesting-column filter
+        out = ("@@TBL:1\npayroll|dbo.Employees|1240\npayroll|dbo.Salaries|1240\n@@TBLE:1\n"
+               "@@COL:1\npayroll|dbo.Employees.ssn\npayroll|dbo.Employees.email\n@@COLE:1\n"
+               "@@TBL:2\nappdb|dbo.Users|55\n@@TBLE:2\n"
+               "@@COL:2\nappdb|dbo.Users.password_hash\n@@COLE:2\n")
+        mined = mssql.parse_datamine(out, dbs)
+        self.assertEqual(mined["payroll"]["tables"],
+                         [("dbo.Employees", "1240"), ("dbo.Salaries", "1240")])
+        self.assertIn("dbo.Employees.ssn", mined["payroll"]["interesting"])
+        fs = mssql.datamine_findings({"ip": "10.0.0.50", "port": 1433}, mined,
+                                     {"user": "alice"})
+        f = fs[0]
+        self.assertEqual(f["severity"], "high")                  # sensitive data present
+        self.assertEqual(f["kind"], "data_at_rest")
+        self.assertIn("ssn", f["detail"])
+        self.assertIn("Users", f["detail"])                      # interesting table name
+        self.assertGreater(len(f["narrative"]), 120)
+
+    def test_datamine_context_guard_rejects_wrong_db(self):
+        from recce import mssql
+        # A failed USE leaves rows tagged with the wrong DB_NAME -> not attributed.
+        out = "@@TBL:0\nmaster|dbo.x|1\n@@TBLE:0\n@@COL:0\n@@COLE:0\n"
+        mined = mssql.parse_datamine(out, ["payroll"])
+        self.assertEqual(mined["payroll"]["tables"], [])         # 'master' != 'payroll'
+
+    def test_write_proof_is_reversible_and_evidenced(self):
+        from recce import mssql
+        s = mssql.build_write_proof_script("ab12cd")
+        # Proves create/insert/update AND reverts everything.
+        self.assertIn("CREATE TABLE ##recce_ab12cd", s)
+        self.assertIn("UPDATE ##recce_ab12cd SET note='MODIFIED_ab12cd'", s)
+        self.assertIn("DROP TABLE ##recce_ab12cd", s)            # reverted
+        self.assertIn("ALTER SERVER ROLE dbcreator ADD MEMBER recce_ab12cd", s)
+        self.assertIn("DROP LOGIN recce_ab12cd", s)              # reverted
+        ev = mssql.parse_write_proof(
+            "@@W:begin\nINSERT|before\nUPDATE|MODIFIED_ab12cd\nPERM|1\n@@W:end\n")
+        self.assertEqual(ev["update"], "MODIFIED_ab12cd")
+        self.assertEqual(ev["perm"], "1")
+        f = mssql.write_proof_finding({"ip": "10.0.0.50", "port": 1433}, ev, {"user": "a"})
+        self.assertEqual(f["severity"], "critical")
+        self.assertIn("reverted", f["detail"])
+        self.assertIn("role", f["detail"])
+
+    def test_write_proof_requires_actual_modification(self):
+        from recce import mssql
+        from unittest import mock
+        # If UPDATE didn't round-trip, prove_write reports failure (no false claim).
+        with mock.patch.object(mssql, "_mssqlclient_cmd", return_value=["x"]), \
+                mock.patch.object(mssql, "_run_stdin", return_value=("@@W:begin\n@@W:end\n", None)):
+            ev, err = mssql.prove_write("10.0.0.50", {"user": "a", "secret": "b"}, "tok")
+        self.assertIsNone(ev)
+        self.assertIn("not proven", err)
+
+    def test_data_and_prove_write_flow_into_totals(self):
+        from unittest import mock
+        from recce import cli, mssql, xlsx
+        from recce.store import Store
+        enum = mssql.parse_enum(
+            "@@B:server\nSQL01|sa|1|0|15.0.2000.5\n@@E:server\n@@B:logins\nsa|1\n@@E:logins\n"
+            "@@B:databases\nmaster|0|sa\npayroll|0|sa\n@@E:databases\n@@B:links\n@@E:links\n"
+            "@@B:impersonate\n@@E:impersonate\n@@B:config\n@@E:config\n@@B:hashes\n@@E:hashes\n"
+            "@@B:credentials\n@@E:credentials\n@@B:proxies\n@@E:proxies\n"
+            "@@B:linkedlogins\n@@E:linkedlogins\n")
+
+        def runner_factory(*a, **k):
+            def run(script):
+                if "@@TBL:" in script:                          # dbs order: [master, payroll]
+                    return ("@@TBL:0\nmaster|dbo.spt_values|1\n@@TBLE:0\n@@COL:0\n@@COLE:0\n"
+                            "@@TBL:1\npayroll|dbo.Employees|1240\n@@TBLE:1\n"
+                            "@@COL:1\npayroll|dbo.Employees.ssn\n@@COLE:1\n")
+                return ""
+            return run
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(self._host())
+            st.close()
+            with mock.patch.object(mssql, "mssqlclient_tool", return_value="x"), \
+                    mock.patch.object(mssql, "nxc_tool", return_value=None), \
+                    mock.patch.object(mssql, "run_mssqlclient", return_value=(enum, None)), \
+                    mock.patch.object(mssql, "link_runner", side_effect=runner_factory), \
+                    mock.patch.object(mssql, "prove_write",
+                                      return_value=({"insert": "before", "update": "MODIFIED_x",
+                                                     "perm": "1"}, None)):
+                rc = cli.main(["mssql", "-o", out, "--no-probe", "--no-links",
+                               "--data", "--prove-write",
+                               "-u", "alice", "-p", "P@ss", "-d", "corp.local"])
+            self.assertEqual(rc, 0)
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            v = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+            self.assertIn("Sensitive data accessible", v)
+            self.assertIn("Proved write + permission-modify", v)
+            m = "\n".join(" ".join(map(str, r)) for r in sheets["MSSQL"])
+            self.assertIn("SENSITIVE COLUMNS", m)
+
     def test_findings_carry_detailed_narratives(self):
         from recce import mssql
         # A rich enum that exercises many finding kinds.

@@ -1003,6 +1003,12 @@ def _build_runbook(wb, meta: dict) -> None:
         "Run an OS command for effect and capture the output - xp_cmdshell, OLE "
         "Automation, or a SQL Agent job (clr hands off to mssqlpwner). Result is folded "
         "into the findings as confirmed RCE.")
+    cmd("  --data",
+        "Mine the databases: enumerate every table (+ row counts) and find sensitive "
+        "columns/tables (passwords, PII, financial) across all databases.")
+    cmd("  --prove-write",
+        "Prove write + permission-modify impact REVERSIBLY: create a table, modify a "
+        "field, toggle a role - capture before/after, then undo everything.")
 
     section("6. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
@@ -1462,6 +1468,15 @@ def _build_mssql(wb, analysis: dict) -> None:
                 tag = "  [SYSADMIN]" if n.get("sysadmin") else ""
                 who = f"  as {n.get('login', '')}" if n.get("login") else ""
                 sh.write(["", f"{route}   ({n.get('server', '')}{who}){tag}"])
+        mined = rb.get("datamine")
+        if mined:
+            total = sum(len(v.get("tables") or []) for v in mined.values())
+            sh.write([(f"Data mining ({len(mined)} db, {total} tables)", "bold")])
+            for db, v in mined.items():
+                line = f"{db}: {len(v.get('tables') or [])} table(s)"
+                if v.get("interesting"):
+                    line += "  |  SENSITIVE COLUMNS: " + ", ".join(v["interesting"][:10])
+                sh.write(["", line])
         cur = None
         for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
             if step["phase"] != cur:
