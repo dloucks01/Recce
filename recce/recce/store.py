@@ -180,9 +180,14 @@ class Store:
                 aseen.add(k)
         return merged
 
-    def upsert_host(self, host: Host) -> None:
+    def upsert_host(self, host: Host, merge: bool = True) -> None:
+        """Persist a host. By default it MERGES with any existing record (union of
+        vulns/accounts/exploits by key, so re-scans accumulate). Pass merge=False
+        to overwrite the stored record wholesale - used when the caller has already
+        loaded the full host and intentionally removed items (e.g. `--replace-ad`),
+        which the union-merge would otherwise re-introduce."""
         existing = self.get_host(host.ip)
-        if existing:
+        if existing and merge:
             host = self._merge(existing, host)
         with closing(self.conn.cursor()) as cur:
             cur.execute(

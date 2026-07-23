@@ -179,7 +179,9 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     merge onto the scanned DC), so they now feed the **Overview severity totals**,
     the **Vulnerabilities sheet**, and the **per-finding writeups** (DOCX + HTML
     appendix) - each with its CWE, remediation, and the exact prove/abuse command
-    as evidence - not just the AD-only sheets.
+    as evidence - not just the AD-only sheets. Re-imports accumulate by default;
+    `--replace-ad` clears the previously-imported AD/ESC findings on the DC host
+    first, so remediated items drop off (scan-sourced vulns on that host are kept).
   - Merges the collected domain facts (functional level, trusts, MachineAccountQuota)
     into the Active Directory sheet even with no network scan. References existing
     published tooling (impacket / certipy / netexec / bloodyAD / Rubeus); generates
