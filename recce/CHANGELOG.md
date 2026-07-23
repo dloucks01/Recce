@@ -150,6 +150,15 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   - **With credentials, auto-runs `nxc mssql`** (when installed; falls back to
     commands otherwise): the access + privilege matrix - which servers your creds
     log into and whether the login is effectively **sysadmin** (`Pwn3d!`).
+  - **Live deep enumeration via `impacket-mssqlclient`** (auto-run when installed):
+    recce connects and runs the enumeration queries, then **detects the actual
+    escalation chain on each instance from the live results** - an impersonatable
+    sysadmin login (named), a **TRUSTWORTHY** DB owned by a sysadmin (named), a
+    reachable **linked server** (named), `xp_cmdshell` already on, and recovered
+    `sys.sql_logins` hashes - rendering a grounded *"Live chain: impersonate sa ->
+    abuse TRUSTWORTHY payroll -> hop DW01"* plus the exact command per hop. The
+    live enumeration (login, sysadmins, TRUSTWORTHY DBs, linked servers,
+    impersonatable logins, config, hashes) is shown on the MSSQL sheet.
   - **The MSSQLPwner route** as a pre-filled runbook + attack chain: enumerate
     roles/databases/**TRUSTWORTHY** DBs/**linked servers**/**impersonatable
     logins**/`xp_cmdshell`-OLE-CLR status/`sys.sql_logins` hashes -> escalate
