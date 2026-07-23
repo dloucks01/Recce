@@ -827,17 +827,8 @@ def _build_guide(wb, meta: dict) -> None:
                          "FALSE POSITIVE / INCONCLUSIVE) with the evidence + the exact "
                          "safe command to finish proving. Run `recce prove`."),
         ("Services by Product", "Who runs the same service+version (mass-patch pivot)."),
+        # --- per-service deep-dive band (grouped, right after the findings) ---
         ("Databases", "DB inventory: engine, version, auth, databases, users."),
-        ("Active Directory", "Domains, DCs, password policy, trusts."),
-        ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
-        ("AD Findings", "Misconfigurations/vulns from a SharpHound + Certipy import "
-                        "(Kerberoast, DCSync, delegation, RBCD, shadow-creds, ADCS "
-                        "ESC1-15) - each with the exact certipy/impacket command to "
-                        "prove it. Run `recce ad`."),
-        ("AD Attack Paths", "Shortest path from YOUR account (or any authenticated "
-                            "user) to Domain Admin / the domain / a DC, plus the "
-                            "Kerberos actions to run. Run `recce ad -u USER -p PASS`."),
-        ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
         ("MSSQL", "SQL Server offensive view: endpoints (version/encryption/access/"
                   "privilege), misconfig/vuln findings, and the credential-free + "
                   "MSSQLPwner-style runbook & attack chain. Run `recce mssql`."),
@@ -852,14 +843,31 @@ def _build_guide(wb, meta: dict) -> None:
         ("Kubernetes", "Kubernetes attack surface: unauthenticated reads of the kubelet "
                        "(exec-into-pods), kube-apiserver (anonymous LIST / Secrets) and "
                        "etcd (all cluster secrets). Run `recce k8s`."),
+        # --- Active Directory cluster (kept contiguous) ---
+        ("Active Directory", "Domains, DCs, password policy, trusts."),
+        ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
+        ("AD Findings", "Misconfigurations/vulns from a SharpHound + Certipy import "
+                        "(Kerberoast, DCSync, delegation, RBCD, shadow-creds, ADCS "
+                        "ESC1-15) - each with the exact certipy/impacket command to "
+                        "prove it. Run `recce ad`."),
+        ("AD Attack Paths", "Shortest path from YOUR account (or any authenticated "
+                            "user) to Domain Admin / the domain / a DC, plus the "
+                            "Kerberos actions to run. Run `recce ad -u USER -p PASS`."),
+        ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
+        # --- loot -> act -> post-exploitation ---
+        ("Credentials", "Stacked credentials (auto-harvested + manually captured), "
+                        "ready to spray. `recce creds --plan` builds the netexec / "
+                        "impacket spray plan."),
+        ("Exploitation", "Every CONFIRMED finding (remote service exposures AND local "
+                         "priv-esc) mapped to the exact existing tool + command (your "
+                         "values filled in) + how to validate. Run `recce exploitplan`."),
+        ("Attack Path", "The confirmed findings chained into a staged path (foothold -> "
+                        "priv-esc -> creds -> lateral -> domain). Run `recce attackpath`."),
         ("Priv-Esc", "Per-host escalation findings from the local sweep "
                      "(recce deploy/ingest) + remote signals. Un-swept hosts show a "
                      "'run recce deploy' to-do; dead IPs get no rows."),
         ("Priv-Esc Playbook", "Reference: the generic Windows/Linux local-privesc "
                               "checklist (what to run once you have a shell)."),
-        ("Exploitation", "Each confirmed priv-esc finding mapped to the exact "
-                         "existing tool + command (your values filled in) + how "
-                         "to validate. References vetted tools, not new exploits."),
         ("Raw NSE", "All raw NSE script output, verbatim (Scope = host or port) - "
                     "the evidence behind the parsed sheets; grouped by host."),
     ]:
@@ -1181,10 +1189,14 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     sh.write([("Totals", "header"), ("", "header")])
     nav_set = set(nav)
     proven = sum(1 for h in hosts for v in h.vulns if _curated_exploit(v))
+    from . import proofs
+    confirmed = sum(1 for r in proofs.verify_hosts(hosts)
+                    if r["verdict"] == proofs.CONFIRMED)
     _links = {
         "Live hosts": "Checklist", "Open service ports": "Services",
         "Vuln findings": "Vulnerabilities", "High / Critical findings": "Vulnerabilities",
-        "Findings with a proven exploit": "Vulnerabilities",
+        "Confirmed by recce (prove engine)": "Verification",
+        "Findings with a curated exploit": "Vulnerabilities",
         "Candidate exploits": "Exploits", "Domains / DCs": "Active Directory",
         "NTLM relay targets": "AD Quick Wins",
         "Kerberoastable / AS-REP": "AD Quick Wins",
@@ -1195,7 +1207,8 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         ("Open service ports", len(open_ports)),
         ("Vuln findings", sum(len(h.vulns) for h in hosts)),
         ("High / Critical findings", crit),
-        ("Findings with a proven exploit", proven),
+        ("Confirmed by recce (prove engine)", confirmed),
+        ("Findings with a curated exploit", proven),
         ("Candidate exploits", sum(len(h.exploits) for h in hosts)),
         ("Domains / DCs", f"{len(domains or ad.derive_domains(hosts))} / "
                           f"{len(ad.domain_controllers(hosts))}"),
@@ -1881,32 +1894,38 @@ def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> Sh
 
 def _ordered_specs(hosts: list[Host], scope: dict | None = None,
                    creds_stored: list | None = None):
-    """Specs in final left-to-right order, following the engagement flow:
-    orient -> track -> find -> exploit -> pivot -> AD -> post-exploitation.
+    """The spec-based sheets, split into the groups build_workbook interleaves with
+    the computed sheets so the final left-to-right order follows the engagement flow:
 
-    Active Directory (a computed sheet) is inserted between Databases and AD
-    Quick Wins by build_workbook, giving the final tab order:
+        orient -> track -> find -> per-service deep-dive -> AD -> loot -> act -> post-ex
 
-        Start Here, Overview, Checklist, Services, Web, Vulnerabilities, Exploits,
-        Verification, Services by Product, Databases, Active Directory,
-        AD Quick Wins, Users & Accounts, Priv-Esc, Priv-Esc Playbook, Raw NSE.
+    Returns (pre, ad_specs, tail):
+      * pre  - orient/track/find: Checklist, Services, Web, Vulnerabilities, Exploits,
+               Verification, Services by Product, Databases.
+      * ad_specs - the two spec-based AD sheets (AD Quick Wins, Users & Accounts) that
+               build_workbook slots INTO the AD cluster so it stays contiguous with the
+               computed Active Directory / AD Findings / AD Attack Paths sheets.
+      * tail - loot + act + post-exploitation: Credentials, Exploitation, Attack Path,
+               Priv-Esc, Priv-Esc Playbook, Raw NSE. Exploitation/Attack Path precede
+               Priv-Esc (you exploit -> foothold -> then escalate).
 
     Rationale for the pairings you flip between:
       * Checklist <-> Services  - host <-> its open ports (the working pair).
-      * Services <-> Vulnerabilities <-> Exploits - port -> finding -> exploit.
+      * Services <-> Vulnerabilities <-> Verification - port -> finding -> is-it-real.
       * Vulnerabilities -> Services by Product - "who else runs this?" pivot.
-      * Active Directory <-> AD Quick Wins <-> Users & Accounts - the AD cluster.
-      * Priv-Esc last - post-exploitation, reached after a foothold.
+      * Databases + MSSQL/SMB/FTP/Docker/Kubernetes - the per-service deep-dive band.
+      * Active Directory <-> AD Quick Wins <-> AD Findings/Paths <-> Users & Accounts.
     """
-    return [_spec_checklist(hosts), _spec_services(hosts), _spec_web(hosts),
-            _spec_vulns(hosts),
-            _spec_exploits(hosts), _spec_verification(hosts),
-            _spec_services_by_product(hosts),
-            _spec_databases(hosts)], \
-           [_spec_quick_wins(hosts), _spec_accounts(hosts), _spec_credentials(hosts, creds_stored),
-            _spec_privesc(hosts), _spec_privesc_playbook(hosts),
+    pre = [_spec_checklist(hosts), _spec_services(hosts), _spec_web(hosts),
+           _spec_vulns(hosts), _spec_exploits(hosts), _spec_verification(hosts),
+           _spec_services_by_product(hosts), _spec_databases(hosts)]
+    ad_specs = {"quick_wins": _spec_quick_wins(hosts),
+                "accounts": _spec_accounts(hosts)}
+    tail = [_spec_credentials(hosts, creds_stored),
             _spec_exploitation(hosts), _spec_attackpath(hosts),
+            _spec_privesc(hosts), _spec_privesc_playbook(hosts),
             _spec_raw_nse(hosts)]
+    return pre, ad_specs, tail
 
 
 def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
@@ -1923,34 +1942,40 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     order_map = order_map or {}
     statuses = statuses or {}
     wb = xlsx.Workbook()
-    pre, post = _ordered_specs(hosts, scope, credentials)
-    # Which sheets will actually exist (skip_if_empty ones may not), in tab order,
-    # so the Overview's jump bar only links to sheets that are really there.
+    pre, ad_specs, tail = _ordered_specs(hosts, scope, credentials)
+    quick_wins_spec, accounts_spec = ad_specs["quick_wins"], ad_specs["accounts"]
+    # Which sheets will actually exist (skip_if_empty ones may not), in the SAME
+    # left-to-right order they'll be emitted below, so the Overview's jump bar only
+    # links to sheets that are really there. Flow: find -> per-service deep-dive ->
+    # AD cluster (contiguous) -> loot/act/post-ex.
     ad_present = bool(domains or ad.domain_controllers(hosts))
     bh = meta.get("ad_bloodhound") or {}
-    nav = [s.title for s in pre if not (s.skip_if_empty and not s.rows)]
+
+    def _mod(key):
+        m = meta.get(key) or {}
+        return bool(m.get("targets") or m.get("findings"))
+
+    def _spec_here(spec):
+        return not (spec.skip_if_empty and not spec.rows)
+
+    nav = [s.title for s in pre if _spec_here(s)]
+    # Service deep-dive band (Databases is the last of `pre`, immediately before).
+    for key, title in (("mssql", "MSSQL"), ("smb", "SMB"), ("ftp", "FTP"),
+                       ("docker", "Docker"), ("kubernetes", "Kubernetes")):
+        if _mod(key):
+            nav.append(title)
+    # AD cluster, kept contiguous.
     if ad_present:
         nav.append("Active Directory")
+    if _spec_here(quick_wins_spec):
+        nav.append(quick_wins_spec.title)
     if bh.get("findings"):
         nav.append("AD Findings")
     if bh.get("paths") or bh.get("kerberos"):
         nav.append("AD Attack Paths")
-    ms = meta.get("mssql") or {}
-    if ms.get("targets") or ms.get("findings"):
-        nav.append("MSSQL")
-    sm = meta.get("smb") or {}
-    if sm.get("targets") or sm.get("findings"):
-        nav.append("SMB")
-    ft = meta.get("ftp") or {}
-    if ft.get("targets") or ft.get("findings"):
-        nav.append("FTP")
-    dk = meta.get("docker") or {}
-    if dk.get("targets") or dk.get("findings"):
-        nav.append("Docker")
-    k8 = meta.get("kubernetes") or {}
-    if k8.get("targets") or k8.get("findings"):
-        nav.append("Kubernetes")
-    nav += [s.title for s in post if not (s.skip_if_empty and not s.rows)]
+    if _spec_here(accounts_spec):
+        nav.append(accounts_spec.title)
+    nav += [s.title for s in tail if _spec_here(s)]
 
     # Pre-compute each host's Checklist row (header is row 1, data from row 2) so
     # the Overview can deep-link an IP straight to it. Uses the SAME ordering the
@@ -1962,28 +1987,35 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         key_ip = {r["key"]: r["data"]["IP"] for r in checklist_spec.rows}
         host_rows = {key_ip[k]: 2 + i for i, k in enumerate(ck_keys) if k in key_ip}
 
+    def _emit(spec):
+        if spec.skip_if_empty and not spec.rows:
+            return
+        _write_spec(wb.add_sheet(spec.title), spec, tracking,
+                    order_map.get(spec.title), statuses)
+
     _build_guide(wb, meta)
     _build_runbook(wb, meta)
     _build_overview(wb, hosts, meta, domains, tracking, scope, issues or [], nav,
                     host_rows)
+    # orient/track/find (ends on Databases).
     for spec in pre:
-        if spec.skip_if_empty and not spec.rows:
-            continue
-        _write_spec(wb.add_sheet(spec.title), spec, tracking,
-                    order_map.get(spec.title), statuses)
-    _build_active_directory(wb, hosts, domains)
-    _build_ad_findings(wb, bh)
-    _build_ad_paths(wb, bh)
+        _emit(spec)
+    # Per-service deep-dive band, right after Databases.
     _build_mssql(wb, meta.get("mssql") or {})
     _build_smb(wb, meta.get("smb") or {})
     _build_ftp(wb, meta.get("ftp") or {})
     _build_docker(wb, meta.get("docker") or {})
     _build_kubernetes(wb, meta.get("kubernetes") or {})
-    for spec in post:
-        if spec.skip_if_empty and not spec.rows:
-            continue
-        _write_spec(wb.add_sheet(spec.title), spec, tracking,
-                    order_map.get(spec.title), statuses)
+    # AD cluster, kept contiguous: inventory -> quick wins -> import findings/paths
+    # -> users & accounts.
+    _build_active_directory(wb, hosts, domains)
+    _emit(quick_wins_spec)
+    _build_ad_findings(wb, bh)
+    _build_ad_paths(wb, bh)
+    _emit(accounts_spec)
+    # loot -> act (exploit/chain) -> post-ex -> raw evidence.
+    for spec in tail:
+        _emit(spec)
     # Colour the computed (non-spec) sheets' tabs too, so the whole tab bar is
     # grouped into role bands.
     for sh in wb.sheets:

@@ -46,6 +46,16 @@ totals, the prove engine, the reports, and its own workbook tab._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Changed
+- **Workbook reorganised to follow the engagement flow.** The per-service deep-dive
+  tabs (Databases, MSSQL, SMB, FTP, Docker, Kubernetes) are now a single grouped band
+  right after the findings, the Active Directory cluster (Active Directory, AD Quick
+  Wins, AD Findings, AD Attack Paths, Users & Accounts) is kept contiguous instead of
+  being split by the service tabs, and Exploitation / Attack Path now come **before**
+  Priv-Esc (you exploit → foothold → then escalate). The Overview jump-bar and the
+  "Start Here" tab index follow the same order. The Overview also gains a **"Confirmed
+  by recce (prove engine)"** total (the count of findings recce actively proved),
+  and the CVE-curated tile is relabelled "Findings with a curated exploit" for
+  accuracy.
 - **PoCs are stronger, unambiguous proofs with an explicit ROE hand-off.** Each
   generated PoC now states a clear **`PROVEN:`** verdict and marks the single
   **`ACTION (ROE)`** line where the operator substitutes their authorized action:
