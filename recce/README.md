@@ -82,8 +82,10 @@ to a TCP connect scan otherwise.
 
 ### Build the burn package (transfer / airgap)
 
-To move recce onto an airgapped Kali box (or burn it to a disk), build a
-self-contained bundle:
+recce ships as a **plain drop-in tarball** — a single `recce-<version>/` directory
+you extract and run, no pip and no wheel. A pre-built one for the current release
+lives in **[`recce/releases/`](recce/releases/)** (`.tar.gz` + `.zip` + `SHA256SUMS`);
+grab it directly, or build your own:
 
 ```bash
 ./make_package.sh              # -> dist/recce-<version>.tar.gz (+ .zip) + SHA256SUMS
