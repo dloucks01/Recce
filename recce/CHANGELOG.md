@@ -60,6 +60,14 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   finish proving), and `exploitplan` writes a benign `recce_poc_web.sh` (curl-based
   proof requests). Airgapped-safe, stdlib only; heavier scanning is bridged to the
   Kali tools. `--no-active` keeps it to passive fingerprint + headers/TLS.
+  - **Web scanning now runs automatically in the `vulns` phase** (the deep web
+    enum replaced the old headers/TLS-only probe), so `.git`/`.env`/actuator/method
+    exposures are found without a separate step; `recce web` re-runs or deep-dives.
+    Non-HTTP TLS ports (LDAPS/IMAPS) skip the HTTP path probes but keep TLS checks.
+  - **Authenticated web scanning**: `recce web --cookie 'session=…'` and repeatable
+    `--header 'Authorization: Bearer …'` run the whole scan as a logged-in user.
+  - **Per-endpoint screenshots**: `recce web --screenshots` captures each endpoint
+    with the headless browser into `engagement/screenshots/`.
 - **`exploitplan` now emits benign PoC build recipes — the payload source, the
   build command, and the delivery — not just "drop a binary here."** For each
   confirmed finding it writes the standard, documented artifact to

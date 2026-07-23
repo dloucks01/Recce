@@ -46,8 +46,11 @@ def _mk(ip: str, port: Port, sid: str, sev: str, title: str, cwes, output: str,
                 confidence=confidence)
 
 
-def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int = 16384):
-    """One request. Returns (status, headers_lower, body_text) or None on failure."""
+def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int = 16384,
+           auth: dict | None = None):
+    """One request. Returns (status, headers_lower, body_text) or None on failure.
+    `auth` supplies extra request headers (Cookie / Authorization / custom) so the
+    scan can run as an authenticated user."""
     use_tls = probes._is_tls(port)
     conn = None
     try:
@@ -56,8 +59,10 @@ def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int 
                 ip, port.portid, timeout=_TIMEOUT, context=ssl._create_unverified_context())
         else:
             conn = http.client.HTTPConnection(ip, port.portid, timeout=_TIMEOUT)
-        conn.request(method, path, headers={"User-Agent": _UA, "Connection": "close",
-                                            "Accept": "*/*"})
+        req_headers = {"User-Agent": _UA, "Connection": "close", "Accept": "*/*"}
+        if auth:
+            req_headers.update(auth)
+        conn.request(method, path, headers=req_headers)
         resp = conn.getresponse()
         headers = {k.lower(): v for k, v in resp.getheaders()}
         body = b""
@@ -165,11 +170,13 @@ _PATHS = [
 _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
 
 
-def scan_endpoint(ip: str, port: Port, active: bool = True) -> tuple[dict, list[Vuln]]:
-    """Deep, non-intrusive scan of one web endpoint. Returns (profile, [Vuln])."""
+def scan_endpoint(ip: str, port: Port, active: bool = True,
+                  auth: dict | None = None) -> tuple[dict, list[Vuln]]:
+    """Deep, non-intrusive scan of one web endpoint. Returns (profile, [Vuln]).
+    `auth` (Cookie/Authorization headers) runs the scan as an authenticated user."""
     findings: list[Vuln] = []
     # Root fetch: fingerprint + directory listing + cookie flags.
-    root = _fetch(ip, port, "/")
+    root = _fetch(ip, port, "/", auth=auth)
     status = root[0] if root else None
     headers = root[1] if root else {}
     body = root[2] if root else ""
@@ -182,7 +189,10 @@ def scan_endpoint(ip: str, port: Port, active: bool = True) -> tuple[dict, list[
     findings.extend(probes.http_findings(ip, port))
     if probes._is_tls(port):
         findings.extend(probes.tls_findings(ip, port))
-    if not active:
+    # The active HTTP checks only make sense if the port actually spoke HTTP -
+    # skip them for a TLS-only non-HTTP port (LDAPS/IMAPS) so we don't waste a
+    # dozen dead requests there (its TLS findings above still count).
+    if not active or root is None:
         profile["findings"] = len(findings)
         return profile, findings
     # Directory listing on the root.
@@ -204,7 +214,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True) -> tuple[dict, list[
                                 "Session cookie without Secure (over HTTPS)", ["CWE-614"],
                                 f"Set-Cookie: {ck[:120]}", "Set the Secure flag on HTTPS cookies."))
     # Dangerous HTTP methods.
-    opt = _fetch(ip, port, "/", method="OPTIONS")
+    opt = _fetch(ip, port, "/", method="OPTIONS", auth=auth)
     if opt and opt[1].get("allow"):
         allowed = {m.strip().upper() for m in opt[1]["allow"].split(",")}
         bad = sorted(allowed & _DANGEROUS_METHODS)
@@ -217,7 +227,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True) -> tuple[dict, list[
     # High-signal exposure paths.
     seen_sid: set[str] = set()
     for path, sev, sid, title, cwes, fix, confirm in _PATHS:
-        r = _fetch(ip, port, "/" + path)
+        r = _fetch(ip, port, "/" + path, auth=auth)
         if not r:
             continue
         st, _hd, bd = r
@@ -236,7 +246,7 @@ def scan_endpoint(ip: str, port: Port, active: bool = True) -> tuple[dict, list[
     return profile, findings
 
 
-def scan_host(host: Host, active: bool = True) -> list[dict]:
+def scan_host(host: Host, active: bool = True, auth: dict | None = None) -> list[dict]:
     """Scan every web endpoint on a host, appending deduped Vulns. Returns the web
     endpoint profiles (for the Web sheet)."""
     existing = {v.key for v in host.vulns}
@@ -244,7 +254,7 @@ def scan_host(host: Host, active: bool = True) -> list[dict]:
     for port in host.open_ports:
         if not is_web(port):
             continue
-        profile, findings = scan_endpoint(host.ip, port, active=active)
+        profile, findings = scan_endpoint(host.ip, port, active=active, auth=auth)
         for v in findings:
             if v.key in existing:
                 continue

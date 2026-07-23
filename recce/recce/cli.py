@@ -621,8 +621,8 @@ def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
     from . import vulndb
     vulndb.assess_host_inplace(host)   # offline version->CVE findings
     if use_probes:
-        from . import probes
-        probes.probe_host(host)        # stdlib HTTP-header + TLS analysis
+        from . import web
+        web.scan_host(host, active=True)   # deep web enum (headers/TLS + exposures)
     if use_ss:
         exploits.enrich_hosts([host])
     return host, issues
@@ -673,7 +673,7 @@ def _phase_vulns(store, paths, args, profile) -> None:
         mode = "safe (vuln+safe detection only)"
     print(f"[*] Vuln-scan mode: {mode}"
           f"{' + searchsploit' if use_ss else ''}"
-          f"{' + http/tls probes' if use_probes else ''}.")
+          f"{' + web scan (headers/TLS + exposures)' if use_probes else ''}.")
 
     targets = _vuln_targets(store.all_hosts(), args)
     if not targets:
@@ -1292,6 +1292,15 @@ def cmd_web(args: argparse.Namespace) -> int:
     _import_excel_tracking(store, paths)
     hosts = _selected_hosts(store.all_hosts(), args)
     active = not getattr(args, "no_active", False)
+    # Optional authenticated scan: --cookie and/or repeated --header "K: V".
+    auth: dict = {}
+    if getattr(args, "cookie", None):
+        auth["Cookie"] = args.cookie
+    for hv in getattr(args, "header", None) or []:
+        if ":" in hv:
+            k, v = hv.split(":", 1)
+            auth[k.strip()] = v.strip()
+    auth = auth or None
     targets = [h for h in hosts if any(web.is_web(p) for p in h.open_ports)]
     if not targets:
         print("[!] No HTTP/HTTPS endpoints found. Run `enum` (services) first.")
@@ -1300,10 +1309,11 @@ def cmd_web(args: argparse.Namespace) -> int:
     workers = max(1, getattr(args, "workers", 6))
     n_ep = sum(1 for h in targets for p in h.open_ports if web.is_web(p))
     print(f"[*] Web-scanning {n_ep} endpoint(s) on {len(targets)} host(s) "
-          f"with {workers} worker(s){'' if active else ' (passive)'} ...")
+          f"with {workers} worker(s){'' if active else ' (passive)'}"
+          f"{' (authenticated)' if auth else ''} ...")
     total_findings = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(web.scan_host, h, active): h for h in targets}
+        futures = {ex.submit(web.scan_host, h, active, auth): h for h in targets}
         for fut in as_completed(futures):
             h = futures[fut]
             try:
@@ -1321,11 +1331,42 @@ def cmd_web(args: argparse.Namespace) -> int:
                       f"{tech}  ({wv} finding(s))")
     _final_report(store, paths, store.get_meta("engagement") or args.title)
     store.close()
+    if getattr(args, "screenshots", False):
+        _web_screenshots(targets, args.output_dir)
     print(f"\n[+] {total_findings} web finding(s) folded in. See the Web tab (endpoints "
           f"+ Kali deep-scan commands) and Vulnerabilities/Verification in "
           f"{paths['xlsx']}.")
     print("    Prove them: recce prove -o " + args.output_dir)
     return 0
+
+
+def _web_screenshots(targets, output_dir) -> None:
+    """Headless-browser screenshot per web endpoint -> engagement/screenshots/."""
+    from . import screenshot, web
+    if not screenshot.available():
+        print("    [!] --screenshots: no headless browser found (chromium/firefox); "
+              "skipping. `recce doctor` shows what's missing.")
+        return
+    shot_dir = os.path.join(output_dir, "screenshots")
+    try:
+        os.makedirs(shot_dir, exist_ok=True)
+    except OSError:
+        return
+    n = 0
+    for h in targets:
+        for p in h.open_ports:
+            if not web.is_web(p):
+                continue
+            png = screenshot.capture(web.url_for(h.ip, p))
+            if png:
+                fn = os.path.join(shot_dir, f"web_{h.ip}_{p.portid}.png")
+                try:
+                    with open(fn, "wb") as fh:
+                        fh.write(png)
+                    n += 1
+                except OSError:
+                    pass
+    print(f"    {n} screenshot(s) -> {shot_dir}/")
 
 
 def cmd_services(args: argparse.Namespace) -> int:
@@ -2770,6 +2811,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wb.add_argument("--no-active", action="store_true",
                     help="passive only: headers/TLS fingerprint, skip the path/method "
                          "probes (no requests beyond the root)")
+    wb.add_argument("--cookie", help="Cookie header to scan as an authenticated user "
+                                     "(e.g. 'session=abc123')")
+    wb.add_argument("--header", action="append", metavar="K: V",
+                    help="extra request header, repeatable (e.g. --header "
+                         "'Authorization: Bearer <token>')")
+    wb.add_argument("--screenshots", action="store_true",
+                    help="also capture a headless-browser screenshot per endpoint "
+                         "-> engagement/screenshots/ (needs chromium/firefox)")
     wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.
