@@ -2652,6 +2652,25 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                   f" - {len(summary['logins'])} login(s), {len(summary['links'])} "
                   f"linked server(s), {len(summary['trustworthy'])} TRUSTWORTHY db(s)")
 
+            # Recursively walk the linked-server graph from this instance.
+            if summary["links"] and not args.no_links:
+                runner = mssql.link_runner(t["ip"], creds, port=t["port"],
+                                           windows_auth=not args.local_auth)
+                nodes = mssql.walk_links(summary["links"], runner,
+                                         max_depth=args.link_depth)
+                if nodes:
+                    lf, lchain = mssql.link_findings(t, nodes, creds)
+                    analysis["findings"] = lf + analysis["findings"]
+                    for rb in analysis["runbooks"]:
+                        if rb["ip"] == t["ip"]:
+                            rb["linkgraph"] = nodes
+                            if lchain:
+                                rb["chain"] = ["Linked-server chain: " + "; ".join(lchain)] \
+                                    + rb["chain"]
+                    sa_n = sum(1 for n in nodes if n["sysadmin"])
+                    print(f"      [+] {t['ip']}: linked-server walk reached {len(nodes)} "
+                          f"instance(s), {sa_n} as sysadmin")
+
     # De-duplicate findings (offline + nxc + live can overlap) by (title, target).
     seen: set = set()
     uniq = []
@@ -3365,9 +3384,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ms.add_argument("--dc-ip", help="DC IP to fill into the generated commands")
     ms.add_argument("--lhost", help="your capture/relay IP for the UNC/relay commands")
     ms.add_argument("--no-run", action="store_true",
-                    help="don't execute nxc; just write the commands (airgapped-safe)")
+                    help="don't execute nxc/impacket; just write the commands (airgapped-safe)")
     ms.add_argument("--no-probe", action="store_true",
                     help="skip the live SQL Browser / TDS pre-login probes")
+    ms.add_argument("--no-links", action="store_true",
+                    help="don't recursively walk the linked-server graph")
+    ms.add_argument("--link-depth", type=int, default=4, metavar="N",
+                    help="max linked-server chain depth to walk (default 4)")
     ms.add_argument("-o", "--output-dir", default="engagement")
     ms.add_argument("--title", default="Recce Engagement")
     ms.set_defaults(func=cmd_mssql)

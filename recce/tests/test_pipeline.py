@@ -3256,6 +3256,101 @@ class MssqlTest(unittest.TestCase):
         self.assertIn("already sysadmin", chain[0])
         self.assertTrue(any("sysadmin on this MSSQL" in f["title"] for f in fs))
 
+    def test_nested_exec_at_quote_doubling(self):
+        from recce import mssql
+        self.assertEqual(mssql._nested_at(["DW01"], "SELECT 1"),
+                         "EXEC ('SELECT 1') AT [DW01]")
+        d2 = mssql._nested_at(["DW01", "DW02"], "SELECT x+'|'+y")
+        # inner quotes double once per hop (quadruple at depth 2).
+        self.assertEqual(d2, "EXEC ('EXEC (''SELECT x+''''|''''+y'') AT [DW02]') AT [DW01]")
+        self.assertEqual(mssql._nested_at([], "SELECT 1"), "SELECT 1")
+
+    def test_walk_links_bfs_with_cycle(self):
+        from recce import mssql
+        calls = {"n": 0}
+
+        def fake(script):
+            calls["n"] += 1
+            if calls["n"] == 1:                                 # entry -> DW01 (not sa)
+                return "@@L:0\nDW01SRV|CORP\\svc|0|DW02\n@@LE:0\n"
+            if calls["n"] == 2:                                 # DW01 -> DW02 (sa), loops back
+                return "@@L:0\nDW02SRV|sa|1|DW01\n@@LE:0\n"
+            return ""
+        nodes = mssql.walk_links(["DW01"], fake, max_depth=5)
+        self.assertEqual(len(nodes), 2)
+        self.assertEqual(nodes[0]["server"], "DW01SRV")
+        self.assertTrue(nodes[1]["sysadmin"])
+        self.assertEqual(nodes[1]["path"], ["DW01", "DW02"])
+        self.assertEqual(calls["n"], 2)                         # cycle stopped the walk
+
+    def test_walk_links_respects_depth_bound(self):
+        from recce import mssql
+        calls = {"n": 0}
+
+        def fake(script):                                       # each hop leads to a NEW server
+            calls["n"] += 1
+            n = calls["n"]
+            return f"@@L:0\nSRV{n}|u|0|L{n + 1}\n@@LE:0\n"
+        nodes = mssql.walk_links(["L1"], fake, max_depth=3)
+        self.assertEqual(max(n["depth"] for n in nodes), 3)     # walked exactly to the bound
+        self.assertEqual(calls["n"], 3)                         # and stopped there
+
+    def test_link_findings_flag_sysadmin_node_with_rce(self):
+        from recce import mssql
+        nodes = [{"path": ["DW01"], "depth": 1, "server": "DW01SRV",
+                  "login": "CORP\\svc", "sysadmin": False, "links": ["DW02"]},
+                 {"path": ["DW01", "DW02"], "depth": 2, "server": "DW02SRV",
+                  "login": "sa", "sysadmin": True, "links": []}]
+        t = {"ip": "10.0.0.50", "port": 1433, "live_login": "CORP\\alice"}
+        fs, chain = mssql.link_findings(t, nodes, {"user": "alice"})
+        crit = next(f for f in fs if "SYSADMIN on DW02SRV" in f["title"])
+        self.assertEqual(crit["severity"], "critical")
+        self.assertIn("xp_cmdshell", crit["command"])           # nested RCE command
+        self.assertIn("AT [DW01]", crit["command"])             # walks through the chain
+        self.assertIn("DW01 -> DW02", " ".join(chain))
+
+    def test_linked_server_walk_flows_into_sheet_and_totals(self):
+        from unittest import mock
+        from recce import cli, mssql, xlsx
+        from recce.store import Store
+        enum = mssql.parse_enum(
+            "@@B:server\nSQL01|CORP\\alice|0|1|15.0.2000.5\n@@E:server\n"
+            "@@B:logins\nsa|1\n@@E:logins\n@@B:databases\nmaster|0|sa\n@@E:databases\n"
+            "@@B:links\nDW01|SQL Server|dw01\n@@E:links\n"
+            "@@B:impersonate\n@@E:impersonate\n@@B:config\nxp_cmdshell|0\n@@E:config\n"
+            "@@B:hashes\n@@E:hashes\n")
+        lvl = {"n": 0}
+
+        def runner_factory(*a, **k):
+            def run(script):
+                lvl["n"] += 1
+                if lvl["n"] == 1:
+                    return "@@L:0\nDW01SRV|CORP\\svc|0|DW02\n@@LE:0\n"
+                if lvl["n"] == 2:
+                    return "@@L:0\nDW02SRV|sa|1|DW01\n@@LE:0\n"
+                return ""
+            return run
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(self._host())
+            st.close()
+            with mock.patch.object(mssql, "mssqlclient_tool", return_value="x"), \
+                    mock.patch.object(mssql, "nxc_tool", return_value=None), \
+                    mock.patch.object(mssql, "run_mssqlclient", return_value=(enum, None)), \
+                    mock.patch.object(mssql, "link_runner", side_effect=runner_factory):
+                rc = cli.main(["mssql", "-o", out, "--no-probe",
+                               "-u", "alice", "-p", "P@ss", "-d", "corp.local"])
+            self.assertEqual(rc, 0)
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            m = "\n".join(" ".join(map(str, r)) for r in sheets["MSSQL"])
+            self.assertIn("Linked-server chain:", m)
+            self.assertIn("Linked-server graph", m)
+            self.assertIn("DW02SRV", m)
+            v = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+            self.assertIn("chain to SYSADMIN on DW02SRV", v)     # in the main totals
+
     def test_live_enum_flows_into_sheet_and_totals(self):
         from unittest import mock
         from recce import cli, mssql, xlsx
@@ -3271,7 +3366,7 @@ class MssqlTest(unittest.TestCase):
                     mock.patch.object(mssql, "nxc_tool", return_value=None), \
                     mock.patch.object(mssql, "run_mssqlclient",
                                       return_value=(enum, None)):
-                rc = cli.main(["mssql", "-o", out, "--no-probe",
+                rc = cli.main(["mssql", "-o", out, "--no-probe", "--no-links",
                                "-u", "alice", "-p", "P@ss", "-d", "corp.local"])
             self.assertEqual(rc, 0)
             sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))

