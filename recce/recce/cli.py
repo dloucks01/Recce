@@ -309,15 +309,16 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["kubernetes"] = json.loads(k8s_blob)
         except ValueError:
             pass
+    credentials = store.all_credentials()   # one table scan, shared by both reports
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
-                    credentials=store.all_credentials())
+                    credentials=credentials)
     build_markdown(hosts, paths["md"], title=title, domains=domains)
     build_csv(hosts, paths["csv"])
     from .report_html import build_html
     build_html(hosts, paths["html"], title=title, domains=domains,
-               credentials=store.all_credentials(), generated=_now())
+               credentials=credentials, generated=_now())
     if not quiet:
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
@@ -914,6 +915,7 @@ def _privesc_worker(host, profile, paths, creds, aggressive):
         _merge_vuln_results(host, np.parse_nmap_xml(vx))
         ad.identify_roles(host)
         ad.parse_signing_and_ntlm(host)
+    host.privesc_checked = True          # the phase considered this host (mirrors _db_worker)
     return host, issues
 
 
@@ -941,7 +943,9 @@ def _phase_privesc(store, paths, args, profile) -> None:
                                  "message": f"privesc crashed: {e}"}])
                 continue
             _record_issues(store, paths, ip, issues)
-            if not _persist_host(store, paths, ip, "privesc", host):
+            # clear_step clears any stale manual privesc override as part of the single
+            # persist (host.privesc_checked was set in the worker) - no second pass.
+            if not _persist_host(store, paths, ip, "privesc", host, clear_step="privesc"):
                 continue
             completed += 1
             refresher.tick(store, paths, args.title)
@@ -1218,16 +1222,18 @@ def cmd_privesc(args: argparse.Namespace) -> int:
     title = store.get_meta("engagement") or args.title
     try:
         if args.scan:
+            # _phase_privesc already set privesc_checked in the worker and cleared the
+            # override via clear_step - no second full pass over every host needed.
             _phase_privesc(store, paths, args, profile)
         else:
             print("[*] Generating priv-esc playbook from existing data "
                   "(use --scan to also run remote privesc NSE checks).")
-        # Mark the priv-esc step complete for the hosts we addressed.
-        for h in _selected_hosts(store.all_hosts(), args):
-            if not h.privesc_checked:
-                h.privesc_checked = True
-                store.upsert_host(h)
-            store.delete_tracking(tr.step_key("privesc", h.ip))  # re-run clears override
+            # No worker ran, so mark the step + clear the override for selected hosts here.
+            for h in _selected_hosts(store.all_hosts(), args):
+                if not h.privesc_checked:
+                    h.privesc_checked = True
+                    store.upsert_host(h)
+                store.delete_tracking(tr.step_key("privesc", h.ip))
     except KeyboardInterrupt:
         print("\n[!] Interrupted - saving results collected so far ...")
     finally:
@@ -1450,7 +1456,9 @@ def cmd_web(args: argparse.Namespace) -> int:
                 _record_issues(store, paths, h.ip, [{"phase": "web", "level": "warning",
                                "message": f"web scan failed: {e}"}])
                 continue
-            _persist_host(store, paths, h.ip, "web", h)
+            # clear_step so a re-run clears a stale manual "web" tick, matching
+            # enum/vuln/db/privesc (previously the web override never self-healed).
+            _persist_host(store, paths, h.ip, "web", h, clear_step="web")
             for pr in profiles:
                 tech = f"  [{', '.join(pr['tech'])}]" if pr["tech"] else ""
                 wv = sum(1 for v in h.vulns if v.port == pr["port"] and v.source == "web")
