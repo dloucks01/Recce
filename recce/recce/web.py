@@ -369,8 +369,15 @@ def _prove_put(ip: str, port: Port, auth: dict | None):
     return False, f"PUT /{name} returned {put[0]} but the file was not readable back."
 
 
-# --- JWT weakness detection (from data already fetched - free) ------------------
+# --- JWT weakness detection ------------------------------------------------------
+# Passive: read the token from the response and flag the algorithm. Active: forge an
+# alg:none variant (same claims + a harmless marker) and REPLAY it against the same
+# path, comparing the response to the authenticated and anonymous baselines - a match
+# to the authenticated view proves the server accepts unsigned, forgeable tokens.
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*")
+# name=eyJ... inside a Set-Cookie so we can replay the token in its real cookie.
+_JWT_COOKIE_RE = re.compile(
+    r"([A-Za-z0-9_.\-]+)=(eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*)")
 
 
 def _b64url(seg: str):
@@ -380,31 +387,159 @@ def _b64url(seg: str):
         return None
 
 
-def _scan_jwts(ip: str, port: Port, headers: dict, body: str) -> list[Vuln]:
-    blob = (headers.get("set-cookie", "") + " " + headers.get("authorization", "")
-            + " " + body)
+def _b64url_enc(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _jwt_alg(token: str):
+    raw = _b64url(token.split(".", 1)[0])
+    if not raw:
+        return None
+    try:
+        return str(json.loads(raw).get("alg", "")).lower()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _jwt_candidates(headers: dict, body: str):
+    """Every JWT in the response, tagged with where it lives so we can replay it:
+    ('cookie', name, tok) / ('authorization', None, tok) / ('body', None, tok)."""
+    out, seen = [], set()
+    for m in _JWT_COOKIE_RE.finditer(headers.get("set-cookie", "")):
+        name, tok = m.group(1), m.group(2)
+        if tok not in seen:
+            seen.add(tok)
+            out.append(("cookie", name, tok))
+    for tok in _JWT_RE.findall(headers.get("authorization", "")):
+        if tok not in seen:
+            seen.add(tok)
+            out.append(("authorization", None, tok))
+    for tok in _JWT_RE.findall(body):
+        if tok not in seen:
+            seen.add(tok)
+            out.append(("body", None, tok))
+    return out
+
+
+def _forge_none(token: str):
+    """alg:none forgery of `token`: keep the original claims, add a harmless marker so
+    that a server ACCEPTING it proves it never checked the signature (we changed the
+    payload). Returns the forged compact JWT (empty signature) or None."""
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payraw = _b64url(parts[1])
+    if payraw is None:
+        return None
+    try:
+        claims = json.loads(payraw)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(claims, dict):
+        return None
+    claims = dict(claims)
+    claims["recce_probe"] = 1        # innocuous, non-authorization marker
+    head = _b64url_enc(b'{"alg":"none","typ":"JWT"}')
+    pay = _b64url_enc(json.dumps(claims, separators=(",", ":")).encode())
+    return f"{head}.{pay}."
+
+
+def _jwt_replay(ip: str, port: Port, path: str, loc: str, cookie_name, token):
+    """Fetch `path` presenting `token` in the location it was observed in. token=None
+    fetches anonymously (the logged-out baseline)."""
+    if token is None:
+        return _fetch(ip, port, path)
+    if loc == "cookie" and cookie_name:
+        return _fetch(ip, port, path, auth={"Cookie": f"{cookie_name}={token}"})
+    return _fetch(ip, port, path, auth={"Authorization": f"Bearer {token}"})
+
+
+def _resp_same(a, b) -> bool:
+    """Two HTTP responses look like the same authorization outcome: same status and a
+    body length within a small tolerance (page-to-page jitter, not a login redirect)."""
+    if a is None or b is None:
+        return False
+    if a[0] != b[0]:
+        return False
+    la, lb = len(a[2]), len(b[2])
+    return abs(la - lb) <= max(64, int(0.10 * max(la, lb, 1)))
+
+
+def _prove_jwt_none(ip: str, port: Port, path: str, loc: str, cookie_name, token: str):
+    """Actively prove the server accepts a forged alg:none token. Returns
+    (verdict, evidence) where verdict is confirmed/rejected/inconclusive, or None if
+    the proof could not run."""
+    forged = _forge_none(token)
+    if not forged:
+        return None
+    authed = _jwt_replay(ip, port, path, loc, cookie_name, token)
+    anon = _jwt_replay(ip, port, path, loc, cookie_name, None)
+    frg = _jwt_replay(ip, port, path, loc, cookie_name, forged)
+    if not (authed and anon and frg):
+        return None
+    where = f"cookie {cookie_name}" if loc == "cookie" else "Authorization: Bearer"
+    lens = (f"authed=HTTP {authed[0]}/{len(authed[2])}B  anon=HTTP {anon[0]}/{len(anon[2])}B  "
+            f"forged=HTTP {frg[0]}/{len(frg[2])}B")
+    if _resp_same(authed, anon):
+        return ("inconclusive",
+                f"GET {path} returned the same response with the real token, with no token, "
+                f"and with the forged alg:none token ({lens}) - the endpoint isn't gated by "
+                f"this token, so acceptance can't be proven here. Replay against a "
+                f"token-gated path with jwt_tool -X a.")
+    if _resp_same(frg, authed):
+        return ("confirmed",
+                f"Forged an unsigned token (header alg:none, original claims + a marker) and "
+                f"replayed it via {where} against {path}. The server returned the same "
+                f"authenticated response as the real token, and a different one with no token "
+                f"({lens}) - the signature is not verified, so tokens are forgeable with any "
+                f"claims (privilege escalation, account takeover).")
+    if _resp_same(frg, anon):
+        return ("rejected",
+                f"Forged alg:none token replayed via {where} against {path} was treated like "
+                f"no token at all ({lens}) - the server rejects unsigned tokens on this path.")
+    return ("inconclusive",
+            f"Forged alg:none token produced a distinct response from both the authenticated "
+            f"and anonymous baselines ({lens}); couldn't classify. Confirm with jwt_tool -X a.")
+
+
+def _scan_jwts(ip: str, port: Port, headers: dict, body: str,
+               active: bool = False) -> list[Vuln]:
     out: list[Vuln] = []
-    seen: set[str] = set()
-    for tok in _JWT_RE.findall(blob):
-        head_seg = tok.split(".", 1)[0]
-        raw = _b64url(head_seg)
-        if not raw:
+    seen_alg: set[str] = set()
+    for loc, cookie_name, tok in _jwt_candidates(headers, body):
+        alg = _jwt_alg(tok)
+        if alg is None:
             continue
-        try:
-            alg = str(json.loads(raw).get("alg", "")).lower()
-        except Exception:  # noqa: BLE001
-            continue
-        if alg in seen:
-            continue
-        seen.add(alg)
         red = f"{tok[:12]}…{tok[-6:]}"
         if alg == "none":
+            proof = _prove_jwt_none(ip, port, "/", loc, cookie_name, tok) if active else None
+            if proof and proof[0] == "confirmed":
+                out.append(_mk(ip, port, "web-jwt", "high",
+                               "JWT alg:none accepted - forged unsigned token (proven)",
+                               ["CWE-347"], proof[1],
+                               "Reject 'none'; pin the expected algorithm server-side.",
+                               confidence="confirmed"))
+                continue
+            if proof and proof[0] == "rejected":
+                out.append(_mk(ip, port, "web-jwt", "info",
+                               "JWT issued with alg:none (but forged token rejected)",
+                               ["CWE-347"], proof[1],
+                               "Stop issuing alg:none tokens; pin the algorithm.",
+                               confidence="potential"))
+                continue
+            note = (f"A JWT with header alg=none was observed ({red}). If the server verifies "
+                    "it, tokens can be forged with any claims.")
+            if proof:
+                note += "  " + proof[1]
             out.append(_mk(ip, port, "web-jwt", "high",
                            "JWT accepts 'alg:none' (unsigned - forgeable)", ["CWE-347"],
-                           f"A JWT with header alg=none was observed ({red}). If the server "
-                           "verifies it, tokens can be forged with any claims.",
-                           "Reject 'none'; pin the expected algorithm server-side."))
-        elif alg.startswith("hs"):
+                           note, "Reject 'none'; pin the expected algorithm server-side.",
+                           confidence="potential"))
+            continue
+        if alg in seen_alg:      # de-dupe the algorithmic notes (one per alg family)
+            continue
+        seen_alg.add(alg)
+        if alg.startswith("hs"):
             out.append(_mk(ip, port, "web-jwt", "low",
                            f"JWT uses symmetric {alg.upper()} (offline-crackable secret)", ["CWE-347"],
                            f"JWT header alg={alg.upper()} ({red}). If the HMAC secret is weak it "
@@ -695,9 +830,10 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     findings.extend(probes.http_findings(ip, port))
     if probes._is_tls(port):
         findings.extend(probes.tls_findings(ip, port))
-    # JWT weaknesses read from the root response - free, so runs even passively.
+    # JWT weaknesses read from the root response. Passively we flag the algorithm;
+    # actively we forge an alg:none token and replay it to prove acceptance.
     if root:
-        findings.extend(_scan_jwts(ip, port, headers, body))
+        findings.extend(_scan_jwts(ip, port, headers, body, active=active))
     # The active HTTP checks only make sense if the port actually spoke HTTP -
     # skip them for a TLS-only non-HTTP port (LDAPS/IMAPS) so we don't waste a
     # dozen dead requests there (its TLS findings above still count).

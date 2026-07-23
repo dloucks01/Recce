@@ -283,6 +283,20 @@ def _v_ssti(host, port, vuln):
 
 def _v_jwt(host, port, vuln):
     t = (vuln.title or "").lower()
+    blob = f"{t} {(vuln.output or '').lower()}"
+    if "alg:none" in t and ("proven" in t or "the server returned the same authenticated" in blob):
+        return CONFIRMED, [
+            "recce actively proved this: it forged an unsigned token (alg:none, original "
+            "claims plus a marker) and replayed it - the server returned the SAME "
+            "authenticated response as the real token but a different one with no token, so "
+            "the signature is not verified.",
+            "Escalate within ROE: re-issue the forged token with elevated claims "
+            "(role/admin/sub) via jwt_tool -X a to take over any account."]
+    if "forged token rejected" in t:
+        return FALSE_POSITIVE, [
+            "recce replayed a forged alg:none token and the server treated it like no token "
+            "at all - unsigned tokens are rejected on the tested path. Issuing alg:none is a "
+            "smell, but it isn't exploitable here."]
     if "alg:none" in t or "alg=none" in t:
         return LIKELY, ["The token advertises alg=none (observed). If the server honours it, tokens are "
                         "forgeable with any claims.",
