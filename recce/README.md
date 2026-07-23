@@ -790,11 +790,36 @@ python -m recce smb -o eng
 python -m recce smb -u alice -p 'Passw0rd!' -d corp.local --prove-write --screenshots -o eng
 ```
 
+## FTP (`recce ftp`)
+
+Offensive FTP enumeration:
+
+- **Credential-free (airgapped, stdlib):** a control-channel probe reads the
+  **banner** (→ product/version for the offline CVE DB and a narrow **known-backdoor
+  map**: vsFTPd 2.3.4, ProFTPD 1.3.3c, ProFTPD mod_copy), tries an **anonymous**
+  login, and inspects **FEAT** for AUTH TLS/FTPS — so it flags **cleartext**
+  authentication.
+- **With a session:** a reversible **writable-directory proof** (`--prove-write`:
+  STOR a marker via stdlib `ftplib`, then DELE it — nothing left behind).
+
+Findings feed the main totals, the Vulnerabilities sheet and the write-ups, and
+populate a dedicated **FTP** tab. The prove engine confirms anonymous login (from
+the observed 230) and flags the backdoor/RCE builds with the exact trigger.
+
+```bash
+# No creds — banner/anonymous/AUTH-TLS posture + known-backdoor match:
+python -m recce ftp -o eng
+
+# Prove a writable directory reversibly (anonymous or with creds):
+python -m recce ftp --prove-write -o eng
+python -m recce ftp -u bob -p 'hunter2' --prove-write -o eng
+```
+
 ## Output (`<output-dir>/`)
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |

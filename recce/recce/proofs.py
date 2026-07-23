@@ -184,6 +184,30 @@ def _v_nullsession(host, port, vuln):
                     "If it lists shares/users without creds, it's real; access denied = FP."]
 
 
+def _v_ftp_backdoor(host, port, vuln):
+    # A banner-matched trojaned/backdoored FTP build. The banner is strong evidence
+    # but backdoor presence is only truly proven by triggering it, so LIKELY with the
+    # exact non-destructive trigger.
+    blob = _blob(vuln)
+    if "vsftpd 2.3.4" in blob:
+        return LIKELY, [
+            "The banner is vsFTPd 2.3.4 - the trojaned release whose backdoor opens a "
+            "root shell on tcp/6200 when a username ends in ':)'.",
+            "Prove it (non-destructive): connect, send `USER recce:)`, `PASS x`, then "
+            "`nc <ip> 6200` - a shell = CONFIRMED. A cleanly-rebuilt 2.3.4 (some distros "
+            "patched in place) won't open 6200 -> FP.",
+            "Metasploit: exploit/unix/ftp/vsftpd_234_backdoor (CHECK/run in ROE)."]
+    if "mod_copy" in blob or "cve-2015-3306" in blob:
+        return LIKELY, [
+            "ProFTPD with mod_copy exposes SITE CPFR/CPTO to unauthenticated clients "
+            "(CVE-2015-3306) -> arbitrary file copy and RCE.",
+            "Prove: `SITE CPFR /etc/passwd` then `SITE CPTO /tmp/x` - a 250 on both = the "
+            "module is reachable pre-auth. A build with mod_copy disabled/patched -> FP."]
+    return LIKELY, [
+        "A known-backdoored/RCE FTP build was matched by banner. Confirm with the "
+        "referenced public module in ROE before relying on it."]
+
+
 def _v_anon_ftp(host, port, vuln):
     if re.search(r"anonymous.*(allowed|permitted|succeeded|logged)|230 ", vuln.output or "", re.I):
         return CONFIRMED, ["Anonymous FTP login succeeded during the check -> CONFIRMED."]
@@ -476,6 +500,15 @@ _RECIPES: list[dict] = [
      "finish": "nxc smb <ip> -u '' -p '' --shares  (or enum4linux-ng -A <ip>).",
      "fp": "Access denied without credentials -> FP.",
      "fn": _v_nullsession},
+    {"id": "ftp-backdoor",
+     "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
+     "name": "Backdoored / RCE FTP build",
+     "pre": ["FTP reachable", "Banner matches a known trojaned/RCE build"],
+     "finish": "trigger the backdoor/RCE non-destructively (see evidence), or the "
+               "referenced metasploit module in ROE.",
+     "fp": "A distro rebuilt the version in place without the backdoor / with the "
+           "module disabled.",
+     "fn": _v_ftp_backdoor},
     {"id": "anon-ftp", "match": r"anonymous ftp|ftp.*anonymous|anonymous login",
      "name": "Anonymous FTP login",
      "pre": ["FTP (21) reachable", "Anonymous login permitted"],

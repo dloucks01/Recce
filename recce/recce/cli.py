@@ -291,6 +291,12 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["smb"] = json.loads(smb_blob)
         except ValueError:
             pass
+    ftp_blob = store.get_meta("ftp")
+    if ftp_blob:
+        try:
+            meta["ftp"] = json.loads(ftp_blob)
+        except ValueError:
+            pass
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
@@ -3111,6 +3117,124 @@ def cmd_smb(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ftp_shot(args, ip, name, command, output):
+    if not getattr(args, "screenshots", False):
+        return None
+    from . import ftp, screenshot
+    if not screenshot.available():
+        return None
+    png = screenshot.capture_html(ftp.proof_html(command, output))
+    if not png:
+        return None
+    shot_dir = os.path.join(args.output_dir, "screenshots")
+    os.makedirs(shot_dir, exist_ok=True)
+    path = os.path.join(shot_dir, f"ftp_{ip.replace(':', '_')}_{name}.png")
+    with open(path, "wb") as fh:
+        fh.write(png)
+    print(f"      [+] {ip}: proof screenshot -> {path}")
+    return path
+
+
+def cmd_ftp(args: argparse.Namespace) -> int:
+    """FTP offensive enumeration: credential-free stdlib probe (banner / anonymous /
+    AUTH-TLS + known-backdoor match), then a reversible writable-directory proof -
+    folded into the main totals."""
+    from . import ftp
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts run FTP.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    creds = None
+    if args.username:
+        creds = {"user": args.username, "secret": args.password or ""}
+
+    active = not args.no_probe
+    analysis = ftp.analyze(hosts, creds=creds, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No FTP endpoints in the datastore (no port 21 / ftp service). Run "
+              "`enum` against the FTP hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} FTP endpoint(s):")
+    for t in tgts:
+        bits = [t.get("banner") or t.get("product") or ""]
+        if t.get("anonymous"):
+            bits.append("ANONYMOUS")
+        if t.get("auth_tls") is False:
+            bits.append("cleartext (no AUTH TLS)")
+        print(f"      {t['ip']}:{t['port']}  " + "  ".join(b for b in bits if b))
+
+    host_by_ip = {h.ip: h for h in hosts}
+    rb_by_ip = {rb["ip"]: rb for rb in analysis["runbooks"]}
+    ran_live = False
+    if not args.no_run and args.prove_write:
+        for t in tgts:
+            # Only attempt a write when a session is actually reachable (anonymous or
+            # supplied creds), so we don't hammer a login we can't make.
+            if not (t.get("anonymous") or creds):
+                continue
+            proof = ftp.prove_writable(t["ip"], t["port"], creds)
+            ran_live = True
+            if proof.get("writable"):
+                rb_by_ip[t["ip"]]["live"] = {"writable": True,
+                                             "evidence": proof.get("evidence", "")}
+                f = ftp.write_proof_finding(t["ip"], t["port"], proof, creds)
+                if f:
+                    analysis["findings"].insert(0, f)
+                _ftp_shot(args, t["ip"], "write",
+                          f"ftp {t['ip']}  (STOR/DELE marker)", proof.get("evidence", ""))
+            elif proof.get("error"):
+                print(f"      [!] {t['ip']}: write proof - {proof['error']}")
+
+    seen: set = set()
+    uniq = []
+    for f in analysis["findings"]:
+        k = (f["title"], f["target"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(f)
+    analysis["findings"] = uniq
+
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
+    analysis["stats"]["findings"] = len(analysis["findings"])
+    by_ip = ftp.findings_to_vulns(analysis["findings"])
+    for ip, vulns in by_ip.items():
+        host = host_by_ip.get(ip) or store.get_host(ip)
+        if host is None:
+            continue
+        have = {v.key for v in host.vulns if v.source != "ftp"}
+        host.vulns = [v for v in host.vulns if v.source != "ftp"]      # refresh FTP set
+        for v in vulns:
+            if v.key not in have:
+                have.add(v.key)
+                host.vulns.append(v)
+        store.upsert_host(host, merge=False)
+
+    store.set_meta("ftp", json.dumps(analysis))
+    if analysis["findings"]:
+        by_sev: dict = {}
+        for f in analysis["findings"]:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        print("[+] {} FTP finding(s): ".format(len(analysis["findings"]))
+              + ", ".join(f"{by_sev[s]} {s}" for s in
+                          ("critical", "high", "medium", "low") if by_sev.get(s)))
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    hint = "write proof" if ran_live else "commands-only"
+    print(f"    -> FTP sheet written ({hint}); findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3846,6 +3970,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sm.add_argument("-o", "--output-dir", default="engagement")
     sm.add_argument("--title", default="Recce Engagement")
     sm.set_defaults(func=cmd_smb)
+
+    # FTP offensive enumeration.
+    fp = sub.add_parser("ftp",
+                        help="FTP: stdlib banner/anonymous/AUTH-TLS probe + known-"
+                             "backdoor match + reversible writable-directory proof")
+    fp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "FTP hosts in the datastore)")
+    fp.add_argument("-u", "--username", help="FTP username (omit to probe anonymous)")
+    fp.add_argument("-p", "--password", help="FTP password")
+    fp.add_argument("--prove-write", action="store_true",
+                    help="prove a writable directory REVERSIBLY (STOR a marker file, "
+                         "then DELE it - nothing left behind)")
+    fp.add_argument("--screenshots", action="store_true",
+                    help="capture terminal-style PROOF screenshots of the write proof")
+    fp.add_argument("--no-run", action="store_true",
+                    help="don't run the write proof; just write the commands")
+    fp.add_argument("--no-probe", action="store_true",
+                    help="skip the live banner/anonymous/FEAT probe")
+    fp.add_argument("-o", "--output-dir", default="engagement")
+    fp.add_argument("--title", default="Recce Engagement")
+    fp.set_defaults(func=cmd_ftp)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
