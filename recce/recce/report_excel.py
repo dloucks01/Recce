@@ -1391,6 +1391,25 @@ def _build_mssql(wb, analysis: dict) -> None:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
         for line in rb.get("chain") or []:
             sh.write(["", line])
+        live = rb.get("live")
+        if live:
+            sh.write([("Live enumeration (impacket-mssqlclient)", "bold")])
+            sh.write(["", f"Login: {live.get('login', '')}"
+                      + ("  [SYSADMIN]" if live.get("is_sysadmin") else "")])
+            if live.get("sysadmins"):
+                sh.write(["", "Sysadmins: " + ", ".join(live["sysadmins"][:12])])
+            if live.get("trustworthy"):
+                sh.write(["", "TRUSTWORTHY DBs: " + ", ".join(live["trustworthy"][:12])])
+            if live.get("links"):
+                sh.write(["", "Linked servers: " + ", ".join(live["links"][:12])])
+            if live.get("impersonate"):
+                sh.write(["", "Impersonatable: " + ", ".join(live["impersonate"][:12])])
+            if live.get("config"):
+                sh.write(["", "Config: " + ", ".join(f"{k}={v}"
+                          for k, v in live["config"].items())])
+            if live.get("hashes"):
+                sh.write(["", f"Recovered {len(live['hashes'])} SQL login hash(es): "
+                          + ", ".join(live["hashes"][:12])])
         cur = None
         for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
             if step["phase"] != cur:

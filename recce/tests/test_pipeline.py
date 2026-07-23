@@ -3201,6 +3201,89 @@ class MssqlTest(unittest.TestCase):
             st.close()
             self.assertEqual(cli.main(["mssql", "-o", out, "--no-probe"]), 0)
 
+    _LIVE = ("SQL (CORP\\alice guest@master)>\n"
+             "@@B:server\nSQL01|CORP\\alice|0|1|15.0.2000.5\n@@E:server\n"
+             "@@B:logins\nsa|1\nCORP\\alice|0\n@@E:logins\n"
+             "@@B:databases\nmaster|0|sa\npayroll|1|sa\nappdb|0|CORP\\svc\n@@E:databases\n"
+             "@@B:links\nDW01|SQL Server|dw01.corp.local\n@@E:links\n"
+             "@@B:impersonate\nsa|1\n@@E:impersonate\n"
+             "@@B:config\nxp_cmdshell|1\n@@E:config\n"
+             "@@B:hashes\nsa|0x0200ABCD\n@@E:hashes\n")
+
+    def test_parse_enum_extracts_sections(self):
+        from recce import mssql
+        e = mssql.parse_enum(self._LIVE)
+        self.assertEqual(e["server"][0][0], "SQL01")
+        self.assertEqual([r for r in e["logins"] if r[1] == "1"][0][0], "sa")
+        self.assertEqual([r[0] for r in e["databases"] if r[1] == "1"], ["payroll"])
+        self.assertEqual(e["links"][0][0], "DW01")
+
+    def test_build_enum_script_wraps_sentinels(self):
+        from recce import mssql
+        script = mssql.build_enum_script()
+        self.assertIn("@@B:databases", script)
+        self.assertIn("@@E:impersonate", script)
+        self.assertTrue(script.strip().endswith("exit"))
+
+    def test_chains_from_enum_detects_concrete_chain(self):
+        from recce import mssql
+        e = mssql.parse_enum(self._LIVE)
+        t = {"ip": "10.0.0.50", "port": 1433}
+        fs, chain, summary = mssql.chains_from_enum(
+            t, e, {"user": "alice", "secret": "P@ss", "domain": "corp.local"})
+        joined = " -> ".join(chain)
+        self.assertIn("impersonate sysadmin login 'sa'", joined)
+        self.assertIn("TRUSTWORTHY db 'payroll'", joined)
+        self.assertIn("hop linked server(s) DW01", joined)
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("Impersonatable sysadmin login", titles)
+        self.assertIn("TRUSTWORTHY database owned by a sysadmin", titles)
+        self.assertIn("linked server(s) reachable", titles)
+        self.assertIn("SQL login password hash", titles)
+        # A concrete command with the real db name filled in.
+        tw = next(f for f in fs if "TRUSTWORTHY database" in f["title"])
+        self.assertIn("USE [payroll]", tw["command"])
+
+    def test_chains_direct_sysadmin(self):
+        from recce import mssql
+        e = mssql.parse_enum(
+            "@@B:server\nSQL01|sa|1|0|15.0.2000.5\n@@E:server\n"
+            "@@B:logins\nsa|1\n@@E:logins\n")
+        t = {"ip": "10.0.0.50", "port": 1433}
+        fs, chain, summary = mssql.chains_from_enum(t, e, {"user": "sa", "secret": "x"})
+        self.assertTrue(summary["is_sysadmin"])
+        self.assertTrue(t["admin"])
+        self.assertIn("already sysadmin", chain[0])
+        self.assertTrue(any("sysadmin on this MSSQL" in f["title"] for f in fs))
+
+    def test_live_enum_flows_into_sheet_and_totals(self):
+        from unittest import mock
+        from recce import cli, mssql, xlsx
+        from recce.store import Store
+        enum = mssql.parse_enum(self._LIVE)
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(self._host())
+            st.close()
+            with mock.patch.object(mssql, "mssqlclient_tool", return_value="impacket-mssqlclient"), \
+                    mock.patch.object(mssql, "nxc_tool", return_value=None), \
+                    mock.patch.object(mssql, "run_mssqlclient",
+                                      return_value=(enum, None)):
+                rc = cli.main(["mssql", "-o", out, "--no-probe",
+                               "-u", "alice", "-p", "P@ss", "-d", "corp.local"])
+            self.assertEqual(rc, 0)
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            m = "\n".join(" ".join(map(str, r)) for r in sheets["MSSQL"])
+            self.assertIn("Live chain:", m)
+            self.assertIn("payroll", m)                        # TRUSTWORTHY db named
+            self.assertIn("DW01", m)                           # linked server named
+            self.assertIn("Live enumeration (impacket", m)
+            v = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+            self.assertIn("Impersonatable sysadmin", v)        # chain finding in totals
+            self.assertIn("TRUSTWORTHY database", v)
+
 
 class BloodHoundTest(unittest.TestCase):
     BASE = "S-1-5-21-1-2-3"

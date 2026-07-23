@@ -2627,6 +2627,41 @@ def cmd_mssql(args: argparse.Namespace) -> int:
     elif creds:
         print("      [i] --no-run set - not executing nxc; commands are in the sheet.")
 
+    # Deep enumeration via impacket-mssqlclient: run the queries, detect the actual
+    # escalation chain per instance, and enrich the findings + runbook from live data.
+    ran_impacket = False
+    if creds and not args.no_run and mssql.mssqlclient_tool():
+        for t in tgts:
+            if t.get("access") is False:            # nxc already said the creds fail
+                continue
+            enum, err = mssql.run_mssqlclient(t["ip"], creds, port=t["port"],
+                                              windows_auth=not args.local_auth)
+            if enum is None:
+                print(f"      [!] mssqlclient {t['ip']}: {err}")
+                continue
+            ran_impacket = True
+            live_fs, live_chain, summary = mssql.chains_from_enum(t, enum, creds)
+            analysis["findings"] = live_fs + analysis["findings"]
+            for rb in analysis["runbooks"]:
+                if rb["ip"] == t["ip"]:
+                    rb["live"] = summary
+                    if live_chain:
+                        rb["chain"] = ["Live chain: " + " -> ".join(live_chain)] + rb["chain"]
+            saf = " (sysadmin)" if summary["is_sysadmin"] else ""
+            print(f"      [+] {t['ip']}:{t['port']}  enumerated as {summary['login']}{saf}"
+                  f" - {len(summary['logins'])} login(s), {len(summary['links'])} "
+                  f"linked server(s), {len(summary['trustworthy'])} TRUSTWORTHY db(s)")
+
+    # De-duplicate findings (offline + nxc + live can overlap) by (title, target).
+    seen: set = set()
+    uniq = []
+    for f in analysis["findings"]:
+        k = (f["title"], f["target"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(f)
+    analysis["findings"] = uniq
+
     # Fold findings into the main severity totals + writeups (attach to each host).
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
@@ -2660,7 +2695,8 @@ def cmd_mssql(args: argparse.Namespace) -> int:
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
-    hint = "ran nxc" if ran_nxc else "commands-only"
+    ran = [x for x, on in (("nxc", ran_nxc), ("impacket enum", ran_impacket)) if on]
+    hint = " + ".join(ran) if ran else "commands-only"
     print(f"    -> MSSQL sheet written ({hint}); findings folded into the main totals.")
     return 0
 
