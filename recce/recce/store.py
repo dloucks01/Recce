@@ -130,6 +130,15 @@ class Store:
                 op.extrainfo = np.extrainfo or op.extrainfo
                 op.tunnel = np.tunnel or op.tunnel
                 op.cpe = np.cpe or op.cpe
+                # Newer non-empty enrichment wins for the remaining fields too - else a
+                # later pass (esp. ingest/deploy setting binary/detect_source, or a
+                # probe run capturing banner/servicefp) is silently dropped on merge.
+                op.reason = np.reason or op.reason
+                op.ostype = np.ostype or op.ostype
+                op.servicefp = np.servicefp or op.servicefp
+                op.detect_source = np.detect_source or op.detect_source
+                op.banner = np.banner or op.banner
+                op.binary = np.binary or op.binary
                 op.vuln_scanned = op.vuln_scanned or np.vuln_scanned
                 if np.scripts:
                     seen = {s.id for s in op.scripts}
@@ -191,12 +200,20 @@ class Store:
             if ne.key not in eseen:
                 eseen.add(ne.key)
                 merged.exploits.append(ne)
-        aseen = {(a.source, a.kind, a.name, a.domain, a.rid) for a in old.accounts}
+        aidx = {(a.source, a.kind, a.name, a.domain, a.rid): a for a in old.accounts}
         for a in new.accounts:
             k = (a.source, a.kind, a.name, a.domain, a.rid)
-            if k not in aseen:
+            existing = aidx.get(k)
+            if existing is None:
                 merged.accounts.append(a)
-                aseen.add(k)
+                aidx[k] = a
+            else:
+                # Same account seen again: fold in any richer attrs/detail a later pass
+                # discovered (admincount, spn, delegation ...) instead of dropping them.
+                for ak, av in a.attrs.items():
+                    if av and not existing.attrs.get(ak):
+                        existing.attrs[ak] = av
+                existing.detail = existing.detail or a.detail
         return merged
 
     def upsert_host(self, host: Host, merge: bool = True) -> None:

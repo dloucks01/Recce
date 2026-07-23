@@ -33,6 +33,22 @@ def _scheme(port: int) -> str:
     return "https" if port == 2376 else "http"
 
 
+_READ_CAP = 16 * 1024 * 1024   # hard ceiling on a single response body (16 MB)
+
+
+def _read_capped(resp, cap: int = _READ_CAP) -> bytes:
+    """Read an HTTP response to EOF, bounded by `cap` - so a large /containers/json
+    or /images/json isn't truncated mid-buffer (which broke json parsing)."""
+    chunks, total = [], 0
+    while total < cap:
+        chunk = resp.read(min(65536, cap - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def _get(ip: str, port: int, path: str, timeout: float = _TIMEOUT):
     """GET a Docker API path. Returns (status, parsed_json_or_text) or None."""
     conn = None
@@ -45,7 +61,7 @@ def _get(ip: str, port: int, path: str, timeout: float = _TIMEOUT):
         conn.request("GET", path, headers={"Accept": "application/json",
                                            "User-Agent": "recce-docker/1.0"})
         resp = conn.getresponse()
-        body = resp.read(262144).decode("utf-8", "replace")
+        body = _read_capped(resp).decode("utf-8", "replace")
         try:
             return resp.status, json.loads(body)
         except ValueError:
