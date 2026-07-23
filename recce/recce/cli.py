@@ -39,6 +39,10 @@ BANNER = r"""
    recon & coverage tracker for airgapped pentests
 """
 
+# Canonical severity ordering for sorting findings worst-first (shared by every
+# finding-fold path: the deep-service commands and the AD/bloodhound merge).
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
 
 
 def _fmt_dur(seconds: float) -> str:
@@ -2526,8 +2530,7 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     _ad_live_kerberos(args, bh, creds, sh_paths, analysis)
 
     # Re-sort merged findings, fill in the operator's credentials, refresh stats.
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda f: order.get(f["severity"], 5))
+    analysis["findings"].sort(key=lambda f: _SEV_ORDER.get(f["severity"], 5))
     bh.fill_creds(analysis, creds)
     analysis["stats"]["findings"] = len(analysis["findings"])
 
@@ -2993,35 +2996,12 @@ def cmd_mssql(args: argparse.Namespace) -> int:
     analysis["findings"] = uniq
 
     # Fold findings into the main severity totals + writeups (attach to each host).
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = mssql.findings_to_vulns(analysis["findings"])
-    host_by_ip = {h.ip: h for h in hosts}
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "mssql"}
-        host.vulns = [v for v in host.vulns if v.source != "mssql"]   # refresh MSSQL set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
-
-    store.set_meta("mssql", json.dumps(analysis))
+    _fold_service_findings(store, hosts, analysis, "mssql",
+                           mssql.findings_to_vulns, "MSSQL")
     # Running mssql assessed each SQL port (and is a DB deep-enum) -> auto-tick the
     # Checklist DB / Vuln-scan boxes for those hosts.
     if active or (creds and not args.no_run):
         _mark_capability_scanned(store, tgts, db=True)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} MSSQL finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     for t in tgts:
         for line in analysis["runbooks"][next(i for i, r in enumerate(analysis["runbooks"])
                                               if r["ip"] == t["ip"])]["chain"]:
@@ -3157,21 +3137,8 @@ def cmd_smb(args: argparse.Namespace) -> int:
             uniq.append(f)
     analysis["findings"] = uniq
 
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = smb.findings_to_vulns(analysis["findings"])
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "smb"}
-        host.vulns = [v for v in host.vulns if v.source != "smb"]      # refresh SMB set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
+    by_ip = _fold_service_findings(store, hosts, analysis, "smb",
+                                   smb.findings_to_vulns, "SMB")
     # Persist the signing posture we observed (upsert any host we touched but that
     # produced no vulns, so host.smb_signing still lands).
     for t in tgts:
@@ -3179,17 +3146,8 @@ def cmd_smb(args: argparse.Namespace) -> int:
             host = host_by_ip.get(t["ip"])
             if host is not None and t.get("signing_required") is not None:
                 store.upsert_host(host, merge=False)
-
-    store.set_meta("smb", json.dumps(analysis))
     if active or ran_live:           # assessed the SMB port(s) -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} SMB finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -3253,7 +3211,6 @@ def cmd_ftp(args: argparse.Namespace) -> int:
             bits.append("cleartext (no AUTH TLS)")
         print(f"      {t['ip']}:{t['port']}  " + "  ".join(b for b in bits if b))
 
-    host_by_ip = {h.ip: h for h in hosts}
     rb_by_ip = {rb["ip"]: rb for rb in analysis["runbooks"]}
     ran_live = False
     if not args.no_run and args.prove_write:
@@ -3284,32 +3241,10 @@ def cmd_ftp(args: argparse.Namespace) -> int:
             uniq.append(f)
     analysis["findings"] = uniq
 
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = ftp.findings_to_vulns(analysis["findings"])
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "ftp"}
-        host.vulns = [v for v in host.vulns if v.source != "ftp"]      # refresh FTP set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
-
-    store.set_meta("ftp", json.dumps(analysis))
+    _fold_service_findings(store, hosts, analysis, "ftp",
+                           ftp.findings_to_vulns, "FTP")
     if active or ran_live:           # assessed the FTP port -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} FTP finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -3367,33 +3302,10 @@ def cmd_docker(args: argparse.Namespace) -> int:
                              f"docker -H {docker._scheme(t['port'])}://{t['ip']}:"
                              f"{t['port']} info", out)
 
-    host_by_ip = {h.ip: h for h in hosts}
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = docker.findings_to_vulns(analysis["findings"])
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "docker"}
-        host.vulns = [v for v in host.vulns if v.source != "docker"]   # refresh set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
-
-    store.set_meta("docker", json.dumps(analysis))
+    _fold_service_findings(store, hosts, analysis, "docker",
+                           docker.findings_to_vulns, "Docker")
     if active:                       # read the Docker API port -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} Docker finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -3449,33 +3361,10 @@ def cmd_kubernetes(args: argparse.Namespace) -> int:
             ("reachable" if t.get("reachable") else "not probed")
         print(f"      {t['ip']}:{t['port']}  {t.get('role', '')}  {state}")
 
-    host_by_ip = {h.ip: h for h in hosts}
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = k8s.findings_to_vulns(analysis["findings"])
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "kubernetes"}
-        host.vulns = [v for v in host.vulns if v.source != "kubernetes"]  # refresh set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
-
-    store.set_meta("kubernetes", json.dumps(analysis))
+    _fold_service_findings(store, hosts, analysis, "kubernetes",
+                           k8s.findings_to_vulns, "Kubernetes")
     if active:                       # probed the kubelet/API/etcd ports -> vuln-scan
         _mark_capability_scanned(store, tgts)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} Kubernetes finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -3496,6 +3385,39 @@ def cmd_report(args: argparse.Namespace) -> int:
     _generate_reports(store, paths, title)
     store.close()
     return 0
+
+
+def _fold_service_findings(store, hosts, analysis, source, to_vulns, label):
+    """Shared tail for the deep-service commands (smb/ftp/docker/kubernetes/mssql):
+    sort findings by severity, fold them into their hosts (replacing this source's
+    prior vulns, deduped by key), persist the analysis blob under `source`, and print
+    a per-severity summary. Capability marking stays with each command (its gating
+    differs). Returns {ip: [Vuln]} so a caller can post-process the touched hosts."""
+    analysis["findings"].sort(key=lambda x: _SEV_ORDER.get(x["severity"], 5))
+    analysis["stats"]["findings"] = len(analysis["findings"])
+    by_ip = to_vulns(analysis["findings"])
+    host_by_ip = {h.ip: h for h in hosts}
+    for ip, vulns in by_ip.items():
+        host = host_by_ip.get(ip) or store.get_host(ip)
+        if host is None:
+            continue
+        have = {v.key for v in host.vulns if v.source != source}
+        host.vulns = [v for v in host.vulns if v.source != source]   # refresh this source
+        for v in vulns:
+            if v.key not in have:
+                have.add(v.key)
+                host.vulns.append(v)
+        store.upsert_host(host, merge=False)
+    store.set_meta(source, json.dumps(analysis))
+    fs = analysis["findings"]
+    if fs:
+        by_sev: dict = {}
+        for f in fs:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        print(f"[+] {len(fs)} {label} finding(s): "
+              + ", ".join(f"{by_sev[s]} {s}" for s in
+                          ("critical", "high", "medium", "low") if by_sev.get(s)))
+    return by_ip
 
 
 def _mark_capability_scanned(store, targets, db: bool = False) -> None:
