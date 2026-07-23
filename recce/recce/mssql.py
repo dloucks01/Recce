@@ -521,6 +521,13 @@ _ENUM_SECTIONS = {
               "WHERE name IN ('xp_cmdshell','Ole Automation Procedures','clr enabled')",
     "hashes": "SELECT name+'|'+CONVERT(varchar(max),password_hash,1) FROM sys.sql_logins "
               "WHERE password_hash IS NOT NULL",
+    "credentials": "SELECT name+'|'+ISNULL(credential_identity,'') FROM sys.credentials",
+    "proxies": "SELECT p.name+'|'+ISNULL(c.credential_identity,'') FROM msdb.dbo.sysproxies p "
+               "LEFT JOIN sys.credentials c ON p.credential_id=c.credential_id",
+    "linkedlogins": "SELECT s.name+'|'+ISNULL(ll.remote_name,'')+'|'+"
+                    "CAST(ISNULL(ll.uses_self_credential,0) AS varchar(4)) FROM sys.servers s "
+                    "JOIN sys.linked_logins ll ON s.server_id=ll.server_id "
+                    "WHERE s.is_linked=1 AND ll.remote_name IS NOT NULL AND ll.remote_name<>''",
 }
 
 
@@ -778,6 +785,47 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "hashcat -m 1731 mssql_hashes.txt wordlist.txt",
             "Rotate SQL logins; enforce a strong password policy.", ["CWE-522"]))
 
+    # Stored credential objects + Agent proxies -> the (often privileged) accounts
+    # SQL Server holds a secret for. The identity is readable; the password is
+    # decryptable with the Service Master Key (sysadmin) via PowerUpSQL.
+    credentials = [(c[0], c[1] if len(c) > 1 else "") for c in enum.get("credentials", [])]
+    proxies = [(p[0], p[1] if len(p) > 1 else "") for p in enum.get("proxies", [])]
+    named_creds = [c for c in credentials if c[1]]
+    if named_creds:
+        who = ", ".join(f"{n} -> {i}" for n, i in named_creds[:6])
+        fs.append(_finding(
+            "high", f"{len(named_creds)} stored SQL credential object(s)", tgt,
+            f"SQL Server holds a secret for: {who}"
+            + (f"; Agent proxies: {', '.join(p[0] for p in proxies)}" if proxies else "")
+            + ". The identity is shown; decrypt the password with the SMK (sysadmin).",
+            "PowerUpSQL / mssqlpwner",
+            _fill("PowerUpSQL: Get-SQLCredential -Instance <ip>   ;   "
+                  "Get-SQLServerLinkedServerLogin -Instance <ip>   # decrypt with the SMK",
+                  ctx),
+            "Remove unused credentials/proxies; use gMSA over stored passwords.",
+            ["CWE-522", "CWE-257"]))
+
+    # Linked-server logins with a FIXED mapping (uses_self_credential=0) carry a
+    # stored remote password - often mapping to sa on the remote instance.
+    linkedlogins = [(l[0], l[1] if len(l) > 1 else "",
+                     len(l) > 2 and l[2] == "1") for l in enum.get("linkedlogins", [])]
+    fixed = [(srv, remote) for srv, remote, self_cred in linkedlogins
+             if not self_cred and remote]
+    if fixed:
+        show = ", ".join(f"{srv}->{remote}" for srv, remote in fixed[:6])
+        sev = "critical" if any(r.lower() == "sa" for _s, r in fixed) else "high"
+        fs.append(_finding(
+            sev, f"{len(fixed)} linked server(s) with a stored fixed login", tgt,
+            f"Fixed linked-server credentials (server -> remote login): {show}. The "
+            "stored password grants that login on the remote (often sa) - recover it "
+            "with the Service Master Key.", "PowerUpSQL / mssqlpwner",
+            _fill("PowerUpSQL: Get-SQLServerLinkedServerLogin -Instance <ip>   "
+                  "# decrypts the stored linked-server passwords (sysadmin)", ctx),
+            "Use self-mapping / least-privilege remote logins; avoid mapping to sa.",
+            ["CWE-522", "CWE-257"]))
+        chain.append("recover stored linked-server credential(s) ("
+                     + ", ".join(f"{srv}->{remote}" for srv, remote in fixed[:3]) + ")")
+
     if not is_sa and not chain:
         chain.append(f"low-priv login as {me} - hunt for a linked-server or db_owner path")
     summary = {
@@ -788,6 +836,10 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
         "impersonate": [r[0] for r in enum.get("impersonate", [])],
         "config": cfg, "hashes": hashes,
         "dbowner_confirmed": [db for db in trust_sa if (dbo_map or {}).get(db)],
+        "credentials": [f"{n} -> {i}" if i else n for n, i in credentials],
+        "proxies": [f"{n} -> {i}" if i else n for n, i in proxies],
+        "linkedlogins": [f"{s}->{r}" + ("" if sc else " [fixed]")
+                         for s, r, sc in linkedlogins],
     }
     return fs, chain, summary
 

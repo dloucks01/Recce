@@ -159,6 +159,16 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     abuse TRUSTWORTHY payroll -> hop DW01"* plus the exact command per hop. The
     live enumeration (login, sysadmins, TRUSTWORTHY DBs, linked servers,
     impersonatable logins, config, hashes) is shown on the MSSQL sheet.
+  - **Stored-credential & linked-login secret extraction.** The live enumeration now
+    reads `sys.credentials`, SQL Agent proxies (`msdb.dbo.sysproxies`) and the
+    linked-login mappings (`sys.linked_logins`) - surfacing the (often privileged)
+    accounts SQL Server holds a secret for and every linked server that uses a
+    **fixed login mapping** (a stored remote password). A fixed mapping to **`sa`**
+    is a **critical** finding. recce shows the identity/mapping and hands off the
+    Service-Master-Key decryption to the existing tool
+    (`PowerUpSQL Get-SQLServerLinkedServerLogin` / `Get-SQLCredential`) rather than
+    shipping a crypto blob. Rendered on the MSSQL sheet (stored credentials, Agent
+    proxies, linked logins).
   - **Command execution for effect - `--exec CMD --method {xp,ole,agent,clr}`.**
     Runs an OS command on each reachable instance and **captures the output**:
     **xp_cmdshell** (native), **OLE Automation** (`sp_OACreate WScript.Shell` -> file
