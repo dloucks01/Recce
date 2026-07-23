@@ -141,6 +141,19 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
       `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
       version from its `readme.txt` Stable tag.
+- **On-target listener backfill — the binary behind every service.** The read-only
+  enum scripts now emit a machine-parseable **listening-service inventory**: for
+  each listening socket, `proto/addr/port` + the owning **process**, its **PID**,
+  the hosting **Windows service** (svchost-backed ports resolve to the real
+  service, e.g. `WinRM`), and — the part a remote scan can never see — the exact
+  **backing binary** path (`readlink /proc/<pid>/exe` on Linux, the process
+  `.Path` / service `ImagePath` on Windows). `ingest`/`deploy` fold this onto the
+  host's ports: an existing scanned port keeps nmap's service name but gains the
+  **Backing binary** (new Services-sheet column), and a **loopback-only** listener
+  the network scan never reached is added as a fresh port tagged **`ID source =
+  local`** so the sheet shows exactly where each fact came from. Purely
+  read-only (`readlink` / `command -v` / `Get-*` queries) and degrades gracefully
+  on older loot that lacks the section.
 - **Richer HTML report — detailed findings appendix.** The shareable one-file HTML
   report now carries a **Finding details** section (below the summary table): one
   card per grounded finding, severity-ranked, with the **vulnerability type**,

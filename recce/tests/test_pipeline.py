@@ -3180,6 +3180,71 @@ class AttackPathTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(dd, "attack_path.dot")))
 
 
+class ListenerBackfillTest(unittest.TestCase):
+    LOOT = (
+        "recce-enum  host=web01  user=root  now\n"
+        "==== Network ====\n"
+        "    listening-service inventory (proto/port/process/binary):\n"
+        "    LISTEN proto=tcp addr=0.0.0.0 port=80 pid=1337 proc=nginx bin=/usr/sbin/nginx\n"
+        "    LISTEN proto=tcp addr=127.0.0.1 port=6379 pid=990 proc=redis-server bin=/usr/bin/redis-server\n"
+        "    LISTEN proto=tcp addr=0.0.0.0 port=5985 pid=1200 proc=svchost svc=WinRM bin=C:\\Windows\\svchost.exe\n"
+        "    LISTEN proto=udp addr=[::] port=53 pid=800 proc=named bin=/usr/sbin/named\n")
+
+    def test_parse_listeners_linux_and_windows_lines(self):
+        from recce import ingest
+        ls = {(x["proto"], x["port"]): x for x in ingest.parse_listeners(self.LOOT)}
+        self.assertEqual(ls[("tcp", 80)]["bin"], "/usr/sbin/nginx")
+        self.assertFalse(ls[("tcp", 80)]["loopback"])
+        self.assertTrue(ls[("tcp", 6379)]["loopback"])          # 127.0.0.1
+        self.assertEqual(ls[("tcp", 5985)]["svc"], "WinRM")     # windows svc= field
+        self.assertEqual(ls[("udp", 53)]["port"], 53)
+        # No listener lines -> empty (older loot degrades gracefully).
+        self.assertEqual(ingest.parse_listeners("recce-enum host=x\n[!] a finding"), [])
+
+    def test_backfill_enriches_and_adds_ports(self):
+        from recce import ingest
+        h = Host(ip="10.0.0.9", ports=[
+            Port(portid=80, protocol="tcp", service="http", product="nginx",
+                 detect_source="nmap", state="open")])
+        added, enriched = ingest.backfill_ports(h, ingest.parse_listeners(self.LOOT))
+        self.assertEqual((added, enriched), (3, 1))
+        idx = {(p.protocol, p.portid): p for p in h.ports}
+        # Existing nmap port keeps its service; only gains the backing binary.
+        self.assertEqual(idx[("tcp", 80)].service, "http")
+        self.assertEqual(idx[("tcp", 80)].detect_source, "nmap")
+        self.assertEqual(idx[("tcp", 80)].binary, "/usr/sbin/nginx")
+        # Loopback-only service the network scan never saw is now on the host.
+        self.assertIn(("tcp", 6379), idx)
+        self.assertEqual(idx[("tcp", 6379)].detect_source, "local")
+        self.assertIn("loopback", idx[("tcp", 6379)].extrainfo)
+        # Windows svc name becomes the service label + noted in extra info.
+        self.assertEqual(idx[("tcp", 5985)].service, "WinRM")
+        self.assertEqual(idx[("udp", 53)].service, "named")
+
+    def test_fold_loot_backfills_ports_end_to_end(self):
+        from recce import cli
+        h = Host(ip="10.0.0.9", os_family="Linux",
+                 ports=[Port(portid=80, protocol="tcp", service="http",
+                             detect_source="nmap", state="open")])
+        cli._fold_loot(h, self.LOOT, "loot.txt")
+        idx = {(p.protocol, p.portid): p for p in h.ports}
+        self.assertEqual(idx[("tcp", 80)].binary, "/usr/sbin/nginx")
+        self.assertIn(("tcp", 6379), idx)               # loopback service added
+
+    def test_backfill_survives_store_round_trip(self):
+        from recce import ingest
+        from recce.store import Store
+        h = Host(ip="10.0.0.9", subnet="10.0.0.0/24", ports=[])
+        ingest.backfill_ports(h, ingest.parse_listeners(self.LOOT))
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "r.sqlite"))
+            st.upsert_host(h)
+            back = st.get_host("10.0.0.9")
+            st.close()
+        binp = {(p.protocol, p.portid): p.binary for p in back.ports}
+        self.assertEqual(binp[("tcp", 80)], "/usr/sbin/nginx")
+
+
 class AVAwarenessTest(unittest.TestCase):
     LOOT = ("recce-enum  host=DC01  user=admin  now\n"
             "==== AV / EDR detection ====\n"

@@ -1973,6 +1973,9 @@ def _fold_loot(host, text: str, source: str) -> tuple[int, int, int]:
     promoted = [v for v in ingest.promote_to_vulns(host.ip, host.local_findings)
                 if v.key not in have_v]
     host.vulns.extend(promoted)
+    # Backfill listening-service ground truth (binary path, owning service,
+    # loopback-only listeners) from the on-target scripts onto the host's ports.
+    ingest.backfill_ports(host, ingest.parse_listeners(text))
     host.privesc_checked = True
     return len(added), len(new_rows), len(promoted)
 

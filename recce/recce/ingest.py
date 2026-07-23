@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-from .models import Vuln
+from .models import Port, Vuln
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _SEC = re.compile(r"^=+\s*(.*?)\s*=+$")
@@ -351,6 +351,94 @@ def service_findings_to_vulns(parsed: dict) -> list[Vuln]:
             source="service-enum", confidence=_svc_conf(f["text"]),
             output=f"recce-service.sh ({f['service']}): {f['text']}"))
     return out
+
+
+# --- listening-service backfill (on-target ground truth) ------------------------
+# recce-enum.sh/.ps1 emit one machine-parseable line per listener, e.g.
+#   LISTEN proto=tcp addr=0.0.0.0 port=80 pid=1337 proc=nginx bin=/usr/sbin/nginx
+#   LISTEN proto=tcp addr=0.0.0.0 port=5985 pid=1200 proc=svchost svc=WinRM bin=C:\...\svchost.exe
+# The on-target view sees things the network scan can't: the exact backing binary,
+# the owning process/service, and loopback-only listeners a remote scan never
+# reaches. We fold these onto the host's ports with detect_source="local" so the
+# sheet shows where the fact came from.
+_LISTEN = re.compile(
+    r"^LISTEN\s+proto=(?P<proto>\w+)\s+addr=(?P<addr>\S*)\s+port=(?P<port>\d+)\s+"
+    r"pid=(?P<pid>\d*)\s+proc=(?P<proc>\S*)(?:\s+svc=(?P<svc>\S*))?\s+bin=(?P<bin>.*?)\s*$")
+
+_LOOPBACK = ("127.", "::1", "localhost", "0:0:0:0:0:0:0:1")
+
+
+def _is_loopback(addr: str) -> bool:
+    a = (addr or "").strip().lower().strip("[]")
+    return a.startswith("127.") or a in _LOOPBACK
+
+
+def parse_listeners(text: str) -> list[dict]:
+    """Parse the 'LISTEN proto=... port=... proc=... bin=...' lines the on-target
+    scripts emit. Returns a de-duplicated list of
+        {proto, addr, port(int), pid, proc, svc, bin, loopback(bool)}
+    (empty when the loot has no such section - older loot just skips it)."""
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for raw in text.splitlines():
+        line = _ANSI.sub("", raw).strip()
+        m = _LISTEN.match(line)
+        if not m:
+            continue
+        d = m.groupdict()
+        proto = d["proto"].lower()
+        port = int(d["port"])
+        addr = d["addr"]
+        key = (proto, port, addr)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"proto": proto, "addr": addr, "port": port,
+                    "pid": d["pid"] or "", "proc": d["proc"] or "",
+                    "svc": (d["svc"] or "").strip(), "bin": (d["bin"] or "").strip(),
+                    "loopback": _is_loopback(addr)})
+    return out
+
+
+def backfill_ports(host, listeners: list[dict]) -> tuple[int, int]:
+    """Fold on-target listener facts onto host.ports. For a port the scan already
+    has, fill the backing binary / owning service without ever overwriting nmap's
+    service name. For a listener the scan never saw (typically loopback-only), add
+    a new open Port tagged detect_source="local". Returns (added, enriched)."""
+    idx = {(p.protocol, p.portid): p for p in host.ports}
+    added = enriched = 0
+    for ls in listeners:
+        if ls["port"] <= 0:
+            continue
+        cur = idx.get((ls["proto"], ls["port"]))
+        # A svc name (Windows service) is the best "service" label; else the proc.
+        label = ls["svc"] or ls["proc"]
+        note = "on-target: loopback-only" if ls["loopback"] else "on-target listener"
+        if cur is not None:
+            touched = False
+            if ls["bin"] and not cur.binary:
+                cur.binary = ls["bin"]
+                touched = True
+            if ls["svc"] and ls["svc"].lower() not in cur.extrainfo.lower():
+                cur.extrainfo = (f"{cur.extrainfo}; svc={ls['svc']}".lstrip("; ")
+                                 if cur.extrainfo else f"svc={ls['svc']}")
+                touched = True
+            # Only name the service if the scan left it blank/unknown - nmap wins.
+            if label and cur.service in ("", "unknown", "tcpwrapped"):
+                cur.service = label
+                if cur.detect_source != "nmap":
+                    cur.detect_source = "local"
+                touched = True
+            if touched:
+                enriched += 1
+        else:
+            host.ports.append(Port(
+                portid=ls["port"], protocol=ls["proto"], state="open",
+                service=label or "unknown", binary=ls["bin"],
+                detect_source="local", extrainfo=note))
+            idx[(ls["proto"], ls["port"])] = host.ports[-1]
+            added += 1
+    return added, enriched
 
 
 def promote_to_vulns(ip: str, findings: list[dict]) -> list[Vuln]:

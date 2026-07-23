@@ -531,6 +531,43 @@ Get-ItemProperty $uk 2>$null | Where-Object { $_.DisplayName } |
 Sec "Network"
 Info "IP config:"; (ipconfig /all) 2>$null | Select-String 'IPv4|Description|Default Gateway|DNS Servers|Physical' | ForEach-Object { Info $_.ToString().Trim() }
 Info "Listening / connections:"; (netstat -ano) 2>$null | Select-String 'LISTENING|ESTABLISHED' | Select-Object -First 40 | ForEach-Object { Info $_.ToString().Trim() }
+# Machine-parseable listener inventory the sheet backfills: proto/addr/port +
+# owning process + the Windows SERVICE hosting it (svchost-backed ports resolve
+# to the real service) + the BACKING BINARY. READ-ONLY (Get-* queries only).
+Info "listening-service inventory (proto/port/process/service/binary):"
+$svcByPid = @{}
+try {
+  Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object { $_.ProcessId -gt 0 } | ForEach-Object {
+    if(-not $svcByPid.ContainsKey([int]$_.ProcessId)){ $svcByPid[[int]$_.ProcessId] = $_ }
+  }
+} catch {}
+function Emit-Listener($proto,$addr,$port,$op){
+  $proc=""; $bin=""; $svc=""
+  if($op){
+    $p = Get-Process -Id $op -ErrorAction SilentlyContinue
+    if($p){ $proc = $p.ProcessName; $bin = $p.Path }
+    if($svcByPid.ContainsKey([int]$op)){ $s = $svcByPid[[int]$op]; $svc = $s.Name; if(-not $bin){ $bin = $s.PathName } }
+  }
+  Emit ("    LISTEN proto=$proto addr=$addr port=$port pid=$op proc=$proc svc=$svc bin=$bin")
+}
+if(Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue){
+  Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+    Emit-Listener 'tcp' $_.LocalAddress $_.LocalPort $_.OwningProcess }
+  if(Get-Command Get-NetUDPEndpoint -ErrorAction SilentlyContinue){
+    Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object {
+      Emit-Listener 'udp' $_.LocalAddress $_.LocalPort $_.OwningProcess }
+  }
+} else {
+  # Legacy fallback (no Get-NetTCPConnection): parse netstat -ano.
+  (netstat -ano) 2>$null | Select-String 'LISTENING| UDP ' | ForEach-Object {
+    $f = ($_.ToString() -replace '\s+',' ').Trim().Split(' ')
+    if($f.Count -ge 4){
+      $proto = $f[0].ToLower(); $lap = $f[1]; $op = $f[-1]
+      $port = ($lap -split ':')[-1]; $addr = $lap.Substring(0, $lap.LastIndexOf(':'))
+      if($port -match '^\d+$'){ Emit-Listener $proto $addr $port $op }
+    }
+  }
+}
 Info "Routes:"; (route print) 2>$null | Select-Object -First 20 | ForEach-Object { Info $_ }
 Info "Shares:"; Get-SmbShare 2>$null | ForEach-Object { Info ($_.Name + "  " + $_.Path) }
 Info ("Firewall profiles: "); (Get-NetFirewallProfile 2>$null) | ForEach-Object { Info ("   " + $_.Name + " enabled=" + $_.Enabled) }

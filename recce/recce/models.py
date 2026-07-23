@@ -36,8 +36,9 @@ class Port:
     scripts: list[Script] = field(default_factory=list)
     vuln_scanned: bool = False   # tool progress: a vuln pass has run on this port
     servicefp: str = ""          # nmap's raw probe bytes when it couldn't match a signature
-    detect_source: str = ""      # how the service label was set: nmap / inferred / banner
+    detect_source: str = ""      # how the service label was set: nmap / inferred / banner / local
     banner: str = ""             # raw banner/response text captured by our own probe
+    binary: str = ""             # backing executable path (from on-target enum: /proc/<pid>/exe, svc ImagePath)
 
     @property
     def service_banner(self) -> str:

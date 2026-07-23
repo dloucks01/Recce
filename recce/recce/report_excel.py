@@ -197,6 +197,7 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
         ("Hostname", "data", 24), ("Port", "data", 7), ("Proto", "data", 6),
         ("Service", "data", 16), ("ID source", "data", 10),
         ("Product", "data", 22), ("Version", "data", 16),
+        ("Backing binary", "data", 34),
         ("Extra info", "data", 24), ("CPE", "data", 28),
         ("Enum command", "data", 46), ("Notes", "notes", 28),
         ("Key", "key", 4),
@@ -224,7 +225,9 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
                 "IP": h.ip, "Hostname": h.hostname, "Port": p.portid,
                 "Proto": p.protocol, "Service": p.service or "unknown",
                 "ID source": source,
-                "Product": p.product, "Version": p.version, "Extra info": p.extrainfo,
+                "Product": p.product, "Version": p.version,
+                "Backing binary": p.binary,
+                "Extra info": p.extrainfo,
                 "CPE": ", ".join(p.cpe), "Enum command": enum_cmd}})
     return SheetSpec("Services", cols, rows, group_by="IP")
 
