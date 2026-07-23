@@ -4,6 +4,52 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Fixed (full-codebase audit)
+- **`_discover` crashed the caller on invalid targets.** Its error paths returned a
+  3-tuple after the callers were updated to unpack 4 values, so a bad CIDR / empty
+  scope raised inside `cmd_enum`/`cmd_scan` instead of exiting clean. Return the 4-tuple.
+- **`store._merge` silently dropped port enrichment on re-persist.** Six `Port` fields
+  (`reason`, `ostype`, `servicefp`, `detect_source`, `banner`, `binary`) were not
+  merged, so the on-target `binary`/`detect_source` set by `ingest`/`deploy` never
+  survived. Now merged; account `attrs`/`detail` also fold in on a key collision.
+- **`_fold_host` dropped `up_reason`/`state`**, hiding an imported port-less host that
+  was kept up only by its `report-listed` reason.
+- **Docker/Kubernetes truncated large API responses.** A single 256 KB read cut a busy
+  node's `/pods` or the apiserver's `/secrets` mid-buffer; JSON parse failed and a
+  critical exposure was downgraded to "reachable". Read to EOF (16 MB cap); an
+  oversized list body still counts as a real list.
+- **SMB2 negotiate trusted an error reply.** Offering a bare 3.1.1 dialect makes strict
+  servers return `STATUS_INVALID_PARAMETER`, which was read as dialect-0 /
+  signing-not-required and emitted a bogus finding. Validate command/status/
+  StructureSize; stop offering 3.1.1 without contexts.
+- **FTP write-proof claimed "fully reversible" even when the DELE failed**, leaving the
+  marker behind. Track `cleanup_ok`, retry the delete, and soften the finding text.
+- **Prove-engine verdicts:** the EOL recipe swallowed legacy-RCE findings ("just
+  upgrade"); the null-session verdict false-CONFIRMED a *credentialed* share listing;
+  OpenSSH `9.8` (non-portable, fixed) was mislabeled LIKELY; RCE findings (SambaCry,
+  Ghostcat, …) got no Verification row at all. Fixed each and added a version-CVE
+  catch-all.
+- **Overview host-index deep-links** pointed at the wrong Checklist rows for one
+  generation after an update added a host to an already-seen subnet (the row
+  precompute walked linearly while the writer buckets by group). Bucket identically.
+- **Misc:** TLS cert expiry parsed in local time vs a UTC now (`calendar.timegm`); the
+  SNMP finding fired on a bare "public"/"private" substring; a masscan intermediate
+  temp file was left behind; `cmd_smb`/`cmd_ftp` didn't auto-tick the Checklist when a
+  live layer ran under `--no-probe`; `cmd_web` never cleared a stale manual web tick on
+  re-run; xlsx dropdown/CF values weren't escaped.
+
+### Changed (audit: performance + cleanup)
+- **searchsploit is now cached process-wide** (lock-guarded), so N hosts on the same
+  product cost one query instead of one-per-host-thread as the docstring always claimed.
+- **Kubernetes** reuses the TLS/plaintext scheme learned from `/version` for its
+  follow-up requests; **MSSQL** caches the SQL Browser (UDP 1434) probe per IP — both
+  cut redundant connects on large scopes.
+- **Privesc** marks its step in the worker and persists once (dropped a second
+  full-host pass); `_generate_reports` loads credentials once instead of twice.
+- **Dedup:** `svccommon.findings_to_vulns` replaces five near-identical copies; the
+  service sheets share one `_write_findings_table`; duplicate severity maps and a
+  fragile band-label string hack in the workbook builder removed.
+
 ### Added
 - **UDP liveness fallback for silent `-Pn` hosts.** Under `-Pn` a host that answers
   nothing on TCP is genuinely ambiguous — dead, or alive behind a default-drop
