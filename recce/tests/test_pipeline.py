@@ -3521,6 +3521,36 @@ class KubernetesTest(unittest.TestCase):
             self.assertEqual(cli.main(["kubernetes", "-o", out, "--no-probe"]), 0)
 
 
+class CapabilityAutoCheckTest(unittest.TestCase):
+    """Running a deep-service capability auto-marks the Checklist boxes for the
+    ports it assessed (no manual ticking)."""
+
+    def test_mark_capability_scanned_flags_ports_and_db(self):
+        from recce import cli, tracking as tr
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "s.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24", enumerated=True,
+                                ports=[Port(portid=445, state="open", service="smb"),
+                                       Port(portid=1433, state="open",
+                                            service="ms-sql-s")]))
+            # An SMB run assessed only 445 -> that port is scanned, 1433 is not, and a
+            # host with an un-scanned port is NOT yet 'vuln-scanned' overall.
+            cli._mark_capability_scanned(st, [{"ip": "10.0.0.5", "port": 445}])
+            h = st.get_host("10.0.0.5")
+            self.assertTrue(next(p for p in h.ports if p.portid == 445).vuln_scanned)
+            self.assertFalse(next(p for p in h.ports if p.portid == 1433).vuln_scanned)
+            self.assertFalse(tr.step_auto(h, "vuln"))
+            self.assertFalse(h.db_scanned)
+            # An MSSQL run assesses 1433 AND flags the host db-scanned -> now every port
+            # is covered, so Vuln-scan and DB both auto-tick.
+            cli._mark_capability_scanned(st, [{"ip": "10.0.0.5", "port": 1433}], db=True)
+            h = st.get_host("10.0.0.5")
+            self.assertTrue(tr.step_auto(h, "vuln"))
+            self.assertTrue(tr.step_auto(h, "db"))
+            st.close()
+
+
 class DockerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

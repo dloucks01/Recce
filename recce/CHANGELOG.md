@@ -46,6 +46,13 @@ totals, the prove engine, the reports, and its own workbook tab._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Changed
+- **Deep-service capabilities now auto-tick the Checklist as you run them.** Running
+  `smb` / `ftp` / `docker` / `kubernetes` marks each port it actually assessed as
+  vuln-scanned, and `mssql` also flags the host db-scanned — so the Checklist
+  Vuln-scan / DB boxes (and the coverage totals) update automatically, with no manual
+  ticking. A host only shows Vuln-scan done once *every* open port has been covered
+  (by `vulns` and/or the per-service capabilities), so a partial scan never reads as
+  complete.
 - **Workbook is far easier on the eyes at scale (900+ hosts).** The big list/finding
   tabs now use Excel's collapsible row grouping so a large scope isn't one endless
   grid:
