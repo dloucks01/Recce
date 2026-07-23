@@ -729,13 +729,17 @@ mssqlclient / nxc mssql / **MSSQLPwner**:
 - **With credentials (auto-runs `nxc mssql` when installed):** the access +
   privilege matrix — which servers your creds log into and whether the login is
   effectively **sysadmin** (`Pwn3d!` = xp_cmdshell / RCE).
-- **The MSSQLPwner route** (pre-filled runbook + attack chain): enumerate server
-  roles, databases, **TRUSTWORTHY** DBs, the **linked-server graph**,
-  **impersonatable logins**, `xp_cmdshell`/OLE/CLR status, `sys.sql_logins`
-  hashes and saved credentials → escalate (impersonation, TRUSTWORTHY+db_owner,
-  linked-server hops, UNC→relay) → **effect** (xp_cmdshell / sp_OACreate / CLR /
-  Agent). MSSQL findings feed the main **Overview** totals and the write-ups, and
-  populate a dedicated **MSSQL** sheet.
+- **The MSSQLPwner route** (live impacket-mssqlclient enumeration + attack chain):
+  recce connects and enumerates server roles, databases, **TRUSTWORTHY** DBs,
+  **impersonatable logins**, `xp_cmdshell`/OLE/CLR status, `sys.sql_logins` hashes
+  and saved credentials, then **detects the actual escalation chain on each
+  instance** and **recursively walks the linked-server graph** (nested `EXEC(...)
+  AT [link]`) to every instance reachable **as sysadmin** — each becomes a
+  critical finding with the full nested `xp_cmdshell` RCE command. Chains:
+  impersonation, TRUSTWORTHY+db_owner, linked-server hops, UNC→relay → **effect**
+  (xp_cmdshell / sp_OACreate / CLR / Agent). MSSQL findings feed the main
+  **Overview** totals and the write-ups, and populate a dedicated **MSSQL** sheet
+  (endpoints, live enumeration, linked-server graph, findings, runbook, chain).
 
 ```bash
 # No creds — pre-auth recon + the no-cred access commands:

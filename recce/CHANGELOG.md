@@ -159,6 +159,17 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     abuse TRUSTWORTHY payroll -> hop DW01"* plus the exact command per hop. The
     live enumeration (login, sysadmins, TRUSTWORTHY DBs, linked servers,
     impersonatable logins, config, hashes) is shown on the MSSQL sheet.
+  - **Recursive linked-server graph walk** (the MSSQLPwner move): from the entry
+    instance recce follows every linked server, running an identity/privilege query
+    **through the chain** with correctly nested `EXEC('...') AT [link]` (single
+    quotes doubled per hop), discovering each remote instance's `@@SERVERNAME`,
+    your effective login, whether you're **sysadmin there**, and *its* linked
+    servers - then recursing. Cycles (bidirectional links), depth (`--link-depth`,
+    default 4) and node count are all bounded. Every instance reachable **as
+    sysadmin** becomes a critical finding with the full nested chain and a ready
+    `xp_cmdshell` RCE command that runs through all the hops; the graph
+    (`entry -> DW01 -> DW02  (DW02SRV as sa) [SYSADMIN]`) is drawn on the MSSQL
+    sheet. `--no-links` skips the walk.
   - **The MSSQLPwner route** as a pre-filled runbook + attack chain: enumerate
     roles/databases/**TRUSTWORTHY** DBs/**linked servers**/**impersonatable
     logins**/`xp_cmdshell`-OLE-CLR status/`sys.sql_logins` hashes -> escalate

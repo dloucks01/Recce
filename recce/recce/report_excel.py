@@ -985,12 +985,16 @@ def _build_runbook(wb, meta: dict) -> None:
         "Credential-free: SQL Browser (UDP 1434) instances + TDS pre-login version/"
         "encryption for every MSSQL host, plus the no-cred access checks (blank sa, relay).")
     cmd("mssql -u alice -p 'Passw0rd!' -d corp.local -o eng",
-        "With creds: nxc access/privilege matrix (Pwn3d! = sysadmin), then the full "
-        "enumerate -> escalate (impersonation/TRUSTWORTHY/linked-server) -> effect "
-        "(xp_cmdshell/OLE/CLR) runbook, pre-filled. Findings feed the main totals.")
+        "With creds: nxc access/privilege matrix (Pwn3d! = sysadmin), then live "
+        "impacket-mssqlclient enumeration that DETECTS the actual escalation chain "
+        "(impersonation / TRUSTWORTHY / linked-server) and RECURSIVELY WALKS the "
+        "linked-server graph (EXEC AT) to every reachable sysadmin. Pre-filled; feeds "
+        "the main totals.")
     cmd("  --local-auth / --lhost IP / --no-run",
         "SQL (not Windows) auth / your capture-relay IP for the UNC commands / write the "
-        "commands without executing nxc (airgapped-safe).")
+        "commands without executing nxc/impacket (airgapped-safe).")
+    cmd("  --link-depth N / --no-links",
+        "Max linked-server chain depth to walk (default 4) / skip the recursive walk.")
 
     section("6. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
@@ -1410,6 +1414,16 @@ def _build_mssql(wb, analysis: dict) -> None:
             if live.get("hashes"):
                 sh.write(["", f"Recovered {len(live['hashes'])} SQL login hash(es): "
                           + ", ".join(live["hashes"][:12])])
+        graph = rb.get("linkgraph")
+        if graph:
+            sa = sum(1 for n in graph if n.get("sysadmin"))
+            sh.write([(f"Linked-server graph ({len(graph)} reachable, {sa} as sysadmin)",
+                       "bold")])
+            for n in graph:
+                route = " -> ".join(["entry"] + n.get("path", []))
+                tag = "  [SYSADMIN]" if n.get("sysadmin") else ""
+                who = f"  as {n.get('login', '')}" if n.get("login") else ""
+                sh.write(["", f"{route}   ({n.get('server', '')}{who}){tag}"])
         cur = None
         for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
             if step["phase"] != cur:
