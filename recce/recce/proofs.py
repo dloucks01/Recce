@@ -310,6 +310,81 @@ def _v_default_creds(host, port, vuln):
                     "default login). A successful auth = CONFIRMED; failures across the known defaults = FP."]
 
 
+# --- version->CVE verdicts (adjudicate the offline version-DB matches) -----------
+
+def _v_version_cve(host, port, vuln):
+    """A version-based CVE match from recce's offline DB. The match itself is a fact
+    (the running version falls in the affected range), but exploitability is not
+    proven from a banner - Linux distros routinely backport the fix without changing
+    the version string. Verdict LIKELY with that honest caveat; the recipe's finish
+    command is the safe check that turns it into CONFIRMED/FP."""
+    prod, ver = _pv(host, vuln)
+    if not ver:
+        return INCONCLUSIVE, [
+            "The finding is version-based but no service version was captured to reason "
+            "over. Grab it: nmap -sV -p<port> <ip> (or the service banner)."]
+    return LIKELY, [
+        f"recce's offline vuln DB matched {prod or 'the service'} {ver} to this issue "
+        "because the version falls in the affected range - a real version match.",
+        "Version alone is not proof of exploitability: distributions (Debian/Ubuntu/RHEL) "
+        "backport security fixes WITHOUT bumping the banner version, so a patched host can "
+        "still show an affected version string.",
+        "Run the finish command to confirm before reporting as exploitable; a hardened/"
+        "backported build that resists it is the false positive."]
+
+
+def _v_eol(host, port, vuln):
+    """End-of-life / unsupported software. Here the version match IS the proof: the
+    running build is directly observed and is out of support, regardless of any
+    backport (an EOL branch receives no security updates by definition)."""
+    prod, ver = _pv(host, vuln)
+    if ver:
+        return CONFIRMED, [
+            f"{prod or 'The service'} {ver} is a directly-observed, end-of-life build - "
+            "its branch is out of vendor support and receives no security updates.",
+            "This is a version fact, not an exploit guess: the exposure is the "
+            "unsupported software itself. Impact is the accumulated unpatched surface; "
+            "remediation is to upgrade to a supported release."]
+    return LIKELY, ["The service was flagged as end-of-life but no exact version was "
+                    "captured. Confirm the build with nmap -sV -p<port> <ip>."]
+
+
+def _v_openssh_regresshion(host, port, vuln):
+    """regreSSHion (CVE-2024-6387) - affects OpenSSH 8.5p1..<9.8p1 (and <4.4p1) on
+    glibc Linux; 9.8p1+ is fixed. Adjudicate from the observed version."""
+    prod, ver = _pv(host, vuln)
+    if not ver or "openssh" not in (prod or "").lower() and "openssh" not in _blob(vuln):
+        return INCONCLUSIVE, ["No OpenSSH version captured; grab the banner: nc <ip> 22."]
+    if _cmp(ver, "9.8p1") >= 0:
+        return FALSE_POSITIVE, [
+            f"OpenSSH {ver} is >= 9.8p1, the release that FIXES regreSSHion -> not "
+            "vulnerable. Dismiss (this is a common over-flag)."]
+    if _cmp(ver, "8.5p1") >= 0 or _cmp(ver, "4.4p1") < 0:
+        return LIKELY, [
+            f"OpenSSH {ver} is in the regreSSHion-affected window (8.5p1..<9.8p1, or "
+            "pre-4.4p1).",
+            "Exploitation is glibc/Linux-specific and requires winning a signal-handler "
+            "race over many thousands of attempts - version-vulnerable, but confirm the "
+            "target is glibc Linux and the fix isn't backported (Debian/Ubuntu patched "
+            "in place).",
+            "Non-destructive confirm: check the distro's patched-package version, or run "
+            "the public detection script; the full PoC is noisy and can crash sshd (lab/ROE)."]
+    return FALSE_POSITIVE, [
+        f"OpenSSH {ver} sits between 4.4p1 and 8.5p1 - the regression was NOT present in "
+        "that window. Not vulnerable to regreSSHion."]
+
+
+def _v_exchange(host, port, vuln):
+    return LIKELY, [
+        "An internet/intranet-facing Exchange/OWA endpoint is a prime target for the "
+        "ProxyLogon (CVE-2021-26855 SSRF -> RCE) and ProxyShell chains, but the exact "
+        "vulnerable state depends on the CU/patch level, which a banner rarely reveals.",
+        "Confirm the build: the OWA version string maps to a CU/patch date - compare it "
+        "to Microsoft's fixed builds; or run a safe checker "
+        "(e.g. the ProxyLogon/ProxyShell scanner in check-only mode).",
+        "A fully patched Exchange (post-mitigation) that resists the checks is the FP."]
+
+
 # --- recipe registry ------------------------------------------------------------
 # match: regex over (title + script_id + CVEs + output). fn: the verdict function.
 
@@ -465,6 +540,71 @@ _RECIPES: list[dict] = [
                "product's documented default login.",
      "fp": "The known defaults all fail to authenticate.",
      "fn": _v_default_creds},
+    # --- version->CVE matches from the offline DB (gap-1 coverage) ---
+    {"id": "openssh-regresshion", "match": r"regresshion|cve-2024-6387",
+     "name": "OpenSSH regreSSHion pre-auth RCE (CVE-2024-6387)",
+     "pre": ["OpenSSH 8.5p1..<9.8p1 (or <4.4p1)", "glibc Linux", "fix not backported"],
+     "finish": "compare the distro's OpenSSH package version to the patched build, or run "
+               "the public regreSSHion detector; full PoC is noisy / can crash sshd - lab/ROE.",
+     "fp": "OpenSSH >= 9.8p1 (patched), the 4.4p1..8.5p1 window, a non-glibc/backported build.",
+     "fn": _v_openssh_regresshion},
+    {"id": "openssh-version-cve",
+     "match": r"openssh.{0,40}(double-free|username enum|user enumeration|cve-2023-38408|"
+              r"cve-2016-0777|agent)",
+     "name": "OpenSSH version-based CVE",
+     "pre": ["OpenSSH version in the affected range", "fix not backported by the distro"],
+     "finish": "check the distro's patched-package version; for the double-free, the public "
+               "PoC needs a specific heap layout (lab). Username-enum: a timing check with "
+               "a wordlist confirms it.",
+     "fp": "A backported/patched build that resists the check.",
+     "fn": _v_version_cve},
+    {"id": "apache-httpd-version-cve",
+     "match": r"apache (httpd|2\.4).{0,50}(smuggl|ssrf|mod_proxy|mod_lua|traversal|"
+              r"cve-2021-4177|cve-2022-2)",
+     "name": "Apache httpd version-based CVE",
+     "pre": ["Apache httpd version in the affected range"],
+     "finish": "for path traversal (2.4.49/50): curl --path-as-is <url>/cgi-bin/.%2e/.%2e/"
+               "etc/passwd (a 200 with root:x = CONFIRMED). For smuggling/SSRF: the specific "
+               "CVE PoC / a smuggling test harness.",
+     "fp": "A backported build, or the vulnerable module/config (mod_cgi, mod_proxy) not enabled.",
+     "fn": _v_version_cve},
+    {"id": "nginx-version-cve", "match": r"nginx.{0,40}(off-by-one|resolver|cve-2021-23017)",
+     "name": "nginx resolver off-by-one (CVE-2021-23017)",
+     "pre": ["nginx 0.6.18..<1.21.0", "the 'resolver' directive is configured"],
+     "finish": "confirm a 'resolver' directive is in use (the bug is in DNS resolution); "
+               "then the public PoC in a lab (it can crash the worker).",
+     "fp": "No 'resolver' configured, or a patched/backported build.",
+     "fn": _v_version_cve},
+    {"id": "mysql-version-cve", "match": r"mysql 5\.5.{0,30}(pre-?auth|remote)",
+     "name": "MySQL 5.5.x remote pre-auth issue",
+     "pre": ["MySQL 5.5.x reachable"],
+     "finish": "nmap --script mysql-vuln-cve2012-2122 -p3306 <ip> (the auth-bypass check), "
+               "or mysql -h <ip> -u root with the repeated-login bypass.",
+     "fp": "A patched 5.5.x (>= 5.5.63) or a MariaDB build mis-detected as MySQL 5.5.",
+     "fn": _v_version_cve},
+    {"id": "eol-service",
+     "match": r"end-of-life|end of life|\beol\b|\blegacy\b|unsupported|no longer supported",
+     "name": "End-of-life / unsupported software exposed",
+     "pre": ["The running build's branch is out of vendor support"],
+     "finish": "confirm the exact build (nmap -sV) and check it against the vendor's "
+               "lifecycle page; the finding is the unsupported software itself.",
+     "fp": "A version mis-detection (e.g. MariaDB read as MySQL 5.5); otherwise it is a fact.",
+     "fn": _v_eol},
+    {"id": "redis-version-cve", "match": r"redis.{0,30}(< ?6|no acl|unauth|rce)",
+     "name": "Redis < 6.0 - no ACLs / common unauth RCE",
+     "pre": ["Redis reachable", "no ACL/AUTH (pre-6.0 default)"],
+     "finish": "redis-cli -h <ip> ping (a PONG without AUTH = unauthenticated); then CONFIG "
+               "GET dir / module load techniques for RCE (lab/ROE).",
+     "fp": "AUTH is required (requirepass set) or protected-mode blocks remote access.",
+     "fn": _v_version_cve},
+    {"id": "exchange-proxylogon", "match": r"proxylogon|proxyshell|exchange.{0,30}(exposed|owa|"
+                                           r"cve-2021-26855|cve-2021-34473)",
+     "name": "Microsoft Exchange - ProxyLogon / ProxyShell risk",
+     "pre": ["Internet/intranet-facing Exchange/OWA", "CU/patch level below the fixed build"],
+     "finish": "map the OWA build string to its CU/patch date vs Microsoft's fixed builds, "
+               "or run the ProxyLogon/ProxyShell checker in check-only mode.",
+     "fp": "A fully-patched Exchange that resists the checks.",
+     "fn": _v_exchange},
 ]
 _COMPILED = [(re.compile(r["match"], re.I), r) for r in _RECIPES]
 
