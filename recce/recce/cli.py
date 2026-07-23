@@ -2948,6 +2948,10 @@ def cmd_mssql(args: argparse.Namespace) -> int:
         store.upsert_host(host, merge=False)
 
     store.set_meta("mssql", json.dumps(analysis))
+    # Running mssql assessed each SQL port (and is a DB deep-enum) -> auto-tick the
+    # Checklist DB / Vuln-scan boxes for those hosts.
+    if active or (creds and not args.no_run):
+        _mark_capability_scanned(store, tgts, db=True)
     if analysis["findings"]:
         by_sev: dict = {}
         for f in analysis["findings"]:
@@ -3114,6 +3118,8 @@ def cmd_smb(args: argparse.Namespace) -> int:
                 store.upsert_host(host, merge=False)
 
     store.set_meta("smb", json.dumps(analysis))
+    if active:                       # assessed the SMB port(s) -> auto-tick vuln-scan
+        _mark_capability_scanned(store, tgts)
     if analysis["findings"]:
         by_sev: dict = {}
         for f in analysis["findings"]:
@@ -3232,6 +3238,8 @@ def cmd_ftp(args: argparse.Namespace) -> int:
         store.upsert_host(host, merge=False)
 
     store.set_meta("ftp", json.dumps(analysis))
+    if active:                       # assessed the FTP port -> auto-tick vuln-scan
+        _mark_capability_scanned(store, tgts)
     if analysis["findings"]:
         by_sev: dict = {}
         for f in analysis["findings"]:
@@ -3314,6 +3322,8 @@ def cmd_docker(args: argparse.Namespace) -> int:
         store.upsert_host(host, merge=False)
 
     store.set_meta("docker", json.dumps(analysis))
+    if active:                       # read the Docker API port -> auto-tick vuln-scan
+        _mark_capability_scanned(store, tgts)
     if analysis["findings"]:
         by_sev: dict = {}
         for f in analysis["findings"]:
@@ -3394,6 +3404,8 @@ def cmd_kubernetes(args: argparse.Namespace) -> int:
         store.upsert_host(host, merge=False)
 
     store.set_meta("kubernetes", json.dumps(analysis))
+    if active:                       # probed the kubelet/API/etcd ports -> vuln-scan
+        _mark_capability_scanned(store, tgts)
     if analysis["findings"]:
         by_sev: dict = {}
         for f in analysis["findings"]:
@@ -3421,6 +3433,32 @@ def cmd_report(args: argparse.Namespace) -> int:
     _generate_reports(store, paths, title)
     store.close()
     return 0
+
+
+def _mark_capability_scanned(store, targets, db: bool = False) -> None:
+    """After a deep-service capability runs (smb/ftp/docker/kubernetes/mssql), mark
+    each port it actually assessed as vuln-scanned - and the host as db-scanned for a
+    database service - so the Checklist auto-checkboxes and coverage reflect the work
+    without the tester ticking anything by hand. `targets` is the module's list of
+    {ip, port} it probed (including clean ones, so a 'nothing found' probe still counts)."""
+    per_host: dict[str, set] = {}
+    for t in targets:
+        if t.get("ip") and t.get("port"):
+            per_host.setdefault(t["ip"], set()).add(int(t["port"]))
+    for ip, ports in per_host.items():
+        h = store.get_host(ip)
+        if h is None:
+            continue
+        changed = False
+        for p in h.ports:
+            if p.portid in ports and not p.vuln_scanned:
+                p.vuln_scanned = True
+                changed = True
+        if db and not h.db_scanned:
+            h.db_scanned = True
+            changed = True
+        if changed:
+            store.upsert_host(h, merge=False)     # full host loaded -> safe rewrite
 
 
 def _service_module_coverage(store, hosts) -> list[dict]:
