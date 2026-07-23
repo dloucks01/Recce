@@ -1692,6 +1692,38 @@ class AuditRegressionTest(unittest.TestCase):
                     source="nse", state="finding")
         self.assertEqual(proofs._v_nullsession(h, None, anon)[0], proofs.CONFIRMED)
 
+    def test_fold_service_findings_refreshes_only_its_own_source(self):
+        # The shared deep-service fold helper must replace THIS source's prior vulns
+        # (a re-run doesn't duplicate) while leaving other sources untouched.
+        from recce import cli
+        from recce.store import Store
+        from recce.models import Vuln
+
+        def mk(src, title):
+            return Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="x",
+                        title=title, severity="high", source=src, state="finding")
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "s.sqlite"))
+            h = Host(ip="10.0.0.5", ports=[Port(portid=445, state="open")],
+                     vulns=[mk("nse", "keep-me"), mk("smb", "stale-smb")])
+            st.upsert_host(h)
+            analysis = {"findings": [{"title": "New SMB issue", "target": "10.0.0.5:445",
+                                      "severity": "critical", "detail": "d"}],
+                        "stats": {}}
+            import io as _io
+            import contextlib as _c
+            with _c.redirect_stdout(_io.StringIO()):
+                cli._fold_service_findings(st, [st.get_host("10.0.0.5")], analysis,
+                                           "smb", __import__("recce.smb", fromlist=["x"]).findings_to_vulns,
+                                           "SMB")
+            got = st.get_host("10.0.0.5")
+            titles = {v.title for v in got.vulns}
+            self.assertIn("keep-me", titles)            # other source preserved
+            self.assertNotIn("stale-smb", titles)       # prior smb vuln refreshed away
+            self.assertIn("New SMB issue", titles)      # new smb finding folded in
+            self.assertEqual(st.get_meta("smb") is not None, True)
+            st.close()
+
     def test_shared_findings_to_vulns_keeps_source_prefix_port(self):
         # The 5 service modules now delegate to svccommon; the source label, the
         # script_id prefix (k8s differs from its 'kubernetes' source) and the default
