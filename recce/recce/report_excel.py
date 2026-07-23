@@ -1268,13 +1268,13 @@ def _build_runbook(wb, meta: dict) -> None:
         "Kubernetes: unauthenticated reads of the kubelet (exec-into-pods), "
         "kube-apiserver (anonymous LIST / Secrets = cluster compromise) and etcd "
         "(all cluster secrets in the clear).")
-    cmd("ldap -o eng   [-u alice -p 'Passw0rd!' -d corp.local]",
+    cmd("ldap -o eng   [-u alice -p 'Passw0rd!' -d corp.local | --hash <NT>]",
         "LDAP: stdlib BER client anonymously binds, reads the RootDSE (domain / forest "
         "/ DC / functional level) and tests for anonymous directory read; flags cleartext "
-        "389 as a credential-sniff / relay surface. WITH creds it also PAGES an "
-        "authenticated enum (users / computers / domain) in-house and derives "
-        "kerberoastable / AS-REP / delegation / privileged accounts straight into Users "
-        "& Accounts + AD Quick Wins. Read-only.")
+        "389 as a credential-sniff / relay surface. WITH creds (password OR --hash for "
+        "pass-the-hash via an NTLM SASL bind) it PAGES an authenticated enum (users / "
+        "computers / domain) in-house and derives kerberoastable / AS-REP / delegation / "
+        "privileged accounts straight into Users & Accounts + AD Quick Wins. Read-only.")
 
     section("6. Act on the findings - turn CONFIRMED findings into a plan",
             "Once findings are proven (Verification tab), stage the exploitation and "
