@@ -124,6 +124,10 @@ def _enroll_principals(obj: dict) -> str:
     rights = enroll.get("Enrollment Rights") or obj.get("Enrollment Rights") or []
     if isinstance(rights, str):
         rights = [rights]
+    elif isinstance(rights, dict):        # some Certipy versions map principal->right
+        rights = list(rights)
+    elif not isinstance(rights, list):
+        rights = []
     return ", ".join(str(r) for r in rights[:6])
 
 
