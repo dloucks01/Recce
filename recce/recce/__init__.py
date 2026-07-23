@@ -1,3 +1,3 @@
 """recce - multi-subnet enumeration & reporting for pentest engagements."""
 
-__version__ = "0.2.4.dev0"
+__version__ = "0.2.4"
