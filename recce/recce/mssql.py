@@ -179,12 +179,17 @@ def mssql_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def probe_target(ip: str, port: int = _DEFAULT_PORT, active: bool = True) -> dict:
+def probe_target(ip: str, port: int = _DEFAULT_PORT, active: bool = True,
+                 instances: list | None = None) -> dict:
     """Credential-free gather for one endpoint: SQL Browser instances + a TDS
-    pre-login (version, encryption). {instances:[...], prelogin:{...}}."""
+    pre-login (version, encryption). {instances:[...], prelogin:{...}}.
+
+    `instances` may be passed pre-computed to avoid re-running the SQL Browser (UDP
+    1434) query per port when one host exposes several MSSQL ports."""
     if not active:
         return {"instances": [], "prelogin": {}}
-    return {"instances": sql_browser(ip), "prelogin": prelogin(ip, port)}
+    inst = sql_browser(ip) if instances is None else instances
+    return {"instances": inst, "prelogin": prelogin(ip, port)}
 
 
 # --- credential substitution ----------------------------------------------------
@@ -1754,9 +1759,13 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     chain. JSON-serialisable for the datastore + report."""
     targets = mssql_targets(hosts)
     probes: dict = {}
+    browser: dict = {}          # SQL Browser (UDP 1434) result cached per IP
     for t in targets:
         key = f"{t['ip']}:{t['port']}"
-        probes[key] = probe_target(t["ip"], t["port"], active=active)
+        if active and t["ip"] not in browser:
+            browser[t["ip"]] = sql_browser(t["ip"])
+        probes[key] = probe_target(t["ip"], t["port"], active=active,
+                                   instances=browser.get(t["ip"]) if active else None)
         # Recover the version from the pre-login when nmap missed it.
         pv = probes[key]["prelogin"].get("version")
         if pv and not t.get("version"):
