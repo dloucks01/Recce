@@ -46,6 +46,13 @@ totals, the prove engine, the reports, and its own workbook tab._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Changed
+- **Distribution is a plain drop-in tarball, not a wheel.** The shipped release
+  artifact is the `make_package.sh` burn package — a single `recce-<version>/`
+  directory you extract and run with `./bin/recce ...` (or `python3 -m recce`), no
+  pip and no wheel, matching the airgapped/stdlib-only design. A pre-built
+  `.tar.gz` + `.zip` + `SHA256SUMS` for the release lives in `recce/releases/`.
+  (`pyproject.toml` stays so a wheel can still be built on demand, but it is no
+  longer the recommended or shipped path.)
 - **Workbook reorganised to follow the engagement flow.** The per-service deep-dive
   tabs (Databases, MSSQL, SMB, FTP, Docker, Kubernetes) are now a single grouped band
   right after the findings, the Active Directory cluster (Active Directory, AD Quick
