@@ -39,6 +39,18 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Added
+- **Per-web-finding PoC generation.** `exploitplan` now writes a tailored, benign,
+  runnable proof for *each* web finding into `exploit-plan/poc/`, with the target
+  URL filled in: a **`git-dumper` script** for exposed `.git`, an **HTML page** that
+  proves the CORS cross-origin credentialed read, a pure-python **`alg:none` JWT
+  forge**, an **SSTI engine-identification script** (then `tplmap` for RCE in ROE),
+  a **GraphQL schema dump**, an **actuator heapdump → secrets grep**, a **PUT
+  write-primitive** proof, a **JS-secret extractor**, and a read-only fetch for
+  exposed `.env`/`.aws`/`.htpasswd`/backups/`server-status`/`metrics`/`phpinfo`.
+  Each is a benign proof (marker file / schema dump / redacted read); RCE
+  escalations reference the published tool to run within ROE. The generated Python
+  and shell are validated (compile / `sh -n`) by tests. Nothing obfuscated or
+  AV-evasive.
 - **`recce web` — web-facing services get their own category + deep scanning.**
   Every HTTP/HTTPS endpoint recce found (on ANY port, not just 80/443) is
   identified, categorized on a new **Web** workbook tab with its tech stack and

