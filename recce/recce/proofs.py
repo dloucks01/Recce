@@ -297,6 +297,13 @@ def _v_jwt(host, port, vuln):
 
 
 def _v_web_methods(host, port, vuln):
+    blob = f"{vuln.title} {vuln.output}".lower()
+    if "proven" in blob or "confirmed" in blob or "returned the uploaded" in blob:
+        return CONFIRMED, [
+            "recce actively proved this: it PUT a marker file and read it back "
+            "(then DELETE'd it) - an arbitrary file-write primitive, observed, not "
+            "merely advertised.",
+            "Escalate within ROE: PUT a web shell / overwrite a served file."]
     return LIKELY, ["The server advertised the method(s) in its OPTIONS Allow header (observed).",
                     "Prove impact non-destructively: curl -sk -X PUT <url>/recce_poc.txt -d 'recce_poc' "
                     "then GET it back. A stored file = real upload primitive; 403/405 = advertised but "
@@ -525,7 +532,8 @@ _RECIPES: list[dict] = [
                "then replay the forged token.",
      "fp": "The server pins the algorithm / rejects the forged token, or the secret is strong.",
      "fn": _v_jwt},
-    {"id": "web-methods", "match": r"dangerous http methods|http method.*enabled|put.*enabled",
+    {"id": "web-methods", "match": r"dangerous http methods|http method.*enabled|put.*enabled|"
+                                   r"arbitrary file write via http put|file write via http put",
      "name": "Dangerous HTTP methods (PUT/DELETE/TRACE)",
      "pre": ["The server advertises a write/dangerous method in OPTIONS Allow"],
      "finish": "curl -sk -X PUT <url>/recce_poc.txt -d 'recce_poc' ; curl -sk <url>/recce_poc.txt "
