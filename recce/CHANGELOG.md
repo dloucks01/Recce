@@ -159,6 +159,19 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     abuse TRUSTWORTHY payroll -> hop DW01"* plus the exact command per hop. The
     live enumeration (login, sysadmins, TRUSTWORTHY DBs, linked servers,
     impersonatable logins, config, hashes) is shown on the MSSQL sheet.
+  - **Detailed narratives - what each MSSQL issue actually enables.** Every MSSQL
+    finding now carries an accurate, capability-focused explanation written for the
+    report and write-ups. E.g. the **xp_cmdshell** narrative explains that it runs
+    arbitrary OS commands as the SQL Server *service account* (a virtual or domain
+    account), giving code execution on the host, local-admin actions, SeImpersonate
+    -> SYSTEM, LSASS/credential theft and domain pivoting - and that "disabled" is a
+    two-statement speed bump for a sysadmin, not a control. Narratives cover blank
+    logins, sysadmin creds, impersonation, TRUSTWORTHY, linked-server reach/sysadmin/
+    fixed-login, hashes, stored credentials, NTLM disclosure, unencrypted logins, EOL,
+    UNC->relay and confirmed RCE. They render on the MSSQL sheet ("what each issue
+    enables") and fold into the finding evidence for the write-ups. A **"How MSSQL is
+    tested"** methodology section (discovery -> auth -> privilege -> escalation ->
+    effect -> secrets) heads the sheet so a reader understands the approach.
   - **Stored-credential & linked-login secret extraction.** The live enumeration now
     reads `sys.credentials`, SQL Agent proxies (`msdb.dbo.sysproxies`) and the
     linked-login mappings (`sys.linked_logins`) - surfacing the (often privileged)

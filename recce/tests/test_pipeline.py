@@ -3388,6 +3388,46 @@ class MssqlTest(unittest.TestCase):
         self.assertFalse([f for f in fs3 if "TRUSTWORTHY" in f["title"]
                           or "CONFIRMED" in f["title"]])
 
+    def test_findings_carry_detailed_narratives(self):
+        from recce import mssql
+        # A rich enum that exercises many finding kinds.
+        enum = mssql.parse_enum(
+            "@@B:server\nSQL01|CORP\\alice|0|1|12.0.2000.5\n@@E:server\n"
+            "@@B:logins\nsa|1\n@@E:logins\n@@B:databases\npayroll|1|sa\n@@E:databases\n"
+            "@@B:links\nDW01|SQL Server|dw01\n@@E:links\n@@B:impersonate\nsa|1\n@@E:impersonate\n"
+            "@@B:config\nxp_cmdshell|1\n@@E:config\n@@B:hashes\nsa|0x0200AB\n@@E:hashes\n"
+            "@@B:credentials\nAppCred|CORP\\svc\n@@E:credentials\n@@B:proxies\n@@E:proxies\n"
+            "@@B:linkedlogins\nDW01|sa|0\n@@E:linkedlogins\n")
+        fs, _c, _s = mssql.chains_from_enum(
+            t := {"ip": "10.0.0.50", "port": 1433}, enum,
+            {"user": "alice", "secret": "P@ss", "domain": "corp.local"})
+        _ = t
+        # Every finding must carry a substantial narrative and a kind.
+        for f in fs:
+            self.assertTrue(f.get("kind"), f["title"])
+            self.assertGreater(len(f.get("narrative", "")), 120, f["title"])
+        # The xp_cmdshell narrative explains its real capability in detail.
+        xp = next(f for f in fs if f["kind"] == "xp_cmdshell")
+        for phrase in ("service account", "SeImpersonate", "SYSTEM", "LSASS"):
+            self.assertIn(phrase, xp["narrative"])
+
+    def test_narrative_folds_into_vuln_evidence(self):
+        from recce import mssql
+        fs = mssql.findings([self._host()])
+        by_ip = mssql.findings_to_vulns(fs)
+        blob = "\n".join(v.output for v in by_ip["10.0.0.50"])
+        self.assertIn("What this enables", blob)                # narrative in evidence
+
+    def test_testing_methodology_narrative(self):
+        from recce import mssql
+        phases = [p for p, _t in mssql.TESTING_NARRATIVE]
+        self.assertTrue(any("Discovery" in p for p in phases))
+        self.assertTrue(any("Escalation" in p for p in phases))
+        self.assertEqual(len(mssql.TESTING_NARRATIVE), 6)
+        # Each phase has a real explanation.
+        for _p, text in mssql.TESTING_NARRATIVE:
+            self.assertGreater(len(text), 100)
+
     def test_credential_and_linked_login_secret_extraction(self):
         from recce import mssql
         from recce.report_docx import _vuln_type

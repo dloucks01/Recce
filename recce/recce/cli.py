@@ -2706,7 +2706,7 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                         f"recce mssql -u <user> -p <pass> --exec '{args.exec_cmd}' "
                         f"--method {args.method}",
                         "Disable the primitive; run SQL under a low-privilege gMSA.",
-                        ["CWE-250", "CWE-269"]))
+                        ["CWE-250", "CWE-269"], kind="rce_confirmed"))
 
     # With any login we can coerce the service account's NetNTLM via UNC -> relay
     # it. Add the concrete relay finding (real targets) per endpoint.
