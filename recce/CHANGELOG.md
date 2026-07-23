@@ -159,6 +159,21 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     abuse TRUSTWORTHY payroll -> hop DW01"* plus the exact command per hop. The
     live enumeration (login, sysadmins, TRUSTWORTHY DBs, linked servers,
     impersonatable logins, config, hashes) is shown on the MSSQL sheet.
+  - **Database data-mining (`--data`).** Enumerates every database, every table
+    (with row counts) and the columns/tables whose names indicate **sensitive data**
+    - passwords, tokens, PII (SSN/DOB/email/phone) and financial fields
+    (card/CVV/IBAN/salary) - across all databases, and raises a *"Sensitive data
+    accessible"* finding naming exactly where the data is (e.g. `payroll ->
+    dbo.Employees.ssn, dbo.Employees.email`). A `DB_NAME()` guard means a failed
+    `USE` can't mis-attribute tables.
+  - **Reversible proof of impact (`--prove-write`).** Demonstrates - non-destructively -
+    that the login can **modify data and change security state**: it creates a table,
+    writes a row, **MODIFIES the field** (before -> after captured as evidence), drops
+    the table, and (as sysadmin) adds a temporary login to a server role, confirms the
+    membership, then removes it and drops the login - **undoing every change**. Raises
+    a critical *"Proved write + permission-modify capability (reversible)"* finding
+    carrying the before/after evidence, so a write/permission vulnerability is
+    actually proven, not merely asserted.
   - **Detailed narratives - what each MSSQL issue actually enables.** Every MSSQL
     finding now carries an accurate, capability-focused explanation written for the
     report and write-ups. E.g. the **xp_cmdshell** narrative explains that it runs

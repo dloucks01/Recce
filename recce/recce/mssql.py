@@ -331,6 +331,23 @@ _NARRATIVE = {
         "database engine accumulates known weaknesses over time and cannot be brought "
         "to a secure baseline; it should be treated as a standing high-value target and "
         "prioritised for upgrade."),
+    "data_at_rest": (
+        "With a login recce enumerated the databases, their tables (with row counts) "
+        "and the columns whose names indicate sensitive data - passwords, tokens, "
+        "PII (SSN/DOB/email/phone), and financial fields (card/CVV/IBAN/salary). This "
+        "is the actual business impact of the access: a data breach of regulated or "
+        "high-value information, and often a source of reusable credentials. The row "
+        "counts show how much is exposed, and the named columns are exactly where to "
+        "look; the demonstration should sample and redact rather than exfiltrate."),
+    "write_proof": (
+        "recce demonstrated - reversibly - that the login can not only read but MODIFY "
+        "the database and change security state: it created a table, wrote and then "
+        "altered a field, and (as sysadmin) toggled a temporary login's server-role "
+        "membership, undoing every change in the same transaction sequence. This is a "
+        "concrete integrity impact: an attacker with this access can tamper with "
+        "records, plant or alter data, and grant themselves or others privileges. The "
+        "proof is non-destructive by design (it reverts), but the capability it "
+        "confirms is not."),
     "relay": (
         "Any authenticated login can make SQL Server reach out to a UNC path (e.g. via "
         "xp_dirtree), causing the *service account* to authenticate to an attacker-"
@@ -1276,6 +1293,188 @@ def exec_command(ip: str, creds: dict, command: str, method: str = "xp",
     if err:
         return None, err, None
     return parse_exec(out), None, None
+
+
+# --- data mining: databases -> tables -> interesting columns --------------------
+_INTERESTING_COLS = ("pass", "pwd", "secret", "token", "apikey", "api_key", "ssn",
+                     "social", "credit", "card", "cvv", "salary", "routing", "iban",
+                     "passport", "license", "email", "phone", "birth", "dob", "pin",
+                     "private", "seckey", "sessionkey", "creditcard")
+_INTERESTING_TABLES = ("user", "account", "credential", "login", "password", "secret",
+                       "customer", "employee", "payment", "card", "patient", "member",
+                       "payroll", "salar", "ssn", "bank")
+_SYSTEM_DBS = {"tempdb", "model"}
+
+
+def _like_or(col: str, needles) -> str:
+    return "(" + " OR ".join(f"{col} LIKE '%{n}%'" for n in needles) + ")"
+
+
+def build_datamine_script(dbs: list[str]) -> str:
+    """Per-database: list every table (schema.table + row count) and the columns
+    whose name looks sensitive. DB_NAME() is emitted so a failed USE is detectable."""
+    lines = []
+    for i, db in enumerate(dbs):
+        esc = db.replace("]", "]]")
+        lines.append(f"USE [{esc}]")
+        lines.append(f"SELECT '@@TBL:{i}'")
+        lines.append(
+            "SELECT DB_NAME()+'|'+s.name+'.'+t.name+'|'+CAST(SUM(p.rows) AS varchar(20)) "
+            "FROM sys.tables t JOIN sys.schemas s ON t.schema_id=s.schema_id "
+            "JOIN sys.partitions p ON t.object_id=p.object_id AND p.index_id IN (0,1) "
+            "GROUP BY s.name,t.name")
+        lines.append(f"SELECT '@@TBLE:{i}'")
+        lines.append(f"SELECT '@@COL:{i}'")
+        lines.append(
+            "SELECT DB_NAME()+'|'+s.name+'.'+t.name+'.'+c.name FROM sys.columns c "
+            "JOIN sys.tables t ON c.object_id=t.object_id "
+            "JOIN sys.schemas s ON t.schema_id=s.schema_id WHERE "
+            + _like_or("c.name", _INTERESTING_COLS))
+        lines.append(f"SELECT '@@COLE:{i}'")
+    lines.append("exit")
+    return "\n".join(lines) + "\n"
+
+
+def _section_rows(output: str, begin: str, end: str, db: str, ncols: int) -> list:
+    import re
+    m = re.search(rf"{re.escape(begin)}\b(.*?){re.escape(end)}\b", output, re.S)
+    rows = []
+    if m:
+        for line in m.group(1).splitlines():
+            s = line.strip()
+            if "|" in s and "----" not in s and not s.startswith("@@"):
+                parts = [c.strip() for c in s.split("|")]
+                if len(parts) >= ncols and parts[0].lower() == db.lower():
+                    rows.append(parts)
+    return rows
+
+
+def parse_datamine(output: str, dbs: list[str]) -> dict:
+    """{db: {tables: [(schema.table, rows)], interesting: [schema.table.col]}}."""
+    out = {}
+    for i, db in enumerate(dbs):
+        tbl = _section_rows(output, f"@@TBL:{i}", f"@@TBLE:{i}", db, 3)
+        col = _section_rows(output, f"@@COL:{i}", f"@@COLE:{i}", db, 2)
+        out[db] = {"tables": [(r[1], r[2]) for r in tbl],
+                   "interesting": [r[1] for r in col]}
+    return out
+
+
+def run_datamine(dbs: list[str], runner) -> dict:
+    dbs = [d for d in dbs if d.lower() not in _SYSTEM_DBS]
+    if not dbs:
+        return {}
+    out = runner(build_datamine_script(dbs)) or ""
+    if "@@TBL:" not in out:
+        return {}
+    return parse_datamine(out, dbs)
+
+
+def datamine_findings(target: dict, mined: dict, creds: dict | None):
+    """A data-at-risk finding from the mined structure: how many db(s)/table(s),
+    which columns/tables look sensitive, and the command to read them."""
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    ctx = _ctx(target, creds)
+    if not mined:
+        return []
+    ndb = len([d for d in mined if mined[d]["tables"]])
+    total = sum(len(v["tables"]) for v in mined.values())
+    sensitive_cols = {db: v["interesting"] for db, v in mined.items() if v["interesting"]}
+    sensitive_tabs = {}
+    for db, v in mined.items():
+        hits = [t for t, _r in v["tables"]
+                if any(n in t.lower() for n in _INTERESTING_TABLES)]
+        if hits:
+            sensitive_tabs[db] = hits
+    if sensitive_cols or sensitive_tabs:
+        bits = []
+        for db, cols in list(sensitive_cols.items())[:8]:
+            bits.append(f"{db} -> {', '.join(cols[:8])}")
+        for db, tabs in list(sensitive_tabs.items())[:8]:
+            bits.append(f"{db} tables: {', '.join(tabs[:6])}")
+        return [_finding(
+            "high", "Sensitive data accessible in the databases", tgt,
+            f"Enumerated {ndb} database(s), {total} table(s). Sensitive items: "
+            + " ; ".join(bits), "impacket-mssqlclient",
+            _fill("impacket-mssqlclient <domain>/<user>:<pass>@<ip>   "
+                  "# then SELECT the columns above (redact PII in your notes)", ctx),
+            "Least-privilege the login off the data plane; encrypt/tokenise sensitive "
+            "columns; monitor bulk reads.", ["CWE-200", "CWE-522"], kind="data_at_rest")]
+    return [_finding(
+        "info", f"Database inventory ({ndb} db, {total} tables)", tgt,
+        f"Enumerated {ndb} database(s) and {total} table(s); no obviously sensitive "
+        "column/table names matched.", "impacket-mssqlclient", "",
+        "n/a - informational inventory.", ["CWE-200"], kind="data_at_rest")]
+
+
+# --- proof of impact: reversible write + permission modification ----------------
+
+def build_write_proof_script(token: str) -> str:
+    """A self-contained, REVERSIBLE proof of write access: create a table, write a
+    field, modify it (before -> after), drop it. If sysadmin, also toggle a temp
+    login's server-role membership and revert. Everything is undone in-script."""
+    t = token
+    return (
+        "SELECT '@@W:begin'\n"
+        f"CREATE TABLE ##recce_{t} (id INT, note VARCHAR(64))\n"
+        f"INSERT INTO ##recce_{t} VALUES (1,'before')\n"
+        f"SELECT 'INSERT|'+note FROM ##recce_{t} WHERE id=1\n"
+        f"UPDATE ##recce_{t} SET note='MODIFIED_{t}' WHERE id=1\n"
+        f"SELECT 'UPDATE|'+note FROM ##recce_{t} WHERE id=1\n"
+        f"DROP TABLE ##recce_{t}\n"
+        "IF IS_SRVROLEMEMBER('sysadmin')=1 BEGIN "
+        f"CREATE LOGIN recce_{t} WITH PASSWORD='R3cce_{t}!Aa', CHECK_POLICY=OFF; "
+        f"ALTER SERVER ROLE dbcreator ADD MEMBER recce_{t}; "
+        f"SELECT 'PERM|'+CAST(IS_SRVROLEMEMBER('dbcreator','recce_{t}') AS varchar(2)); "
+        f"ALTER SERVER ROLE dbcreator DROP MEMBER recce_{t}; "
+        f"DROP LOGIN recce_{t}; END\n"
+        "SELECT '@@W:end'\nexit\n")
+
+
+def parse_write_proof(output: str) -> dict:
+    """Extract INSERT|.., UPDATE|.., PERM|.. evidence lines from the proof output."""
+    import re
+    m = re.search(r"@@W:begin\b(.*?)@@W:end\b", output, re.S)
+    ev = {}
+    if m:
+        for line in m.group(1).splitlines():
+            s = line.strip()
+            for tag in ("INSERT", "UPDATE", "PERM"):
+                if s.startswith(tag + "|"):
+                    ev[tag.lower()] = s.split("|", 1)[1]
+    return ev
+
+
+def prove_write(ip: str, creds: dict, token: str, port: int = _DEFAULT_PORT,
+                windows_auth: bool = True):
+    """Run the reversible write proof. Returns (evidence, error)."""
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+    if cmd is None:
+        return None, "impacket-mssqlclient not installed"
+    out, err = _run_stdin(cmd, build_write_proof_script(token))
+    if err:
+        return None, err
+    ev = parse_write_proof(out)
+    if not ev.get("update"):
+        return None, "write not proven (no permission / login failed)"
+    return ev, None
+
+
+def write_proof_finding(target: dict, ev: dict, creds: dict | None):
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    parts = ["created a table, wrote a row ('before'), then MODIFIED the field to "
+             f"'{ev.get('update', '')}', and dropped the table (reverted)"]
+    if ev.get("perm") == "1":
+        parts.append("added a temporary login to the 'dbcreator' server role, "
+                     "confirmed the membership, then removed it and dropped the login "
+                     "(reverted)")
+    return _finding(
+        "critical", "Proved write + permission-modify capability (reversible)", tgt,
+        "Demonstrated impact non-destructively: " + "; ".join(parts) + ".",
+        "impacket-mssqlclient",
+        "recce mssql -u <user> -p <pass> --prove-write   # reversible proof",
+        "Restrict DDL/DML and role-management rights to least privilege.",
+        ["CWE-269", "CWE-284"], kind="write_proof")
 
 
 # --- top-level analysis ---------------------------------------------------------

