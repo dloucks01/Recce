@@ -97,9 +97,37 @@ def _open_store(db_path: str):
         return None
 
 
+def _relax_perms(path: str, mode: int = 0o777) -> None:
+    """Best-effort chmod of the engagement tree to `mode` (default 777).
+
+    recce is frequently run under sudo (raw socket scans, reading protected files),
+    which leaves root-owned output a normal user can't reopen or edit afterward.
+    We relax the whole output folder - every subdir and file - so the operator
+    keeps full access regardless of how recce was invoked. Best-effort: a file
+    owned by another user (that we can't chmod) is skipped, never fatal."""
+    if not path or not os.path.isdir(path):
+        return
+    targets = [path]
+    for root, dirs, files in os.walk(path):
+        targets.extend(os.path.join(root, n) for n in dirs)
+        targets.extend(os.path.join(root, n) for n in files)
+    for t in targets:
+        try:
+            os.chmod(t, mode)
+        except OSError:
+            pass
+
+
 def _open_paths(out_dir: str) -> dict[str, str]:
     raw = os.path.join(out_dir, "raw")
     os.makedirs(raw, exist_ok=True)
+    # Keep the engagement folder world-accessible even when recce runs as root, so
+    # the operator can always reopen/edit the outputs (see _relax_perms).
+    try:
+        os.chmod(out_dir, 0o777)
+        os.chmod(raw, 0o777)
+    except OSError:
+        pass
     return {
         "raw": raw,
         "db": os.path.join(out_dir, "results.sqlite"),
@@ -3031,3 +3059,9 @@ def main(argv: list[str] | None = None) -> int:
             print("    Any data collected so far is saved. Re-run to continue; "
                   "set RECCE_DEBUG=1 to see the full traceback for a bug report.")
         return 1
+    finally:
+        # Relax the engagement folder to 777 on every exit path (success, Ctrl-C,
+        # or crash) so a sudo run never leaves the operator locked out of outputs.
+        out_dir = getattr(args, "output_dir", None)
+        if out_dir:
+            _relax_perms(out_dir)

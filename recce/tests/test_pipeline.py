@@ -3,6 +3,7 @@
 import contextlib
 import io
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -3243,6 +3244,47 @@ class ListenerBackfillTest(unittest.TestCase):
             st.close()
         binp = {(p.protocol, p.portid): p.binary for p in back.ports}
         self.assertEqual(binp[("tcp", 80)], "/usr/sbin/nginx")
+
+
+class EngagementPermsTest(unittest.TestCase):
+    def test_relax_perms_makes_tree_777(self):
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, "raw")
+            os.makedirs(sub)
+            f1 = os.path.join(d, "report.html")
+            f2 = os.path.join(sub, "10.0.0.5.xml")
+            for f in (f1, f2):
+                with open(f, "w") as fh:
+                    fh.write("x")
+                os.chmod(f, 0o600)          # simulate a root-created, locked file
+            os.chmod(sub, 0o700)
+            cli._relax_perms(d)
+            for p in (d, sub, f1, f2):
+                self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o777, p)
+
+    def test_relax_perms_is_best_effort_on_missing_dir(self):
+        from recce import cli
+        cli._relax_perms("/nonexistent/path/xyz")      # must not raise
+
+    def test_open_paths_relaxes_output_dir(self):
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "engagement")
+            cli._open_paths(out)
+            self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o777)
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(out, "raw")).st_mode),
+                             0o777)
+
+    def test_main_finally_relaxes_perms_even_on_early_return(self):
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            # attackpath with no datastore returns 1 early - the finally must still
+            # relax the folder that _open_paths created.
+            rc = cli.main(["attackpath", "-o", out])
+            self.assertEqual(rc, 1)
+            self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o777)
 
 
 class AVAwarenessTest(unittest.TestCase):

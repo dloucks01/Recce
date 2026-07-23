@@ -141,6 +141,15 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
       `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
       version from its `readme.txt` Stable tag.
+- **Engagement folder stays operator-accessible after sudo runs.** recce often
+  runs under sudo (raw-socket scans, reading protected files), which left the
+  output files root-owned and unreadable/uneditable to the normal user afterward.
+  recce now chmods the whole engagement folder — every subdirectory and file — to
+  **777** on every exit path (success, Ctrl-C, or crash, via a `finally`), and
+  relaxes the folder as soon as it's created, so the operator always keeps full
+  access to the workbook/reports/loot regardless of how recce was invoked.
+  Best-effort: a file owned by another user that can't be chmod'd is skipped, never
+  fatal.
 - **On-target listener backfill — the binary behind every service.** The read-only
   enum scripts now emit a machine-parseable **listening-service inventory**: for
   each listening socket, `proto/addr/port` + the owning **process**, its **PID**,
