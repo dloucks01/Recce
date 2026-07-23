@@ -1315,8 +1315,17 @@ def cmd_web(args: argparse.Namespace) -> int:
           f"{' (authenticated)' if auth else ''} ...")
     total_findings = 0
     creds = getattr(args, "creds", False)
+    do_crawl = getattr(args, "crawl", False)
+
+    def _scan(h):
+        profiles = web.scan_host(h, active, auth, creds)
+        if do_crawl:
+            pages, added = web.scan_crawl(h, auth)
+            print(f"    [{h.ip}] crawled {pages} page(s), +{added} finding(s)")
+        return profiles
+
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(web.scan_host, h, active, auth, creds): h for h in targets}
+        futures = {ex.submit(_scan, h): h for h in targets}
         for fut in as_completed(futures):
             h = futures[fut]
             try:
@@ -2825,6 +2834,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wb.add_argument("--creds", action="store_true",
                     help="also try a tiny documented default-credential list against "
                          "HTTP Basic-auth endpoints (lockout-aware, <=5 tries/endpoint)")
+    wb.add_argument("--crawl", action="store_true",
+                    help="same-origin crawl each site (authenticated with --cookie/"
+                         "--header): discover pages/params/forms, test discovered "
+                         "params for reflection/SSTI, flag cleartext-login / no-CSRF forms")
     wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.

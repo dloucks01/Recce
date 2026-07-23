@@ -2561,8 +2561,13 @@ class WebModuleTest(unittest.TestCase):
                 if self.path == "/":
                     body = (b"<html><head><title>My Site</title>"
                             b"<script src=\"/app.js\"></script></head><body>"
+                            b"<a href=\"/page2?q=1\">next</a>"
+                            b"<form method=post action=/login>"
+                            b"<input type=text name=user><input type=password name=pw></form>"
                             b"Directory listing for /  wp-content/themes</body></html>")
                     return self._send(200, body, extra={"Set-Cookie": "PHPSESSID=abc; path=/"})
+                if self.path.startswith("/page2"):
+                    return self._send(200, b"<html><body>page two</body></html>")
                 return self._send(404, b"nope")
 
         cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
@@ -2650,6 +2655,23 @@ class WebModuleTest(unittest.TestCase):
         self.assertIn("web-wp-plugin", sids)     # woocommerce readme
         js = next(v for v in findings if v.script_id == "web-js-secret")
         self.assertIn("Google API key", js.title)
+
+    def test_authenticated_crawl_discovers_pages_forms_and_params(self):
+        from recce import web
+        cres = web.crawl("127.0.0.1", self._port(), auth={"Cookie": "PHPSESSID=abc"})
+        paths = {p["path"] for p in cres["pages"]}
+        self.assertIn("/page2?q=1", paths)                     # followed the link
+        self.assertIn(("/page2", "q"), cres["params"])         # captured the param
+        self.assertTrue(any(f["password"] for f in cres["forms"]))   # parsed the login form
+
+    def test_crawl_flags_cleartext_login_and_reflected_param(self):
+        from recce import web
+        cres = web.crawl("127.0.0.1", self._port())
+        fs = web._crawl_findings("127.0.0.1", self._port(), cres)
+        self.assertIn("web-cleartext-login", {v.script_id for v in fs})   # pw form over HTTP
+        # discovered-param reflection: the server evaluates {{7*7}} on ?rc=
+        ref = web._reflect_param("127.0.0.1", self._port(), "/", "rc", None)
+        self.assertEqual(ref[0].script_id, "web-ssti")
 
     def test_jwt_alg_none_detected(self):
         from recce import web
