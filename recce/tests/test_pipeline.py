@@ -3351,6 +3351,65 @@ class MssqlTest(unittest.TestCase):
             v = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
             self.assertIn("chain to SYSADMIN on DW02SRV", v)     # in the main totals
 
+    def test_verify_dbowner_confirms_and_guards_context(self):
+        from recce import mssql
+        # db_owner=1 and DB_NAME() matches -> confirmed.
+        ok = mssql.parse_dbowner("@@DBO:0\n1|payroll\n@@DBOE:0\n", ["payroll"])
+        self.assertTrue(ok["payroll"])
+        # db_owner=1 but a failed USE left us in another db -> NOT confirmed.
+        bad = mssql.parse_dbowner("@@DBO:0\n1|master\n@@DBOE:0\n", ["payroll"])
+        self.assertFalse(bad["payroll"])
+        # db_owner=0 -> not confirmed.
+        no = mssql.parse_dbowner("@@DBO:0\n0|payroll\n@@DBOE:0\n", ["payroll"])
+        self.assertFalse(no["payroll"])
+
+    def test_trustworthy_chain_confirmed_vs_candidate(self):
+        from recce import mssql
+        enum = mssql.parse_enum(
+            "@@B:server\nSQL01|CORP\\alice|0|1|15.0.2000.5\n@@E:server\n"
+            "@@B:logins\nsa|1\n@@E:logins\n"
+            "@@B:databases\npayroll|1|sa\n@@E:databases\n"
+            "@@B:links\n@@E:links\n@@B:impersonate\n@@E:impersonate\n"
+            "@@B:config\n@@E:config\n@@B:hashes\n@@E:hashes\n")
+        t = {"ip": "10.0.0.50", "port": 1433}
+        # Candidate (no verification): high.
+        fs, _c, _s = mssql.chains_from_enum(t, enum, {"user": "alice"})
+        tw = next(f for f in fs if "TRUSTWORTHY" in f["title"])
+        self.assertEqual(tw["severity"], "high")
+        # Verified db_owner: critical + CONFIRMED wording.
+        fs2, _c2, s2 = mssql.chains_from_enum(t, enum, {"user": "alice"},
+                                              dbo_map={"payroll": True})
+        tw2 = next(f for f in fs2 if "CONFIRMED privesc" in f["title"])
+        self.assertEqual(tw2["severity"], "critical")
+        self.assertEqual(s2["dbowner_confirmed"], ["payroll"])
+        # Verified NOT db_owner: no trustworthy finding at all.
+        fs3, _c3, _s3 = mssql.chains_from_enum(t, enum, {"user": "alice"},
+                                               dbo_map={"payroll": False})
+        self.assertFalse([f for f in fs3 if "TRUSTWORTHY" in f["title"]
+                          or "CONFIRMED" in f["title"]])
+
+    def test_relay_targets_and_finding(self):
+        from recce import mssql
+        hosts = [
+            Host(ip="10.0.0.50", ports=[Port(portid=1433, service="ms-sql-s")]),
+            Host(ip="10.0.0.9", roles=["Domain Controller"],
+                 ports=[Port(portid=389, service="ldap")]),
+            Host(ip="10.0.0.20", smb_signing="not required",
+                 ports=[Port(portid=445, service="microsoft-ds")]),
+            Host(ip="10.0.0.60", ports=[Port(portid=1433, service="ms-sql-s")]),
+        ]
+        rt = mssql.relay_targets(hosts, "10.0.0.50")
+        kinds = {r["kind"] for r in rt}
+        self.assertEqual(kinds, {"ldap", "mssql", "smb"})
+        self.assertTrue(any(r["target"] == "10.0.0.9" for r in rt))       # DC ldap
+        self.assertTrue(any(r["target"] == "10.0.0.60:1433" for r in rt))  # other mssql
+        self.assertFalse(any("10.0.0.50" in r["target"] for r in rt))      # not itself
+        f = mssql.relay_finding({"ip": "10.0.0.50", "port": 1433}, rt, "10.10.14.5",
+                                {"user": "alice"})
+        self.assertIn("ntlmrelayx", f["command"])
+        self.assertIn("xp_dirtree", f["command"])
+        self.assertIn("10.10.14.5", f["command"])                          # lhost filled
+
     def test_live_enum_flows_into_sheet_and_totals(self):
         from unittest import mock
         from recce import cli, mssql, xlsx

