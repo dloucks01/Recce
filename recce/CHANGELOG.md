@@ -39,6 +39,27 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Added
+- **`recce web` — web-facing services get their own category + deep scanning.**
+  Every HTTP/HTTPS endpoint recce found (on ANY port, not just 80/443) is
+  identified, categorized on a new **Web** workbook tab with its tech stack and
+  the exact Kali deep-scan commands (whatweb / nikto / nuclei / gobuster / wpscan /
+  sslscan, tailored to the detected stack). `recce web` then runs a stdlib,
+  non-intrusive deep scan of each endpoint:
+  - **tech fingerprint** (Server / X-Powered-By, framework cookies, CMS body
+    signatures, `<title>`, meta generator),
+  - **high-signal exposures** — `.git`/`.env`/`.svn`, Apache `server-status`,
+    Spring **actuator** (+`/env`), `phpinfo`, readable `web.config`, Swagger,
+    Tomcat Manager, WordPress — flagged **only when the response actually matches
+    the signature** (the probe fetches it, so it's a real observation),
+  - **directory listing**, **dangerous HTTP methods** (PUT/DELETE/TRACE via
+    OPTIONS), **weak cookie flags** (HttpOnly/Secure), plus the existing
+    security-header + TLS analysis.
+  Findings fold into Vulnerabilities and flow through the **same prove + PoC**
+  machinery: `recce prove` renders web verdicts (an exposed `.git` the probe
+  fetched is CONFIRMED; a PUT advertised in OPTIONS is LIKELY with the curl to
+  finish proving), and `exploitplan` writes a benign `recce_poc_web.sh` (curl-based
+  proof requests). Airgapped-safe, stdlib only; heavier scanning is bridged to the
+  Kali tools. `--no-active` keeps it to passive fingerprint + headers/TLS.
 - **`exploitplan` now emits benign PoC build recipes — the payload source, the
   build command, and the delivery — not just "drop a binary here."** For each
   confirmed finding it writes the standard, documented artifact to

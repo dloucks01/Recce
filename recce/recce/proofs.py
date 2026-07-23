@@ -264,6 +264,22 @@ def _v_asrep(host, port, vuln):
                        "Prove: impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass -> hashcat -m 18200."]
 
 
+def _v_web_exposure(host, port, vuln):
+    # These findings come from OUR probe actually fetching the resource and matching
+    # its signature - a direct observation, so they're CONFIRMED by definition.
+    return CONFIRMED, ["recce fetched the resource itself and the response matched the signature "
+                       "(the finding output shows the exact URL + HTTP status) -> directly confirmed.",
+                       "Re-verify anytime with the curl in the finding, or the Kali command on the Web tab "
+                       "(whatweb / nikto / nuclei). For .git, dump it: git-dumper <url>/.git ./loot."]
+
+
+def _v_web_methods(host, port, vuln):
+    return LIKELY, ["The server advertised the method(s) in its OPTIONS Allow header (observed).",
+                    "Prove impact non-destructively: curl -sk -X PUT <url>/recce_poc.txt -d 'recce_poc' "
+                    "then GET it back. A stored file = real upload primitive; 403/405 = advertised but "
+                    "not actually allowed (FP)."]
+
+
 def _v_default_creds(host, port, vuln):
     return LIKELY, ["Default/weak credentials are only proven by trying them (mind account-lockout policy so "
                     "you don't lock the account).",
@@ -383,6 +399,23 @@ _RECIPES: list[dict] = [
      "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
      "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
      "fn": _v_asrep},
+    {"id": "web-exposure", "match": r"exposed (git|\.git|svn|\.env|\.svn)|\.env file|"
+                                    r"mod_status exposed|actuator exposed|actuator /env|phpinfo|"
+                                    r"web\.config readable|directory listing enabled|swagger",
+     "name": "Web exposure (VCS / config / status endpoint)",
+     "pre": ["The resource is reachable and returns the sensitive content"],
+     "finish": "curl -sk <url>/<path> to re-read it; for a .git repo: git-dumper <url>/.git ./loot "
+               "then review the source/secrets. Web tab has whatweb/nikto/nuclei for the rest.",
+     "fp": "It's an observation - the probe already fetched it. The only nuance is whether the exposed "
+           "content is actually sensitive.",
+     "fn": _v_web_exposure},
+    {"id": "web-methods", "match": r"dangerous http methods|http method.*enabled|put.*enabled",
+     "name": "Dangerous HTTP methods (PUT/DELETE/TRACE)",
+     "pre": ["The server advertises a write/dangerous method in OPTIONS Allow"],
+     "finish": "curl -sk -X PUT <url>/recce_poc.txt -d 'recce_poc' ; curl -sk <url>/recce_poc.txt "
+               "(a stored file = real). Remove it afterwards.",
+     "fp": "PUT is advertised but returns 403/405 when actually invoked.",
+     "fn": _v_web_methods},
     {"id": "default-creds", "match": r"default (credential|password|login)|weak credential|"
                                      r"default (user|account)",
      "name": "Default / weak credentials",

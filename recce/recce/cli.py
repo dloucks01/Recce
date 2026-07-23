@@ -1275,6 +1275,59 @@ def _match_one_host(hosts, selector):
     return [h for h in hosts if h.ip == sel] if sel else []
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """Deep-enumerate every web-facing endpoint: fingerprint the stack and run the
+    non-intrusive checks (exposed .git/.env, server-status/actuator, directory
+    listing, dangerous methods, cookie flags, headers/TLS). Findings fold into the
+    workbook; each endpoint gets the exact Kali deep-scan commands."""
+    from . import web
+    print(BANNER)
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    active = not getattr(args, "no_active", False)
+    targets = [h for h in hosts if any(web.is_web(p) for p in h.open_ports)]
+    if not targets:
+        print("[!] No HTTP/HTTPS endpoints found. Run `enum` (services) first.")
+        store.close()
+        return 0
+    workers = max(1, getattr(args, "workers", 6))
+    n_ep = sum(1 for h in targets for p in h.open_ports if web.is_web(p))
+    print(f"[*] Web-scanning {n_ep} endpoint(s) on {len(targets)} host(s) "
+          f"with {workers} worker(s){'' if active else ' (passive)'} ...")
+    total_findings = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(web.scan_host, h, active): h for h in targets}
+        for fut in as_completed(futures):
+            h = futures[fut]
+            try:
+                profiles = fut.result()
+            except Exception as e:  # noqa: BLE001 - one host never aborts the sweep
+                _record_issues(store, paths, h.ip, [{"phase": "web", "level": "warning",
+                               "message": f"web scan failed: {e}"}])
+                continue
+            _persist_host(store, paths, h.ip, "web", h)
+            for pr in profiles:
+                tech = f"  [{', '.join(pr['tech'])}]" if pr["tech"] else ""
+                wv = sum(1 for v in h.vulns if v.port == pr["port"] and v.source == "web")
+                total_findings += wv
+                print(f"    {pr['url']:<28} {pr.get('server', '') or '?':<20}"
+                      f"{tech}  ({wv} finding(s))")
+    _final_report(store, paths, store.get_meta("engagement") or args.title)
+    store.close()
+    print(f"\n[+] {total_findings} web finding(s) folded in. See the Web tab (endpoints "
+          f"+ Kali deep-scan commands) and Vulnerabilities/Verification in "
+          f"{paths['xlsx']}.")
+    print("    Prove them: recce prove -o " + args.output_dir)
+    return 0
+
+
 def cmd_services(args: argparse.Namespace) -> int:
     """Print the exact per-service enumeration command to run for every open port
     recce found - the bridge from the datastore to recce/scripts/. Answers 'what
@@ -2703,6 +2756,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sv.add_argument("-a", "--aggressive", action="store_true",
                     help="append -a to each command (enable the intrusive checks)")
     sv.set_defaults(func=cmd_services)
+
+    # Deep web enumeration: fingerprint + non-intrusive checks on every HTTP(S) port.
+    wb = sub.add_parser("web",
+                        help="deep-enumerate web endpoints (tech fingerprint + "
+                             "exposed .git/.env, actuator, methods, headers/TLS)")
+    wb.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    wb.add_argument("-o", "--output-dir", default="engagement")
+    wb.add_argument("--title", default="Recce Engagement")
+    wb.add_argument("--workers", type=int, default=6,
+                    help="concurrent hosts to scan at once (default: 6)")
+    wb.add_argument("--no-active", action="store_true",
+                    help="passive only: headers/TLS fingerprint, skip the path/method "
+                         "probes (no requests beyond the root)")
+    wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.
     ep = sub.add_parser("exploitplan",

@@ -2486,6 +2486,104 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertTrue(any("Writable service binary/registry" in t for t in titles))
 
 
+class WebModuleTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body=b"", extra=None):
+                self.send_response(code)
+                self.send_header("Server", "Apache/2.4.49 (Unix)")
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+            def do_HEAD(self):
+                self._send(200)
+
+            def do_OPTIONS(self):
+                self._send(200, extra={"Allow": "GET, POST, PUT, OPTIONS"})
+
+            def do_GET(self):
+                if self.path == "/.git/HEAD":
+                    return self._send(200, b"ref: refs/heads/main\n")
+                if self.path == "/.env":
+                    return self._send(200, b"APP_KEY=base64:x\nDB_PASSWORD=secret\n")
+                if self.path == "/":
+                    body = (b"<html><head><title>My Site</title></head><body>"
+                            b"Directory listing for /  wp-content/themes</body></html>")
+                    return self._send(200, body, extra={"Set-Cookie": "PHPSESSID=abc; path=/"})
+                return self._send(404, b"nope")
+
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def _port(self):
+        return Port(portid=self.port, service="http", state="open")
+
+    def test_fingerprint_from_headers_and_body(self):
+        from recce import web
+        fp = web.fingerprint({"server": "nginx", "set-cookie": "JSESSIONID=1"},
+                             "<title>Home</title> wp-content")
+        self.assertIn("server=nginx", fp["tech"])
+        self.assertIn("Java/Servlet", fp["tech"])
+        self.assertIn("WordPress", fp["tech"])
+        self.assertEqual(fp["title"], "Home")
+
+    def test_deep_scan_finds_git_env_listing_methods_cookie(self):
+        from recce import web
+        profile, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        sids = {v.script_id for v in findings}
+        self.assertIn("web-git", sids)          # exposed .git
+        self.assertIn("web-dotenv", sids)       # exposed .env
+        self.assertIn("web-dirlisting", sids)   # directory listing
+        self.assertIn("web-methods", sids)      # PUT advertised
+        self.assertIn("web-cookie", sids)       # no HttpOnly
+        self.assertIn("WordPress", profile["tech"])
+        # The .git finding is high severity and carries the exact URL.
+        git = next(v for v in findings if v.script_id == "web-git")
+        self.assertEqual(git.severity, "high")
+        self.assertIn("/.git/HEAD", git.output)
+
+    def test_passive_mode_skips_path_probes(self):
+        from recce import web
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=False)
+        self.assertNotIn("web-git", {v.script_id for v in findings})
+
+    def test_web_endpoints_categorization_and_bridge(self):
+        from recce import web
+        h = Host(ip="127.0.0.1", ports=[self._port(),
+                                        Port(portid=445, service="microsoft-ds", state="open")])
+        h.vulns = web_git = []
+        eps = web.web_endpoints([h])
+        self.assertEqual(len(eps), 1)                    # only the http port
+        self.assertIn("whatweb", eps[0]["commands"])
+        self.assertIn("nikto", eps[0]["commands"])
+
+    def test_web_proof_and_poc_wiring(self):
+        from recce import proofs, poc
+        v = Vuln(ip="1.1.1.1", port=80, protocol="tcp", script_id="web-git",
+                 title="Exposed Git repository (.git) - source/secret disclosure",
+                 output="GET http://1.1.1.1/.git/HEAD -> HTTP 200", source="web")
+        r = proofs.recipe_for(v)
+        self.assertEqual(r["id"], "web-exposure")
+        self.assertEqual(r["fn"](Host(ip="1.1.1.1"), None, v)[0], proofs.CONFIRMED)
+        self.assertEqual(poc.recipe_key_for(v.title), "web")
+
+
 class PocRecipeTest(unittest.TestCase):
     def test_finding_text_selects_the_right_recipe(self):
         from recce import poc
