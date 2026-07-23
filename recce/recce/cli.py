@@ -618,11 +618,13 @@ def _vuln_worker(host, portids, profile, paths, creds, aggressive, use_ss,
             p.vuln_scanned = True
     ad.identify_roles(host)
     ad.parse_signing_and_ntlm(host)
-    from . import vulndb
-    vulndb.assess_host_inplace(host)   # offline version->CVE findings
+    # Deep web enum runs BEFORE the CVE mapping so a product/version recovered from
+    # a web fingerprint (Jenkins/Confluence/…) gets version->CVE matched too.
     if use_probes:
         from . import web
-        web.scan_host(host, active=True)   # deep web enum (headers/TLS + exposures)
+        web.scan_host(host, active=True)   # headers/TLS + exposures + fingerprint
+    from . import vulndb
+    vulndb.assess_host_inplace(host)   # offline version->CVE findings
     if use_ss:
         exploits.enrich_hosts([host])
     return host, issues
@@ -1312,8 +1314,9 @@ def cmd_web(args: argparse.Namespace) -> int:
           f"with {workers} worker(s){'' if active else ' (passive)'}"
           f"{' (authenticated)' if auth else ''} ...")
     total_findings = 0
+    creds = getattr(args, "creds", False)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(web.scan_host, h, active, auth): h for h in targets}
+        futures = {ex.submit(web.scan_host, h, active, auth, creds): h for h in targets}
         for fut in as_completed(futures):
             h = futures[fut]
             try:
@@ -2819,6 +2822,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wb.add_argument("--screenshots", action="store_true",
                     help="also capture a headless-browser screenshot per endpoint "
                          "-> engagement/screenshots/ (needs chromium/firefox)")
+    wb.add_argument("--creds", action="store_true",
+                    help="also try a tiny documented default-credential list against "
+                         "HTTP Basic-auth endpoints (lockout-aware, <=5 tries/endpoint)")
     wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.
