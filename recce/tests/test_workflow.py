@@ -188,11 +188,11 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
             for r in rs:
                 if r["Exploit"].startswith("candidate"):
                     self.assertIn("verify", r["Exploit"].lower())
-        # Overview 'proven exploit' tile counts only the curated (non-candidate) ones.
+        # Overview 'curated exploit' tile counts only the curated (non-candidate) ones.
         n_proven = sum(1 for rs in by_ip.values() for r in rs
                        if r["Exploit"] and not r["Exploit"].startswith("candidate"))
         ov = ["|".join(str(c) for c in r) for r in self.sheets["Overview"]]
-        self.assertTrue(any(f"Findings with a proven exploit|{n_proven}" in t for t in ov))
+        self.assertTrue(any(f"Findings with a curated exploit|{n_proven}" in t for t in ov))
         self.assertEqual(by_ip.get("10.0.10.25", []), [])
 
     def test_vuln_row_counts_match_per_host(self):

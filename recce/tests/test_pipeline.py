@@ -259,6 +259,79 @@ class TrackingRoundTripTest(unittest.TestCase):
         self.assertFalse(back[tr.host_key("10.0.20.6")][0])
 
 
+class WorkbookFlowTest(unittest.TestCase):
+    """The sheet order follows the engagement flow, with the service deep-dive band
+    grouped and the AD cluster kept contiguous."""
+
+    def _build(self):
+        from recce.models import Domain, Vuln
+        from recce import xlsx
+
+        def V(ip, port, sid, title, sev, src):
+            return Vuln(ip=ip, port=port, protocol="tcp", script_id=sid, title=title,
+                        severity=sev, source=src, state="finding")
+        hosts = [
+            Host(ip="10.0.0.11", os_family="Windows", roles=["Domain Controller"],
+                 enumerated=True,
+                 ports=[Port(portid=445, state="open", service="microsoft-ds"),
+                        Port(portid=1433, state="open", service="ms-sql-s",
+                             product="Microsoft SQL Server")],
+                 vulns=[V("10.0.0.11", 445, "smb:x", "SMB signing not required",
+                          "medium", "smb"),
+                        V("10.0.0.11", 1433, "mssql:x", "MSSQL sysadmin",
+                          "critical", "mssql")]),
+            Host(ip="10.0.0.22", os_family="Linux", enumerated=True,
+                 ports=[Port(portid=2375, state="open", service="docker")],
+                 vulns=[V("10.0.0.22", 2375, "docker:x",
+                          "Docker Engine API exposed without authentication",
+                          "critical", "docker")]),
+        ]
+        m = {"targets": [{"ip": "x", "port": 1}], "findings": [], "runbooks": []}
+        meta = {"subtitle": "Flow", "mssql": m, "smb": m, "docker": m,
+                "ad_bloodhound": {"findings": [{"severity": "high",
+                    "title": "Kerberoastable", "principal": "svc", "target": "",
+                    "detail": "d", "tool": "t", "command": "c", "remediation": "r",
+                    "category": "kerberoast", "cwes": ["CWE-262"]}],
+                    "paths": [{"start": "a", "target": "DA", "chain": "x", "length": 1,
+                               "who": "a", "steps": [], "any_user": False}],
+                    "kerberos": [], "domains": [{"name": "corp.local"}], "stats": {}}}
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, out, meta=meta,
+                           domains=[Domain(name="corp.local", dc_ips=["10.0.0.11"])])
+            return list(xlsx.read_sheets(out).keys()), xlsx.read_sheets(out)
+
+    def test_service_band_and_ad_cluster_are_grouped(self):
+        tabs, _ = self._build()
+        pos = {t: i for i, t in enumerate(tabs)}
+        # Service deep-dive band is contiguous and sits right after Databases.
+        self.assertLess(pos["Databases"], pos["MSSQL"])
+        self.assertEqual(pos["SMB"], pos["MSSQL"] + 1)
+        self.assertEqual(pos["Docker"], pos["SMB"] + 1)
+        # The whole service band precedes the AD cluster.
+        self.assertLess(pos["Docker"], pos["Active Directory"])
+        # AD cluster is contiguous: inventory -> quick wins -> findings -> paths.
+        self.assertEqual(pos["AD Quick Wins"], pos["Active Directory"] + 1)
+        self.assertEqual(pos["AD Findings"], pos["AD Quick Wins"] + 1)
+        self.assertEqual(pos["AD Attack Paths"], pos["AD Findings"] + 1)
+        # Exploit/chain the foothold BEFORE post-ex priv-esc.
+        self.assertLess(pos["Exploitation"], pos["Priv-Esc"])
+        self.assertLess(pos["Attack Path"], pos["Priv-Esc"])
+
+    def test_overview_shows_confirmed_metric_and_nav_matches_order(self):
+        tabs, sheets = self._build()
+        ov = ["|".join(str(c) for c in r) for r in sheets["Overview"]]
+        self.assertTrue(any("Confirmed by recce (prove engine)" in t for t in ov))
+        # The jump-bar lists the tabs in the same left-to-right order they appear.
+        navrow = next((r for r in sheets["Overview"]
+                       if any(str(c).strip() == "Checklist" for c in r)), None)
+        self.assertIsNotNone(navrow)
+        nav = [str(c).strip() for c in navrow if str(c).strip()
+               and str(c).strip() != "Jump to"]
+        nav_in_tabs = [t for t in nav if t in tabs]
+        self.assertEqual(nav_in_tabs, sorted(nav_in_tabs, key=lambda t: tabs.index(t)))
+
+
 class PortStatusTest(unittest.TestCase):
     """Per-port tri-state work status on the Services sheet."""
 
@@ -2256,8 +2329,8 @@ class CheckboxPersistenceTest(unittest.TestCase):
                                   severity="high", source="nse", ids=["CVE-2017-0143"],
                                   output="VULNERABLE")])]
         creds = [Credential(username="alice", secret="Pw!", domain="CORP")]
-        pre, post = rx._ordered_specs(hosts, None, creds)
-        for spec in pre + post:
+        pre, ad_specs, tail = rx._ordered_specs(hosts, None, creds)
+        for spec in pre + list(ad_specs.values()) + tail:
             cb = [h for h, role, _w in spec.cols if role == "checkbox"]
             for header in cb:
                 self.assertIn(header, rx.CHECKBOX_HEADERS,
