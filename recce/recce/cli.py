@@ -351,6 +351,8 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.verify = False
     if g("verify_all"):
         profile.verify_all = True
+    if g("no_udp_fallback"):
+        profile.udp_fallback = False
     if g("reliable"):
         profile.reliable = True
     if g("udp_top"):
@@ -456,10 +458,16 @@ def _mkissue(scan_issue, phase: str) -> dict:
             "message": scan_issue.message}
 
 
-def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=True):
+def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=True,
+                 disc_reason=""):
     """Returns (host|None, issues)."""
     issues: list[dict] = []
     truncated = False
+    # Proof-of-life reason for this host. Seeded with the discovery reply (echo-reply
+    # /syn-ack/arp-response) when host discovery ran; a UDP fallback below can supply
+    # one for a silent -Pn host. Empty stays empty -> the host build falls back to
+    # "user-set" under -Pn, which is-NOT proof (keeps it off the confirmed-up list).
+    up_reason = disc_reason
     if port_map is not None:
         open_ports = port_map.get(ip, [])
     else:
@@ -489,6 +497,24 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
                     f"verification re-scan found {len(vports)} - the first sweep "
                     "under-reported (network likely lossy); used the re-scan"),
                     "port-sweep"))
+        # UDP fallback: still silent on TCP, no discovery reply, and we're treating
+        # this IP as up on faith (-Pn / discovery blocked). A UDP ping to common
+        # services tells up-behind-a-firewall apart from genuinely dead - so the host
+        # is confirmed up on a real reply instead of being written off as down.
+        if (not open_ports and not up_reason and not truncated
+                and profile.udp_fallback and profile.assume_up):
+            ulx = os.path.join(paths["raw"], f"{ip}_udpalive.xml")
+            _, uiss = scanner.udp_liveness_probe(ip, ulx, profile)
+            if uiss:                       # e.g. skipped (needs root) - surface it
+                issues.append(_mkissue(uiss, "udp-liveness"))
+            # np.parse_nmap_xml drops "down" hosts, so a host present here answered.
+            alive = next((h for h in np.parse_nmap_xml(ulx) if h.ip == ip), None)
+            if alive is not None:
+                up_reason = alive.up_reason or "udp-response"
+                issues.append(_mkissue(scanner.ScanIssue(
+                    "warning", "udp-liveness: host answered a UDP probe "
+                    f"({up_reason}) - confirmed UP despite 0 open TCP ports "
+                    "(firewalled, not dead)"), "udp-liveness"))
 
     enum_xml = os.path.join(paths["raw"], f"{ip}_enum.xml")
     _, iss = scanner.enum_scan(ip, open_ports, enum_xml, profile, creds=creds)
@@ -497,6 +523,10 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     host = _fold_host(ip, np.parse_nmap_xml(enum_xml), subnet_map)
     host.enumerated = True
     host.incomplete_scan = truncated
+    # Record how we know this host is up: a real reply (discovery or UDP fallback)
+    # when we have one, else "user-set" under -Pn (scanned on faith - not proof, so
+    # a silent host stays UNKNOWN, never marked down). An open port speaks for itself.
+    host.up_reason = up_reason or ("user-set" if profile.assume_up else host.up_reason)
     # Recover the services nmap left as unknown/blank: mine its kept fingerprint,
     # fall back to the curated port map, then a stdlib banner grab (active) - so a
     # port like 5040 becomes 'Windows CDPSvc', not a dead 'unknown'.
@@ -544,6 +574,7 @@ def _discover(args, profile, store, paths):
 
     fast_mode = getattr(args, "fast", False) or profile.scanner == "masscan"
     port_map = None
+    disc_reasons: dict[str, str] = {}   # ip -> real discovery reply reason (proof of up)
     if fast_mode:
         print("[*] Fast mode: network-wide masscan sweep ...")
         sweep_xml = os.path.join(paths["raw"], "masscan_sweep.xml")
@@ -565,7 +596,12 @@ def _discover(args, profile, store, paths):
             _, iss = scanner.discover_hosts(targets_file, disc_xml)
             if iss:
                 _record_issues(store, paths, "(discovery)", [_mkissue(iss, "discovery")])
-            live_ips = [h.ip for h in np.parse_nmap_xml(disc_xml)]
+            disc_hosts = np.parse_nmap_xml(disc_xml)
+            live_ips = [h.ip for h in disc_hosts]
+            # Carry each responder's real status reason (echo-reply/syn-ack/arp-...)
+            # into the enum phase so the stored host records HOW we know it's up.
+            disc_reasons = {h.ip: (h.up_reason or "discovery")
+                            for h in disc_hosts if h.up_reason not in ("", "user-set")}
             os.unlink(targets_file)
             print(f"[+] {len(live_ips)} of {len(hosts)} target(s) responded to discovery.")
             if not live_ips:
@@ -593,17 +629,23 @@ def _discover(args, profile, store, paths):
             print(f"    Each host is capped at {profile.host_timeout}m (--host-timeout) "
                   "and dead IPs are abandoned fast; --fast (masscan) is quickest on a "
                   "big scope.")
+            if profile.udp_fallback:
+                print("    A host still silent on TCP gets a UDP liveness ping, so a "
+                      "firewalled-but-alive box is confirmed up, not ruled dead "
+                      "(--no-udp-fallback to skip).")
 
     if getattr(args, "resume", False):
         done = store.scanned_ips()
         live_ips = [ip for ip in live_ips if ip not in done]
         print(f"[+] Resume: {len(live_ips)} host(s) remaining.")
-    return subnet_map, live_ips, port_map
+    return subnet_map, live_ips, port_map, disc_reasons
 
 
-def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map) -> None:
+def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
+                disc_reasons=None) -> None:
     creds = _creds_of(args)
     workers = max(1, args.workers)
+    disc_reasons = disc_reasons or {}
     # --no-probes disables our active stdlib layer (banner grabs); the free passive
     # layers (servicefp mining + curated port map) still run.
     active_probe = not getattr(args, "no_probes", False)
@@ -613,7 +655,8 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map) -> 
     refresher = _Refresher(args)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_enum_worker, ip, profile, paths, creds, port_map,
-                             subnet_map, active_probe): ip for ip in live_ips}
+                             subnet_map, active_probe, disc_reasons.get(ip, "")): ip
+                   for ip in live_ips}
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
@@ -1067,12 +1110,13 @@ def cmd_enum(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     store.set_meta("engagement", args.title)
-    subnet_map, live_ips, port_map = _discover(args, profile, store, paths)
+    subnet_map, live_ips, port_map, disc_reasons = _discover(args, profile, store, paths)
     if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
     try:
-        _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map)
+        _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
+                    disc_reasons)
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
     except KeyboardInterrupt:
@@ -1119,12 +1163,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     store.set_meta("engagement", args.title)
-    subnet_map, live_ips, port_map = _discover(args, profile, store, paths)
+    subnet_map, live_ips, port_map, disc_reasons = _discover(args, profile, store, paths)
     if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
     try:
-        _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map)
+        _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
+                    disc_reasons)
         _phase_vulns(store, paths, args, profile)
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
@@ -3800,6 +3845,10 @@ def _add_discovery(pp) -> None:
                    help="also re-verify 0-port hosts under -Pn (not just discovered-"
                         "live ones) - catches every missed sweep, slower on dead-IP "
                         "scopes")
+    g.add_argument("--no-udp-fallback", action="store_true",
+                   help="skip the UDP liveness ping sent to a -Pn host that stays "
+                        "silent on TCP (the ping tells a firewalled-but-alive host "
+                        "apart from a dead one; needs root for raw UDP)")
     g.add_argument("--reliable", action="store_true",
                    help="rate-limited / lossy network: drop the --min-rate floor, "
                         "retry dropped probes more, let nmap's congestion control "

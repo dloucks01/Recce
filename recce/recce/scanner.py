@@ -51,6 +51,10 @@ class ScanProfile:
                                       # confirm it's really empty vs a missed sweep
     verify_all: bool = False          # also verify 0-port hosts under -Pn (not just
                                       # discovered-live ones) - slower on dead-IP scopes
+    udp_fallback: bool = True         # for a -Pn host still silent after the TCP
+                                      # sweep+verify, send a UDP ping to common
+                                      # services: a reply / ICMP-unreach proves it's
+                                      # up, so a firewalled host isn't ruled dead
 
 
 PROFILES: dict[str, ScanProfile] = {
@@ -364,6 +368,36 @@ def verify_port_scan(ip: str, out_xml: str,
     cmd, kill = _portscan_cmd(ip, out_xml, profile, reliable=True)
     outcome = _run(cmd, timeout=kill)
     return out_xml, _issue_from(outcome, out_xml, "verify", profile.host_timeout)
+
+
+# Common UDP services that answer even when TCP and ICMP are firewalled off. A ping
+# to any of them elicits a service reply OR an ICMP port-unreachable - either one
+# proves the host is up. Kept small so the probe stays fast against dead IPs.
+_UDP_PING_PORTS = "53,67,123,137,138,161,500,514,520,623,1900,4500,5353"
+
+
+def udp_liveness_probe(ip: str, out_xml: str,
+                       profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Last-resort liveness check for a host that answered NOTHING on TCP under -Pn.
+
+    Under -Pn a silent host is genuinely ambiguous: it could be dead, or a live host
+    behind a default-drop firewall that only silences TCP+ICMP. A UDP ping to common
+    services (DNS/DHCP/NTP/NetBIOS/SNMP/IKE/Syslog/RIP/IPMI/SSDP/mDNS) catches the
+    firewalled-but-alive case - a service reply or an ICMP port-unreachable both come
+    back with a real nmap status reason (never the -Pn "user-set"), so the host flips
+    from UNKNOWN to confirmed-up instead of being written off as down.
+
+    Uses `-sn` (no -Pn) so nmap's up/down verdict is meaningful again: it reports the
+    host up ONLY on an actual reply. Needs root (raw UDP); returns a skip issue if not.
+    """
+    if not _is_root():
+        return _empty_xml(out_xml), ScanIssue(
+            "warning", "udp-liveness: skipped (needs root/CAP_NET_RAW for UDP ping)")
+    to_args, kill = _timeout_args(profile)
+    outcome = _run(["nmap", "-sn", "-n", "-PU" + _UDP_PING_PORTS,
+                    f"-T{profile.timing}", "--max-retries", "2", *to_args,
+                    ip, "-oX", out_xml], timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "udp-liveness", profile.host_timeout)
 
 
 def _masscan_ports(ip: str, out_xml: str,

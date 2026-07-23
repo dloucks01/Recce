@@ -862,6 +862,37 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("smb-os-discovery", j)          # AD enrichment scripts
         self.assertIn("80,445", j)                    # exactly the ports given
 
+    def test_udp_liveness_probe_is_a_udp_ping_without_pn(self):
+        import recce.scanner as s
+        orig_root = s._is_root
+        s._is_root = lambda: True                     # pretend we have raw-socket caps
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                calls = self._capture(s.udp_liveness_probe, "1.2.3.4",
+                                      os.path.join(d, "u.xml"), s.PROFILES["standard"])
+        finally:
+            s._is_root = orig_root
+        cmd = calls[0][0]
+        j = " ".join(cmd)
+        self.assertIn("-sn", cmd)                     # ping-only (nmap's up verdict)
+        self.assertNotIn("-Pn", cmd)                  # NOT -Pn, so up/down is meaningful
+        self.assertTrue(any(a.startswith("-PU") for a in cmd))  # UDP ping probes
+        self.assertIn("161", j)                       # SNMP among the probed ports
+        self.assertIn("53", j)                        # DNS among the probed ports
+        self.assertIn("1.2.3.4", cmd)
+
+    def test_udp_liveness_probe_needs_root(self):
+        import recce.scanner as s
+        orig_root = s._is_root
+        s._is_root = lambda: False
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                calls = self._capture(s.udp_liveness_probe, "1.2.3.4",
+                                      os.path.join(d, "u.xml"), s.PROFILES["standard"])
+        finally:
+            s._is_root = orig_root
+        self.assertEqual(calls, [])                    # no nmap run without root
+
     def test_vuln_scan_safe_vs_aggressive(self):
         import recce.scanner as s
         with tempfile.TemporaryDirectory() as d:
@@ -2046,7 +2077,7 @@ class EnumRobustnessTest(unittest.TestCase):
         store.set_scope("10.0.0.0/24", 254)
 
         def fake_worker(ip, profile, paths, creds, port_map, subnet_map,
-                        active_probe=True):
+                        active_probe=True, disc_reason=""):
             if ip == "10.0.0.11":            # worker raises
                 raise RuntimeError("boom")
             if ip == "10.0.0.12":            # timed out -> None + issue

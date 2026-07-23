@@ -1616,11 +1616,18 @@ class HostUpCertaintyTest(unittest.TestCase):
     write a live host off as down. is_up is the single source of that judgement."""
 
     def test_is_up_only_on_positive_evidence(self):
+        from recce.models import Vuln
         # An open port is unambiguous proof.
         self.assertTrue(Host(ip="1.1.1.1",
                              ports=[Port(portid=22, state="open")]).is_up)
-        # Enumeration / a finding got a response.
-        self.assertTrue(Host(ip="1.1.1.1", enumerated=True).is_up)
+        # A finding means a service actually responded.
+        self.assertTrue(Host(ip="1.1.1.1",
+                             vulns=[Vuln(ip="1.1.1.1", port=0, protocol="tcp",
+                                         script_id="x", title="t", severity="low",
+                                         source="nse", state="finding")]).is_up)
+        # `enumerated` alone is NOT proof: the pipeline sets it on every host it tries,
+        # including a dead -Pn IP that answered nothing.
+        self.assertFalse(Host(ip="1.1.1.1", enumerated=True).is_up)
         # A real nmap discovery reply (not the -Pn assume-up).
         self.assertTrue(Host(ip="1.1.1.1", up_reason="echo-reply").is_up)
         self.assertTrue(Host(ip="1.1.1.1", up_reason="arp-response").is_up)
@@ -1681,6 +1688,73 @@ class HostUpCertaintyTest(unittest.TestCase):
         blob = "\n".join(" ".join(str(c) for c in r) for r in rows)
         self.assertIn("Scanned, not confirmed up", blob)
         self.assertIn("Hosts confirmed up", blob)
+
+    def test_udp_fallback_flips_silent_pn_host_to_up(self):
+        # A -Pn host silent on TCP gets a UDP liveness ping; a reply confirms it up.
+        from recce import cli, scanner
+        saved = (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+                 scanner.verify_port_scan, scanner.udp_liveness_probe,
+                 scanner.enum_scan, cli.np.parse_nmap_xml)
+        udp_calls = {"n": 0}
+
+        def fake_parse(path):
+            # Only the UDP-liveness XML reports a live host; TCP/enum XMLs are empty.
+            if "udpalive" in path:
+                return [Host(ip="10.0.0.9", up_reason="udp-response")]
+            return []
+
+        def fake_udp(ip, out, profile):
+            udp_calls["n"] += 1
+            return out, None
+        cli._ports_for_host = lambda path, ip: []          # silent on TCP
+        cli._fold_host = lambda ip, parsed, sm: Host(ip=ip, subnet="10.0.0.0/24")
+        scanner.full_port_scan = lambda ip, out, profile: (out, None)
+        scanner.verify_port_scan = lambda ip, out, profile: (out, None)
+        scanner.udp_liveness_probe = fake_udp
+        scanner.enum_scan = lambda ip, ports, out, profile, creds=None: (out, None)
+        cli.np.parse_nmap_xml = fake_parse
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                prof = scanner.ScanProfile(ping_discovery=False, assume_up=True)
+                host, _ = cli._enum_worker("10.0.0.9", prof, {"raw": d}, None, None,
+                                           {"10.0.0.9": "10.0.0.0/24"})
+            self.assertEqual(udp_calls["n"], 1)            # UDP fallback fired
+            self.assertEqual(host.up_reason, "udp-response")
+            self.assertTrue(host.is_up)                    # up despite 0 open TCP ports
+        finally:
+            (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+             scanner.verify_port_scan, scanner.udp_liveness_probe,
+             scanner.enum_scan, cli.np.parse_nmap_xml) = saved
+
+    def test_discovery_reply_reason_propagates_and_skips_udp(self):
+        # A host discovered live carries its real reply reason into the stored host,
+        # and the UDP fallback is NOT wasted on a host we already proved is up.
+        from recce import cli, scanner
+        saved = (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+                 scanner.verify_port_scan, scanner.udp_liveness_probe,
+                 scanner.enum_scan, cli.np.parse_nmap_xml)
+        udp_calls = {"n": 0}
+        cli._ports_for_host = lambda path, ip: []          # silent on TCP
+        cli._fold_host = lambda ip, parsed, sm: Host(ip=ip, subnet="10.0.0.0/24")
+        scanner.full_port_scan = lambda ip, out, profile: (out, None)
+        scanner.verify_port_scan = lambda ip, out, profile: (out, None)
+        scanner.udp_liveness_probe = lambda ip, out, profile: (
+            udp_calls.__setitem__("n", udp_calls["n"] + 1), (out, None))[1]
+        scanner.enum_scan = lambda ip, ports, out, profile, creds=None: (out, None)
+        cli.np.parse_nmap_xml = lambda path: []
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                prof = scanner.ScanProfile(ping_discovery=True)
+                host, _ = cli._enum_worker("10.0.0.9", prof, {"raw": d}, None, None,
+                                           {"10.0.0.9": "10.0.0.0/24"},
+                                           disc_reason="echo-reply")
+            self.assertEqual(host.up_reason, "echo-reply")
+            self.assertTrue(host.is_up)
+            self.assertEqual(udp_calls["n"], 0)            # already proven up -> no UDP
+        finally:
+            (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+             scanner.verify_port_scan, scanner.udp_liveness_probe,
+             scanner.enum_scan, cli.np.parse_nmap_xml) = saved
 
     def test_merge_never_downgrades_proof_of_life(self):
         # A real reply must survive a later -Pn re-scan that only knows "user-set".

@@ -4,7 +4,24 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Added
+- **UDP liveness fallback for silent `-Pn` hosts.** Under `-Pn` a host that answers
+  nothing on TCP is genuinely ambiguous — dead, or alive behind a default-drop
+  firewall. When the TCP sweep (and its verify re-scan) come back with zero ports on
+  a host we're scanning on faith, recce now sends a UDP ping to common services
+  (DNS/DHCP/NTP/NetBIOS/SNMP/IKE/Syslog/RIP/IPMI/SSDP/mDNS). A service reply *or* an
+  ICMP port-unreachable comes back with a real nmap status reason, so the host flips
+  from UNKNOWN to **confirmed up** instead of being written off as down. Runs `-sn`
+  (not `-Pn`) so nmap's up/down verdict is meaningful again; needs root for raw UDP
+  and logs a skip otherwise; `--no-udp-fallback` disables it. The discovery-phase
+  reply reason (echo-reply/syn-ack/arp-response) now also propagates into the stored
+  host, so a ping-only responder is recorded as proven-up even with no open ports.
+
 ### Changed
+- **`Host.is_up` no longer counts `enumerated` as proof of life.** The enum phase
+  marks every host it *tries* (including a dead `-Pn` IP that answered nothing), so
+  liveness now rests only on real evidence: an open port, a finding/script/account,
+  a genuine discovery/UDP reply, or DNS/ARP/OS data.
 - **Checklist shows only hosts confirmed UP — and never writes a live host off as
   down.** A new one-directional `Host.is_up` gates the Checklist: a host stays on
   the list on *any* concrete proof of life (an open port, enumeration/a finding, a

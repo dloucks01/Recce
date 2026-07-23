@@ -227,14 +227,19 @@ class Host:
 
         Signals, any one of which is proof:
           * an open port                 - unambiguous, the host answered a probe
-          * enumeration / findings ran   - a service or script got a response
-          * a real nmap discovery reply  - echo-reply / syn-ack / arp-response ...
-                                           (but NOT the -Pn "user-set" assume-up)
+          * a finding / script / account - a service or NSE script got a response
+          * a real nmap discovery reply  - echo-reply / syn-ack / arp-response, or
+                                           a UDP-fallback reply (NOT the -Pn "user-
+                                           set" assume-up, which is not a response)
           * DNS / ARP / OS evidence      - it answered a name/MAC/fingerprint probe
+
+        `enumerated` is deliberately NOT a signal: the pipeline sets it on every host
+        it runs the enum phase against, including a dead -Pn IP that answered nothing,
+        so it means "we tried", not "it replied".
         """
         if self.open_ports:
             return True
-        if (self.enumerated or self.vulns or self.host_scripts
+        if (self.vulns or self.host_scripts
                 or self.local_findings or self.accounts):
             return True
         if self.up_reason and self.up_reason not in self._NOT_A_REPLY:

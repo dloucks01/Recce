@@ -1426,9 +1426,10 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         # they're kept off the Checklist. Flagged here so nobody assumes they're down.
         sh.write([("Scanned, not confirmed up (kept off Checklist)", "bold"),
                   unconfirmed])
-        sh.write([("These IPs showed no open port and no reply - treat as UNKNOWN, "
-                   "not down. Re-scan (e.g. -Pn, UDP, or a slower sweep) before ruling "
-                   "them out.", "sub")])
+        sh.write([("These IPs answered no TCP probe and no UDP liveness ping - treat "
+                   "as UNKNOWN, not down. A slower/wider re-scan (more UDP ports, a "
+                   "higher --host-timeout) may still surface a heavily firewalled "
+                   "host.", "sub")])
     sh.write([""])
 
     # --- Credentialed access matrix (only when credenum has run) ---
