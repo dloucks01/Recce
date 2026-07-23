@@ -3362,6 +3362,49 @@ class SvcDetectTest(unittest.TestCase):
                                      scanner.PROFILES["standard"])
         self.assertNotIn("cmd", seen)
 
+    def test_parse_product_version_from_banners(self):
+        from recce import svcdetect as sd
+        cases = {
+            "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3": ("OpenSSH", "8.9p1"),
+            "220 (vsFTPd 3.0.3)": ("vsFTPd", "3.0.3"),
+            "220 mail ESMTP Exim 4.94 Debian": ("Exim", "4.94"),
+            "5.5.5-10.3.34-MariaDB-log": ("MariaDB", "10.3.34"),
+            "Server: Apache/2.4.41 (Ubuntu)": ("Apache", "2.4.41"),
+            "+OK Dovecot ready.": ("Dovecot", ""),
+        }
+        for banner, (prod, ver) in cases.items():
+            got = sd.parse_product_version(banner)
+            self.assertIsNotNone(got, banner)
+            self.assertEqual(got[0], prod, banner)
+            if ver:
+                self.assertEqual(got[1], ver, banner)
+        self.assertIsNone(sd.parse_product_version("just some noise"))
+
+    def test_enrich_versions_fills_product_for_cve_mapping(self):
+        from recce import svcdetect as sd
+        # nmap named the service but left product blank; we hold its banner.
+        host = Host(ip="10.0.0.8", ports=[
+            Port(portid=22, service="ssh", detect_source="nmap", state="open",
+                 banner="SSH-2.0-OpenSSH_7.4"),
+            Port(portid=25, service="smtp", detect_source="nmap", state="open",
+                 servicefp="220 relay ESMTP Postfix 3.4.14"),
+        ])
+        n = sd.enrich_versions(host)
+        self.assertEqual(n, 2)
+        p22 = next(p for p in host.ports if p.portid == 22)
+        self.assertEqual((p22.product, p22.version), ("OpenSSH", "7.4"))
+        p25 = next(p for p in host.ports if p.portid == 25)
+        self.assertEqual(p25.product, "Postfix")
+
+    def test_enrich_versions_never_overwrites_nmap_product(self):
+        from recce import svcdetect as sd
+        host = Host(ip="10.0.0.8", ports=[
+            Port(portid=22, service="ssh", product="OpenSSH", version="9.6",
+                 detect_source="nmap", state="open",
+                 banner="SSH-2.0-OpenSSH_7.4")])   # stale banner must NOT win
+        self.assertEqual(sd.enrich_versions(host), 0)
+        self.assertEqual(host.ports[0].version, "9.6")
+
     def test_new_port_fields_round_trip_through_store(self):
         # servicefp / detect_source / banner must survive a datastore round-trip.
         with tempfile.TemporaryDirectory() as d:
