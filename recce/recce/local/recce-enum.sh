@@ -517,6 +517,41 @@ if [ -n "$_hits" ]; then printf '%s\n' "$_hits" | cut -c1-200 | sed 's/^/    /';
 sec "Network"
 info "interfaces:"; { ip -brief addr 2>/dev/null || ifconfig -a 2>/dev/null; } | sed 's/^/    /'
 info "listening sockets:"; { ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null; } | sed 's/^/    /' | head -40
+# Machine-parseable listener inventory the sheet backfills. For each listener we
+# emit proto/addr/port + owning process + PID + the BACKING BINARY path - what a
+# remote scan can't see (incl. loopback-only services). READ-ONLY: readlink of
+# /proc/<pid>/exe and 'command -v', nothing written, nothing executed.
+_backing_bin() {   # $1=pid $2=proc  -> best-effort absolute binary path
+  _b=""
+  [ -n "$1" ] && _b=$(readlink -f "/proc/$1/exe" 2>/dev/null)
+  [ -z "$_b" ] && [ -n "$2" ] && _b=$(command -v "$2" 2>/dev/null)
+  printf '%s' "$_b"
+}
+_emit_listeners() {   # $1=proto label; reads ss/netstat listener lines on stdin
+  while IFS= read -r _l; do
+    case "$_l" in State*|Netid*|Active*|Proto*) continue ;; esac
+    # The local endpoint is the first field ending in :<number> (peer ends in :*).
+    _ap=$(printf '%s\n' "$_l" | awk '{for(i=1;i<=NF;i++) if($i ~ /:[0-9]+$/){print $i; break}}')
+    [ -z "$_ap" ] && continue
+    _addr=${_ap%:*}; _port=${_ap##*:}
+    case "$_port" in ''|*[!0-9]*) continue ;; esac
+    _proc=$(printf '%s\n' "$_l" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')
+    [ -z "$_proc" ] && _proc=$(printf '%s\n' "$_l" | sed -n 's#.*[0-9]/\([^ ]*\).*#\1#p')
+    _pid=$(printf '%s\n' "$_l" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+    [ -z "$_pid" ] && _pid=$(printf '%s\n' "$_l" | grep -oE '[0-9]+/' | head -1 | tr -d /)
+    _bin=$(_backing_bin "$_pid" "$_proc")
+    printf '    LISTEN proto=%s addr=%s port=%s pid=%s proc=%s bin=%s\n' \
+      "$1" "$_addr" "$_port" "${_pid:-}" "${_proc:-}" "${_bin:-}"
+  done
+}
+info "listening-service inventory (proto/port/process/binary):"
+if have ss; then
+  ss -Hltnp 2>/dev/null | _emit_listeners tcp
+  ss -Hlunp 2>/dev/null | _emit_listeners udp
+else
+  netstat -ltnp 2>/dev/null | _emit_listeners tcp
+  netstat -lunp 2>/dev/null | _emit_listeners udp
+fi
 info "routes:"; { ip route 2>/dev/null || route -n 2>/dev/null; } | sed 's/^/    /'
 cat_ /etc/hosts
 info "ARP neighbours:"; { ip neigh 2>/dev/null || arp -a 2>/dev/null; } | sed 's/^/    /' | head -20
