@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 # Categories that count toward coverage %, in display order.
-COVERAGE_CATEGORIES = ["hosts", "services", "vulns", "exploits", "quick_wins", "accounts"]
+COVERAGE_CATEGORIES = ["hosts", "services", "web", "vulns", "exploits", "quick_wins", "accounts"]
 
 # Per-host workflow steps shown as checkboxes on the Checklist: header -> step id.
 # Two kinds of step:
@@ -139,6 +139,10 @@ def svc_key(ip: str, proto: str, port: int) -> str:
     return f"svc:{ip}:{proto}:{port}"
 
 
+def web_key(ip: str, port: int) -> str:
+    return f"web:{ip}:{port}"
+
+
 def vuln_key(ip: str, port: Any, script_id: str) -> str:
     return f"vuln:{ip}:{port or 0}:{script_id}"
 
@@ -189,11 +193,15 @@ def item_keys(hosts: list) -> dict[str, list[str]]:
             seen.add(key)
             out[cat].append(key)
 
+    from . import web
+
     for h in hosts:
         push("hosts", host_key(h.ip))
         subnets.add(h.subnet or "unknown")
         for p in h.open_ports:
             push("services", svc_key(h.ip, p.protocol, p.portid))
+            if web.is_web(p):
+                push("web", web_key(h.ip, p.portid))
         for v in h.vulns:
             push("vulns", vuln_row_key(v))
         for e in h.exploits:

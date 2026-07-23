@@ -242,7 +242,7 @@ def _spec_web(hosts: list[Host]) -> SheetSpec:
     ]
     rows = []
     for e in web.web_endpoints(hosts):
-        rows.append({"key": f"web:{e['ip']}:{e['port']}", "group": e["ip"], "data": {
+        rows.append({"key": tr.web_key(e["ip"], e["port"]), "group": e["ip"], "data": {
             "IP": e["ip"], "Hostname": e["hostname"], "URL": e["url"],
             "Scheme": e["scheme"], "Tech / server": e["tech"],
             "Web findings": e["findings"], "Deep-scan commands (Kali)": e["commands"]}})
@@ -1130,7 +1130,7 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
               ("", "header"), ("", "header"), ("", "header")])
     cov = tr.compute_coverage(hosts, tracking)
     labels = {"hosts": "Hosts", "services": "Services", "vulns": "Vulnerabilities",
-              "exploits": "Exploits", "quick_wins": "AD Quick Wins",
+              "web": "Web", "exploits": "Exploits", "quick_wins": "AD Quick Wins",
               "accounts": "Users & Accounts"}
     o = cov["overall"]
     sh.write([("OVERALL", "bold"), (f"{o['done']}/{o['total']}", "bold"),
