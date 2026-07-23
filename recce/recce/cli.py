@@ -2493,6 +2493,31 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
         if "bloodhound" not in d.sources:
             d.sources.append("bloodhound")
         store.upsert_domain(d)
+
+    # Feed the AD findings into the MAIN totals + writeups by attaching them as
+    # Vulns on the DC / domain host (keyed by --dc-ip when given, so they merge
+    # onto the scanned DC rather than creating a duplicate).
+    if analysis["findings"]:
+        from .models import Host
+        dom_name = analysis["domains"][0]["name"] if analysis["domains"] else ""
+        ad_ip = (creds and creds.get("dc_ip")) or dom_name or "active-directory"
+        vulns = bh.findings_to_vulns(analysis, ad_ip, dom_name)
+        host = store.get_host(ad_ip)
+        if host is None:
+            host = Host(ip=ad_ip, hostnames=[dom_name] if dom_name else [],
+                        os_family="Windows")
+            if creds and creds.get("dc_ip"):
+                host.roles = ["Domain Controller"]
+        host.enumerated = True
+        have = {v.key for v in host.vulns}
+        for v in vulns:
+            if v.key not in have:
+                have.add(v.key)
+                host.vulns.append(v)
+        store.upsert_host(host)
+        print(f"    -> {len(vulns)} AD finding(s) folded into the main severity "
+              f"totals + writeups (host {ad_ip}).")
+
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()

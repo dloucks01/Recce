@@ -174,6 +174,12 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     actions to run: roast, AS-REP, DCSync, and delegation ticket forging, each
     parametrised with your account (a 32-hex secret is auto-treated as an NT hash
     and rendered as `-hashes`).
+  - **Folded into the main findings.** The AD/ESC findings are also attached as
+    first-class vulnerabilities on the DC / domain host (keyed by `--dc-ip` so they
+    merge onto the scanned DC), so they now feed the **Overview severity totals**,
+    the **Vulnerabilities sheet**, and the **per-finding writeups** (DOCX + HTML
+    appendix) - each with its CWE, remediation, and the exact prove/abuse command
+    as evidence - not just the AD-only sheets.
   - Merges the collected domain facts (functional level, trusts, MachineAccountQuota)
     into the Active Directory sheet even with no network scan. References existing
     published tooling (impacket / certipy / netexec / bloodyAD / Rubeus); generates

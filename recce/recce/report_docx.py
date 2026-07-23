@@ -158,6 +158,8 @@ _SOURCE_TOOL = {
     "probe": "recce HTTP/TLS probe (standard library)",
     "config": "nmap NSE weak-configuration checks",
     "cred": "netexec / impacket / ssh (credentialed)",
+    "bloodhound": "BloodHound / SharpHound (AD graph analysis)",
+    "adcs": "Certipy (AD CS / ESC enumeration)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.
