@@ -332,19 +332,25 @@ class Sheet:
             autofilter = (f'<autoFilter ref="A{hr}:'
                           f'{col_letter(self.autofilter_cols)}{hr}"/>')
 
+        # Values sit inside an Excel formula-string literal ("...") within XML element
+        # text: XML-escape &<> AND double any interior " (Excel's string escape), or a
+        # list/CF value containing those chars produces a workbook Excel rejects.
+        def _formula_str(s) -> str:
+            return _xml_text(str(s).replace('"', '""'))
+
         cf = ""
         for i, (sq, value, dxf_id) in enumerate(self._cf_rules):
             cf += (f'<conditionalFormatting sqref="{sq}">'
                    f'<cfRule type="cellIs" dxfId="{dxf_id}" priority="{i + 1}" operator="equal">'
-                   f'<formula>"{value}"</formula></cfRule></conditionalFormatting>')
+                   f'<formula>"{_formula_str(value)}"</formula></cfRule></conditionalFormatting>')
 
         dv = ""
         if self._dv_rules:
             body = ""
             for sq, values in self._dv_rules:
                 body += (f'<dataValidation type="list" allowBlank="1" showInputMessage="1" '
-                         f'showErrorMessage="1" sqref="{sq}"><formula1>"{values}"</formula1>'
-                         f'</dataValidation>')
+                         f'showErrorMessage="1" sqref="{sq}"><formula1>"{_formula_str(values)}"'
+                         f'</formula1></dataValidation>')
             dv = f'<dataValidations count="{len(self._dv_rules)}">{body}</dataValidations>'
 
         hl = ""

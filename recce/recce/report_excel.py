@@ -113,6 +113,7 @@ def _ip_sort_key(ip: str):
 # --- stylers (return {header: style_name} for special cells) ---------------------
 
 def _subnet_sort_key(subnet: str):
+    subnet = subnet or ""            # a SQL NULL subnet would AttributeError on .split
     try:
         net = subnet.split("/")[0]
         return (0,) + tuple(int(o) for o in net.split("."))
@@ -2197,21 +2198,28 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         ck_keys = _ordered_keys(checklist_spec.rows, order_map.get(CHECKLIST_TITLE))
         by_key = {r["key"]: r for r in checklist_spec.rows}
         key_ip = {k: r["data"]["IP"] for k, r in by_key.items()}
-        # Walk the SAME emission order the writer uses. When the sheet is grouped, a
-        # collapsible band row precedes each new group, so the host rows shift down by
-        # one per group seen - account for that or the Overview links land wrong.
         grouped = bool(checklist_spec.group_by)
         header_row = 2 if checklist_spec.legend else 1
-        excel_row, seen = header_row, set()
-        for k in ck_keys:
-            if grouped:
-                g = by_key[k].get("group", "")
-                if g not in seen:
-                    seen.add(g)
-                    excel_row += 1               # the subnet band row
-            excel_row += 1
-            if k in key_ip:
-                host_rows[key_ip[k]] = excel_row
+        excel_row = header_row
+        if grouped:
+            # Bucket by group EXACTLY as _write_spec does: a host appended into an
+            # already-seen subnet is re-grouped under it, so a linear walk of ck_keys
+            # (where new keys land at the tail) would mis-count rows. Same bucketing =
+            # same rows, so the Overview links always land on the right Checklist row.
+            buckets: dict[str, list[str]] = {}
+            for k in ck_keys:
+                buckets.setdefault(by_key[k].get("group", ""), []).append(k)
+            for _gv, keys in buckets.items():
+                excel_row += 1                   # the subnet band row
+                for k in keys:
+                    excel_row += 1
+                    if k in key_ip:
+                        host_rows[key_ip[k]] = excel_row
+        else:
+            for k in ck_keys:
+                excel_row += 1
+                if k in key_ip:
+                    host_rows[key_ip[k]] = excel_row
 
     def _emit(spec):
         if spec.skip_if_empty and not spec.rows:

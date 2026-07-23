@@ -703,6 +703,16 @@ class WorkbookStructureTest(unittest.TestCase):
             # Regenerate preserving row order -> links must still be correct.
             build_workbook(sample_hosts(), out, order_map=read_key_order(out))
             _check(out)
+            # And after a NEW host is added to an already-seen subnet (it appends at
+            # the saved-order tail but the writer re-groups it under its subnet). The
+            # linear precompute mis-counted band rows here; the bucketed one must not.
+            from recce.report_excel import update_workbook
+            from recce.models import Host, Port
+            extra = Host(ip="10.0.10.99", subnet="10.0.10.0/24", state="up",
+                         hostnames=["late01"], os_name="Linux",
+                         ports=[Port(portid=22, service="ssh", state="open")])
+            update_workbook(out, sample_hosts() + [extra])
+            _check(out)
 
     def test_step_headers_colour_auto_vs_manual(self):
         try:
