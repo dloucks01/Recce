@@ -82,7 +82,7 @@ TAB_COLORS = {
     "Services by Product": _TAB_INV, "Databases": _TAB_INV,
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
     "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND, "MSSQL": _TAB_FIND,
-    "Raw NSE": _TAB_RAW,
+    "SMB": _TAB_FIND, "Raw NSE": _TAB_RAW,
 }
 
 
@@ -1512,6 +1512,96 @@ def _mssql_vname(ver: str) -> str:
     return mssql.version_name(ver) if ver else ""
 
 
+def _build_smb(wb, analysis: dict) -> None:
+    """SMB offensive sheet: per-endpoint posture (dialect / signing / SMBv1),
+    findings, live anonymous share enumeration + write proofs, and the credential-
+    free + credentialed runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import smb as _smb
+    sh = wb.add_sheet("SMB")
+    sh.write([("SMB / file sharing - offensive enumeration & attack surface", "title")])
+    sh.write([("Pre-auth posture (dialect, signing, SMBv1) is recce's own stdlib "
+               "negotiate probe; anonymous/credentialed enumeration references "
+               "nxc / smbclient / impacket.", "sub")])
+    sh.write([""])
+    sh.write([("How SMB is tested", "title")])
+    for phase, text in _smb.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    # Endpoints + posture.
+    sh.write([("Endpoints", "title")])
+    sh.write([(h, "bold") for h in
+              ("IP:Port", "Product", "Dialect", "Signing", "SMBv1")])
+    for t in tgts:
+        req = t.get("signing_required")
+        signing = "required" if req else ("NOT REQUIRED" if req is False else "")
+        sstyle = "sev_medium" if req is False else None
+        v1 = t.get("smbv1")
+        v1cell = ("ENABLED", "sev_high") if v1 else ("no" if v1 is False else "")
+        sh.write([f"{t['ip']}:{t['port']}", t.get("product", ""),
+                  t.get("dialect", ""),
+                  (signing, sstyle) if sstyle else signing, v1cell])
+    sh.write([""])
+    # Findings.
+    if fs:
+        sh.write([("Findings", "title")])
+        sh.write([(h, "bold") for h in
+                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
+                   "Remediation")])
+        for f in fs:
+            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
+                      f["title"], f["target"], f.get("detail", ""),
+                      f.get("command", ""), f.get("remediation", "")])
+        sh.write([""])
+        if any(f.get("narrative") for f in fs):
+            sh.write([("Finding details - what each issue enables", "title")])
+            seen_narr = set()
+            for f in fs:
+                narr = f.get("narrative")
+                key = (f["title"], f["target"])
+                if not narr or key in seen_narr:
+                    continue
+                seen_narr.add(key)
+                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
+                           "bold")])
+                sh.write(["", narr])
+            sh.write([""])
+    # Runbook + live results, per endpoint.
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        live = rb.get("live")
+        if live:
+            sess = live.get("session") or ""
+            if sess:
+                sh.write([("Anonymous / credentialed session", "bold")])
+                sh.write(["", sess])
+            shares = live.get("shares") or []
+            if shares:
+                sh.write([(f"Shares ({len(shares)})", "bold")])
+                for s in shares:
+                    sh.write(["", f"{s.get('name', '')}  [{s.get('perms', '') or '-'}]"])
+            writable = live.get("writable") or []
+            for w in writable:
+                sh.write([(f"WRITABLE share PROVEN: {w.get('share', '')}", "bold")])
+                if w.get("evidence"):
+                    sh.write(["", w["evidence"]])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
 # --- public entry points --------------------------------------------------------
 
 def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
@@ -1592,6 +1682,9 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     ms = meta.get("mssql") or {}
     if ms.get("targets") or ms.get("findings"):
         nav.append("MSSQL")
+    sm = meta.get("smb") or {}
+    if sm.get("targets") or sm.get("findings"):
+        nav.append("SMB")
     nav += [s.title for s in post if not (s.skip_if_empty and not s.rows)]
 
     # Pre-compute each host's Checklist row (header is row 1, data from row 2) so
@@ -1617,6 +1710,7 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     _build_ad_findings(wb, bh)
     _build_ad_paths(wb, bh)
     _build_mssql(wb, meta.get("mssql") or {})
+    _build_smb(wb, meta.get("smb") or {})
     for spec in post:
         if spec.skip_if_empty and not spec.rows:
             continue

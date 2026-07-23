@@ -763,11 +763,38 @@ python -m recce mssql -u alice -p 'Passw0rd!' -d corp.local --lhost 10.10.14.5 -
 python -m recce mssql -u sa -p 'Sql2019!' --local-auth -o eng     # SQL (not domain) auth
 ```
 
+## SMB (`recce smb`)
+
+Offensive SMB / file-sharing enumeration, in two layers:
+
+- **Credential-free (airgapped, recce's own stdlib probes):** an **SMB2 NEGOTIATE**
+  reveals the highest dialect and the **signing posture** — signing *required* vs
+  merely *enabled* is the difference between "relay blocked" and the **NTLM-relay
+  surface** — and a separate **SMBv1 NEGOTIATE** reveals whether the legacy SMBv1
+  protocol is still answered (the **MS17-010 / EternalBlue** surface). Both are
+  directly observed, no tools and no credentials.
+- **With tools / credentials:** **null & guest** session share enumeration (via
+  `nxc smb`), and a reversible **writable-share proof** (`--prove-write`: drop a
+  marker file with `smbclient`, list it, delete it — nothing is left behind).
+
+Findings feed the main **Overview** totals, the **Vulnerabilities** sheet and the
+write-ups, and populate a dedicated **SMB** tab. The prove engine adjudicates the
+observed states directly (signing-not-required and SMBv1-enabled → CONFIRMED;
+signing-required → the relay finding is a FALSE POSITIVE).
+
+```bash
+# No creds — pre-auth posture (dialect/signing/SMBv1) + anonymous share enum:
+python -m recce smb -o eng
+
+# Credentialed — authenticated share enum + prove a writable share (reversible):
+python -m recce smb -u alice -p 'Passw0rd!' -d corp.local --prove-write --screenshots -o eng
+```
+
 ## Output (`<output-dir>/`)
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |
