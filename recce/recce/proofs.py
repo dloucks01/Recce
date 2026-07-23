@@ -184,6 +184,29 @@ def _v_nullsession(host, port, vuln):
                     "If it lists shares/users without creds, it's real; access denied = FP."]
 
 
+def _v_k8s(host, port, vuln):
+    # recce read a Kubernetes surface unauthenticated (kubelet /pods, apiserver LIST,
+    # or etcd) -> the exposure is directly observed. The 'anonymous requests accepted'
+    # (403 on the list) case is a config smell, not an exploited read -> LIKELY.
+    blob = _blob(vuln)
+    if "accepts anonymous requests" in blob:
+        return LIKELY, [
+            "The kube-apiserver processed an unauthenticated request (anonymous-auth "
+            "is on) but RBAC refused the list (403). That's the precondition for the "
+            "RBAC-misconfig/CVE class, not an exploited read by itself.",
+            "Confirm what anonymous can reach: kubectl --insecure-skip-tls-verify "
+            "--as=system:anonymous auth can-i --list."]
+    return CONFIRMED, [
+        "recce read this Kubernetes surface with NO credential (a kubelet /pods list, "
+        "an anonymous apiserver resource LIST, or an etcd key read) - the exposure is "
+        "directly observed.",
+        "It is a direct path to cluster compromise (kubelet -> exec into pods -> "
+        "service-account token; anonymous secrets / etcd -> every token and TLS key). "
+        "recce only READ to prove it; escalate with the referenced tool in ROE.",
+        "FP only if the endpoint actually required auth and the read was rejected - in "
+        "which case recce would not have raised this."]
+
+
 def _v_docker_api(host, port, vuln):
     # recce read the Docker API unauthenticated -> the exposure (and thus the root
     # container-escape path) is directly observed. CONFIRMED.
@@ -514,6 +537,16 @@ _RECIPES: list[dict] = [
      "finish": "nxc smb <ip> -u '' -p '' --shares  (or enum4linux-ng -A <ip>).",
      "fp": "Access denied without credentials -> FP.",
      "fn": _v_nullsession},
+    {"id": "kubernetes-exposure",
+     "match": r"kubelet|kubernetes api|anonymous resource listing|etcd exposed|"
+              r"read-only port|accepts anonymous requests|kube-apiserver",
+     "name": "Kubernetes unauthenticated exposure",
+     "pre": ["A Kubernetes surface (kubelet/apiserver/etcd) reachable",
+             "No authentication enforced on the probed endpoint"],
+     "finish": "kubeletctl exec / kubectl --as=system:anonymous get secrets -A / etcdctl "
+               "get /registry/secrets - within ROE; recce only READ to prove it.",
+     "fp": "The endpoint required auth and rejected the read.",
+     "fn": _v_k8s},
     {"id": "docker-api",
      "match": r"docker engine api|docker api.*(exposed|unauth)|exposed.*docker|"
               r"docker.*without authentication|docker container/image inventory",

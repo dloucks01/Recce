@@ -303,6 +303,12 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["docker"] = json.loads(docker_blob)
         except ValueError:
             pass
+    k8s_blob = store.get_meta("kubernetes")
+    if k8s_blob:
+        try:
+            meta["kubernetes"] = json.loads(k8s_blob)
+        except ValueError:
+            pass
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
@@ -3334,6 +3340,69 @@ def _docker_shot(args, ip, command, output):
     return path
 
 
+def cmd_kubernetes(args: argparse.Namespace) -> int:
+    """Kubernetes attack-surface enumeration: unauthenticated reads of the kubelet
+    (10250/10255), kube-apiserver (6443/8443) and etcd (2379). recce only READS to
+    prove exposure - it never execs into a pod or writes to etcd."""
+    from . import kubernetes as k8s
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts run Kubernetes.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = k8s.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No Kubernetes endpoints in the datastore (no kubelet/apiserver/etcd "
+              "port). Run `enum` against the cluster hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} Kubernetes surface(s):")
+    for t in tgts:
+        exposed = t.get("anon_pods") or t.get("anon_list") or t.get("v2_readable")
+        state = "EXPOSED (unauth)" if exposed else \
+            ("reachable" if t.get("reachable") else "not probed")
+        print(f"      {t['ip']}:{t['port']}  {t.get('role', '')}  {state}")
+
+    host_by_ip = {h.ip: h for h in hosts}
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
+    analysis["stats"]["findings"] = len(analysis["findings"])
+    by_ip = k8s.findings_to_vulns(analysis["findings"])
+    for ip, vulns in by_ip.items():
+        host = host_by_ip.get(ip) or store.get_host(ip)
+        if host is None:
+            continue
+        have = {v.key for v in host.vulns if v.source != "kubernetes"}
+        host.vulns = [v for v in host.vulns if v.source != "kubernetes"]  # refresh set
+        for v in vulns:
+            if v.key not in have:
+                have.add(v.key)
+                host.vulns.append(v)
+        store.upsert_host(host, merge=False)
+
+    store.set_meta("kubernetes", json.dumps(analysis))
+    if analysis["findings"]:
+        by_sev: dict = {}
+        for f in analysis["findings"]:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        print("[+] {} Kubernetes finding(s): ".format(len(analysis["findings"]))
+              + ", ".join(f"{by_sev[s]} {s}" for s in
+                          ("critical", "high", "medium", "low") if by_sev.get(s)))
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> Kubernetes sheet written; findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -4107,6 +4176,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     dk.add_argument("-o", "--output-dir", default="engagement")
     dk.add_argument("--title", default="Recce Engagement")
     dk.set_defaults(func=cmd_docker)
+
+    # Kubernetes attack-surface enumeration.
+    kp = sub.add_parser("kubernetes", aliases=["k8s"],
+                        help="Kubernetes: unauthenticated reads of the kubelet "
+                             "(10250/10255), kube-apiserver (6443/8443) and etcd (2379)")
+    kp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "Kubernetes hosts in the datastore)")
+    kp.add_argument("--no-probe", action="store_true",
+                    help="skip the live unauthenticated reads; just write the commands")
+    kp.add_argument("-o", "--output-dir", default="engagement")
+    kp.add_argument("--title", default="Recce Engagement")
+    kp.set_defaults(func=cmd_kubernetes)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")

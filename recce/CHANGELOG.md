@@ -50,6 +50,18 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   the "no AV/EDR evasion" boundary stays.)
 
 ### Added
+- **`recce kubernetes` (alias `k8s`) — cluster attack-surface enumeration + tab.**
+  Stdlib-only unauthenticated reads of the most dangerous Kubernetes exposures:
+  the **kubelet** (10250 — anonymous `/pods` implies the `/exec` RCE-into-pods
+  surface; 10255 read-only — pod specs leak env-var secrets), the
+  **kube-apiserver** (6443/8443 — whether `system:anonymous` can LIST namespaces,
+  and critically **Secrets** = cluster compromise; a 403 downgrades to an
+  anonymous-auth-enabled note), and **etcd** (2379 — an unauthenticated key read =
+  every Secret in the clear). Each successful read is the proof (recce only READS —
+  it never execs into a pod or writes to etcd); findings fold into the main totals /
+  Vulnerabilities sheet / write-ups and a new **Kubernetes** tab, and the prove
+  engine adjudicates them CONFIRMED (or LIKELY for the anonymous-auth-only case).
+  Airgapped-safe, stdlib only.
 - **`recce docker` — exposed Docker Engine API detection + tab.** An unauthenticated
   Docker Engine API (TCP 2375, or 2376 without mutual-TLS) is remote **root** RCE on
   the host — anyone who reaches it can run a container that bind-mounts the host root
