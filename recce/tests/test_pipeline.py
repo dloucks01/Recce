@@ -2740,6 +2740,54 @@ class PocRecipeTest(unittest.TestCase):
             self.assertIn("gcc -fPIC -shared", block)
             self.assertIn("msfvenom", block)
 
+    def test_web_pocs_per_finding(self):
+        from recce import poc
+        from recce.models import Host, Vuln
+
+        def v(sid, out):
+            return Vuln(ip="10.0.0.5", port=443, protocol="tcp", script_id=sid,
+                        title=sid, output=out, source="web")
+        h = Host(ip="10.0.0.5", vulns=[
+            v("web-git", "GET https://10.0.0.5/.git/HEAD -> HTTP 200"),
+            v("web-cors", "Origin: … -> ACAO https://10.0.0.5"),
+            v("web-jwt", "alg=none token"),
+            v("web-ssti", "GET https://10.0.0.5/?rc=… -> 49"),
+            v("web-graphql", "POST https://10.0.0.5/graphql"),
+            v("web-actuator-heapdump", "GET https://10.0.0.5/actuator/heapdump"),
+        ])
+        pocs = {f: (c, n) for f, c, n in poc.web_pocs_for_host(h)}
+        # one artifact per finding, URL filled in, right extension.
+        self.assertTrue(any(f.startswith("poc_web-git_") and f.endswith(".sh") for f in pocs))
+        self.assertTrue(any(f.startswith("poc_web-cors_") and f.endswith(".html") for f in pocs))
+        jwt_f = next(f for f in pocs if f.startswith("poc_web-jwt_"))
+        self.assertTrue(jwt_f.endswith(".py"))
+        # the generated Python + shell must be valid.
+        compile(pocs[jwt_f][0], jwt_f, "exec")             # JWT forge PoC parses
+        cors = next(pocs[f][0] for f in pocs if "cors" in f)
+        self.assertIn("credentials:'include'", cors)
+        self.assertIn("https://10.0.0.5", cors)             # target URL embedded
+        import shutil
+        import subprocess
+        if shutil.which("sh"):
+            for f, (content, _) in pocs.items():
+                if f.endswith(".sh"):
+                    r = subprocess.run(["sh", "-n", "/dev/stdin"], input=content,
+                                       capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, f"{f}: {r.stderr}")
+
+    def test_exploitplan_writes_web_pocs(self):
+        from recce import exploitplan
+        from recce.models import Host, Vuln
+        h = Host(ip="10.0.0.5", os_family="Linux", vulns=[
+            Vuln(ip="10.0.0.5", port=80, protocol="tcp", script_id="web-git",
+                 title="Exposed Git repository (.git)", output="GET http://10.0.0.5/.git/HEAD",
+                 source="web", confidence="confirmed")])
+        with tempfile.TemporaryDirectory() as d:
+            summary = exploitplan.build_plan([h], d)
+            poc_dir = os.path.join(summary["dir"], "poc")
+            files = os.listdir(poc_dir) if os.path.isdir(poc_dir) else []
+            self.assertTrue(any(f.startswith("poc_web-git_") for f in files))
+
     def test_ld_preload_poc_source_actually_compiles(self):
         # The emitted .so source must be valid C that builds - proves it's real,
         # not pseudo-code. (Skipped where gcc is unavailable.)
