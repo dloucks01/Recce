@@ -1355,7 +1355,9 @@ class RobustnessTest(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 result = cli._discover(args, profile, store, paths)
             store.close()
-            self.assertEqual(result, (None, [], None))
+            # 4-tuple (…, disc_reasons) matching what cmd_enum/cmd_scan unpack; the
+            # error path must not return a short tuple (that crashed the caller).
+            self.assertEqual(result, (None, [], None, None))
             self.assertIn("Invalid targets", buf.getvalue())
 
     def test_main_top_level_guard_returns_clean_on_crash(self):
@@ -1609,6 +1611,103 @@ class SubnetCoverageTest(unittest.TestCase):
             store.set_scope("10.0.0.0/24", 100)  # keeps the larger
             self.assertEqual(store.get_scope()["10.0.0.0/24"], 254)
             store.close()
+
+
+class AuditRegressionTest(unittest.TestCase):
+    """Regression coverage for bugs found in the full-codebase audit."""
+
+    def test_store_merge_preserves_port_enrichment_fields(self):
+        # binary/detect_source/banner (set by ingest/deploy on an existing port) must
+        # survive a later merge, not be dropped.
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "s.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.5",
+                                ports=[Port(portid=22, service="ssh", state="open")]))
+            st.upsert_host(Host(ip="10.0.0.5", ports=[Port(
+                portid=22, service="ssh", state="open", binary="/usr/sbin/sshd",
+                detect_source="local", banner="SSH-2.0-OpenSSH")]))
+            p = st.get_host("10.0.0.5").ports[0]
+            self.assertEqual(p.binary, "/usr/sbin/sshd")
+            self.assertEqual(p.detect_source, "local")
+            self.assertEqual(p.banner, "SSH-2.0-OpenSSH")
+            st.close()
+
+    def test_store_merge_folds_account_attrs(self):
+        from recce.store import Store
+        from recce.models import Account
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "s.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.5", accounts=[Account(
+                ip="10.0.0.5", source="ldap", kind="user", name="svc")]))
+            st.upsert_host(Host(ip="10.0.0.5", accounts=[Account(
+                ip="10.0.0.5", source="ldap", kind="user", name="svc",
+                attrs={"spn": "MSSQLSvc/db", "admincount": "1"})]))
+            a = st.get_host("10.0.0.5").accounts[0]
+            self.assertEqual(a.attrs.get("spn"), "MSSQLSvc/db")
+            self.assertEqual(a.attrs.get("admincount"), "1")
+            st.close()
+
+    def test_smb2_negotiate_rejects_error_response(self):
+        import struct
+        from recce import smb
+        # A valid NEGOTIATE OK (command 0, status 0, StructureSize 65) parses...
+        hdr = b"\xfeSMB" + b"\x40\x00" + b"\x00\x00" + b"\x00\x00\x00\x00" + \
+              b"\x00\x00" + b"\x01\x00" + b"\x00" * (64 - 16)
+        body_ok = struct.pack("<H", 65) + struct.pack("<H", 0x0003) + \
+            struct.pack("<H", 0x0300) + b"\x00" * 40
+        ok = smb.parse_smb2_negotiate(b"\x00\x00\x00\x00" + hdr + body_ok)
+        self.assertIsNotNone(ok)
+        # ...but an ERROR response (STATUS_INVALID_PARAMETER) is rejected, not read as
+        # a dialect-0 / signing-not-required host.
+        err_hdr = b"\xfeSMB" + b"\x40\x00" + b"\x00\x00" + b"\x0d\x00\x00\xc0" + \
+                  b"\x00\x00" + b"\x01\x00" + b"\x00" * (64 - 16)
+        self.assertIsNone(smb.parse_smb2_negotiate(
+            b"\x00\x00\x00\x00" + err_hdr + b"\x09\x00" + b"\x00" * 6))
+
+    def test_ftp_write_proof_flags_failed_cleanup(self):
+        from recce import ftp
+        ok = ftp.write_proof_finding("1.2.3.4", 21,
+                                     {"writable": True, "cleanup_ok": True,
+                                      "evidence": "x", "marker": "m.txt"}, None)
+        self.assertIn("fully reversible", ok["detail"])
+        bad = ftp.write_proof_finding("1.2.3.4", 21,
+                                      {"writable": True, "cleanup_ok": False,
+                                       "evidence": "x", "marker": "m.txt"}, None)
+        self.assertIn("CLEANUP FAILED", bad["detail"])
+        self.assertNotIn("fully reversible", bad["detail"])
+
+    def test_nullsession_verdict_needs_anonymous_marker(self):
+        from recce import proofs
+        from recce.models import Vuln, Host
+        h = Host(ip="1.1.1.1")
+        # A credentialed share listing (no anon marker) -> LIKELY, not a false CONFIRMED.
+        cred = Vuln(ip="1.1.1.1", port=445, protocol="tcp", script_id="smb-enum-shares",
+                    title="shares", output="Shares\n  account_used: corp\\alice",
+                    source="nse", state="finding")
+        self.assertEqual(proofs._v_nullsession(h, None, cred)[0], proofs.LIKELY)
+        # An anonymous session marker -> CONFIRMED.
+        anon = Vuln(ip="1.1.1.1", port=445, protocol="tcp", script_id="smb-enum-shares",
+                    title="shares", output="Shares\n  account_used: <blank>",
+                    source="nse", state="finding")
+        self.assertEqual(proofs._v_nullsession(h, None, anon)[0], proofs.CONFIRMED)
+
+    def test_eol_recipe_does_not_swallow_rce_findings(self):
+        from recce import proofs
+        from recce.models import Vuln
+
+        def mk(t):
+            return Vuln(ip="1.1.1.1", port=445, protocol="tcp", script_id="x",
+                        title=t, output=t, source="version-db", state="finding")
+        # Pure EOL -> eol-service; legacy-but-RCE -> routed to a real version-CVE verdict.
+        self.assertEqual(proofs.recipe_for(mk("Legacy MongoDB (<3.6) no-auth"))["id"],
+                         "eol-service")
+        self.assertEqual(
+            proofs.recipe_for(mk("Legacy Samba 3.x - multiple RCE (cve-2007-2447)"))["id"],
+            "version-cve-generic")
+        # SambaCry now gets a Verification row at all (previously None).
+        self.assertIsNotNone(proofs.recipe_for(
+            mk("Samba CVE-2017-7494 SambaCry remote code execution")))
 
 
 class HostUpCertaintyTest(unittest.TestCase):

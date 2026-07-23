@@ -558,11 +558,11 @@ def _discover(args, profile, store, paths):
         # literal first thing a tester types. Fail with a clear message, not a crash.
         print(f"[x] Invalid targets: {e}\n    Fix the IP / range / CIDR / @file "
               "and re-run.")
-        return None, [], None
+        return None, [], None, None
     hosts = apply_exclusions(hosts, args.exclude or [])
     if not hosts:
         print("[x] No targets after expansion/exclusion.")
-        return None, [], None
+        return None, [], None, None
     # Record the full scope so the report accounts for every subnet, even those
     # that turn out to have no live hosts.
     sizes: dict[str, int] = {}
@@ -616,7 +616,12 @@ def _discover(args, profile, store, paths):
                 print(f"    Per-host cap {profile.host_timeout}m + fail-fast keep it "
                       "moving; for a large scope, --fast (masscan) sweeps in seconds.")
                 print("!" * 64)
-                profile.assume_up = True          # dead IPs get scanned -> fail fast
+                # Behave exactly like an explicit -Pn from here: assume-up + skip the
+                # per-dead-IP verify re-scan (the UDP fallback still fires, gated on
+                # assume_up). Leaving ping_discovery True would re-scan every dead IP
+                # on precisely the large, discovery-blocked scope we want to move fast.
+                profile.assume_up = True
+                profile.ping_discovery = False
                 live_ips = hosts
             elif len(live_ips) < len(hosts):
                 missed = len(hosts) - len(live_ips)
@@ -1964,6 +1969,11 @@ def _fold_host(ip, parsed_list, subnet_map):
         if h.os_accuracy >= base.os_accuracy and h.os_name:
             base.os_name, base.os_accuracy, base.os_family = h.os_name, h.os_accuracy, h.os_family
         base.distance = base.distance or h.distance
+        # Carry proof-of-life: an imported .gnmap/.nmap host with no open ports and no
+        # hostname is kept up only by its up_reason ("report-listed"); dropping it here
+        # would make is_up wrongly read False and hide the host the report enumerated.
+        base.up_reason = base.up_reason or h.up_reason
+        base.state = h.state or base.state
         base.last_scanned = h.last_scanned or base.last_scanned
         base.ports.extend(h.ports)
         base.vulns.extend(h.vulns)
@@ -3163,7 +3173,7 @@ def cmd_smb(args: argparse.Namespace) -> int:
                 store.upsert_host(host, merge=False)
 
     store.set_meta("smb", json.dumps(analysis))
-    if active:                       # assessed the SMB port(s) -> auto-tick vuln-scan
+    if active or ran_live:           # assessed the SMB port(s) -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
     if analysis["findings"]:
         by_sev: dict = {}
@@ -3283,7 +3293,7 @@ def cmd_ftp(args: argparse.Namespace) -> int:
         store.upsert_host(host, merge=False)
 
     store.set_meta("ftp", json.dumps(analysis))
-    if active:                       # assessed the FTP port -> auto-tick vuln-scan
+    if active or ran_live:           # assessed the FTP port -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
     if analysis["findings"]:
         by_sev: dict = {}

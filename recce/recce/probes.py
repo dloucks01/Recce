@@ -19,6 +19,7 @@ exception that would stall a scan.
 
 from __future__ import annotations
 
+import calendar
 import http.client
 import socket
 import ssl
@@ -177,7 +178,9 @@ def _parse_cert_time(value: str) -> float | None:
         day = int(parts[1])
         hh, mm, sec = (int(x) for x in parts[2].split(":"))
         year = int(parts[3])
-        return time.mktime((year, mon or 1, day, hh, mm, sec, 0, 0, 0))
+        # notAfter is GMT/UTC; timegm treats the tuple as UTC. mktime would read it as
+        # LOCAL time, shifting the expiry window by the runner's UTC offset.
+        return calendar.timegm((year, mon or 1, day, hh, mm, sec, 0, 0, 0))
     except (ValueError, IndexError, TypeError):
         return None
 

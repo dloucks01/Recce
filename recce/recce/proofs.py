@@ -162,7 +162,11 @@ def _v_smbghost(host, port, vuln):
 
 def _v_potato(host, port, vuln):
     held = _local(host, r"seimpersonate|seassignprimarytoken")
-    if held and re.search(r"enabled", held, re.I):
+    # Require an affirmative "Enabled" - NOT the bare substring, which also lives in
+    # "not enabled" / "enabled: false" and would false-CONFIRM a disabled privilege.
+    negated = held and re.search(
+        r"\bdisabled\b|not\s+enabled|enabled\s*[:=]\s*(?:false|no|0|off)", held, re.I)
+    if held and re.search(r"\benabled\b", held, re.I) and not negated:
         return CONFIRMED, [f"On-target enum confirms the privilege is ENABLED: {held}",
                            "GodPotato / PrintSpoofer / JuicyPotatoNG work on current patched Win10/11 & "
                            "Server 2016-2022 (they abuse SeImpersonate, not a patchable bug) -> real path to SYSTEM."]
@@ -187,7 +191,15 @@ def _v_smb_writable(host, port, vuln):
 
 
 def _v_nullsession(host, port, vuln):
-    if _nse_vulnerable(vuln) or re.search(r"logged in|shares|allows sessions", vuln.output or "", re.I):
+    # Require an explicit ANONYMOUS/null marker - the old "shares"/"logged in" match
+    # also fired on a CREDENTIALED smb-enum-shares listing (recce supports --creds),
+    # falsely adjudicating an authenticated enum as an anonymous session. nmap prints
+    # "account_used: <blank>" (or guest) precisely when the session was anonymous.
+    out = vuln.output or ""
+    anon = re.search(r"account_used:\s*(?:<blank>|''|\"\"|guest|anonymous)"
+                     r"|null session|anonymous (?:login|access)|unauthenticated",
+                     out, re.I)
+    if _nse_vulnerable(vuln) or anon:
         return CONFIRMED, ["The check actually established an anonymous/null session (it enumerated without "
                            "credentials) -> CONFIRMED."]
     return LIKELY, ["Prove directly: nxc smb <ip> -u '' -p '' --shares   (or enum4linux-ng -A <ip>). "
@@ -461,7 +473,10 @@ def _v_openssh_regresshion(host, port, vuln):
     prod, ver = _pv(host, vuln)
     if not ver or "openssh" not in (prod or "").lower() and "openssh" not in _blob(vuln):
         return INCONCLUSIVE, ["No OpenSSH version captured; grab the banner: nc <ip> 22."]
-    if _cmp(ver, "9.8p1") >= 0:
+    # A bare "9.8" (non-portable/OpenBSD, no pN suffix) is the fixed release too, but
+    # sorts BELOW "9.8p1" in _cmp - so match it explicitly or it falls to a false LIKELY.
+    fixed = _cmp(ver, "9.8p1") >= 0 or ("p" not in ver.lower() and _cmp(ver, "9.8") >= 0)
+    if fixed:
         return FALSE_POSITIVE, [
             f"OpenSSH {ver} is >= 9.8p1, the release that FIXES regreSSHion -> not "
             "vulnerable. Dismiss (this is a common over-flag)."]
@@ -711,7 +726,7 @@ _RECIPES: list[dict] = [
      "fn": _v_version_cve},
     {"id": "apache-httpd-version-cve",
      "match": r"apache (httpd|2\.4).{0,50}(smuggl|ssrf|mod_proxy|mod_lua|traversal|"
-              r"cve-2021-4177|cve-2022-2)",
+              r"cve-2021-41773|cve-2021-42013|cve-2022-2\d{4})",
      "name": "Apache httpd version-based CVE",
      "pre": ["Apache httpd version in the affected range"],
      "finish": "for path traversal (2.4.49/50): curl --path-as-is <url>/cgi-bin/.%2e/.%2e/"
@@ -734,7 +749,11 @@ _RECIPES: list[dict] = [
      "fp": "A patched 5.5.x (>= 5.5.63) or a MariaDB build mis-detected as MySQL 5.5.",
      "fn": _v_version_cve},
     {"id": "eol-service",
-     "match": r"end-of-life|end of life|\beol\b|\blegacy\b|unsupported|no longer supported",
+     # Only a PURE end-of-life note - if the same finding also names an RCE or a CVE
+     # (e.g. "Legacy Samba 3.x - multiple RCE"), don't swallow it here with "just
+     # upgrade"; let it fall through to a version-CVE verdict that keeps it actionable.
+     "match": r"^(?!.*(?:\brce\b|remote code|cve-\d)).*?"
+              r"(?:end-of-life|end of life|\beol\b|\blegacy\b|unsupported|no longer supported)",
      "name": "End-of-life / unsupported software exposed",
      "pre": ["The running build's branch is out of vendor support"],
      "finish": "confirm the exact build (nmap -sV) and check it against the vendor's "
@@ -756,6 +775,18 @@ _RECIPES: list[dict] = [
                "or run the ProxyLogon/ProxyShell checker in check-only mode.",
      "fp": "A fully-patched Exchange that resists the checks.",
      "fn": _v_exchange},
+    # Catch-all, LAST so every specific recipe wins first: any remaining finding that
+    # names a CVE or RCE (SambaCry, Ghostcat, Drupalgeddon, appliance CVEs, ...) still
+    # gets an honest version-based verdict instead of silently having NO Verification row.
+    {"id": "version-cve-generic",
+     "match": r"cve-\d{4}-\d+|remote code execution|\brce\b|pre-?auth\w* (?:rce|bypass)",
+     "name": "Version-based CVE (offline DB match)",
+     "pre": ["The observed product/version falls in the CVE's affected range",
+             "the distro has not backported the fix"],
+     "finish": "map the exact build to the CVE's fixed version (vendor advisory / distro "
+               "changelog), then run the CVE's published check/PoC within a lab / ROE.",
+     "fp": "A backported or patched build that resists the check, or a version mis-detection.",
+     "fn": _v_version_cve},
 ]
 _COMPILED = [(re.compile(r["match"], re.I), r) for r in _RECIPES]
 

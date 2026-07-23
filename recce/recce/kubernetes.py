@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import ssl
 
 from .models import Host, Port
@@ -57,6 +58,22 @@ def role(port: int) -> str:
     return "unknown"
 
 
+_READ_CAP = 16 * 1024 * 1024   # hard ceiling on a single response body (16 MB)
+
+
+def _read_capped(resp, cap: int = _READ_CAP) -> bytes:
+    """Read an HTTP response to EOF, bounded by `cap` (avoids OOM on a hostile body
+    while still capturing multi-MB pod/secret lists that a 256 KB read truncated)."""
+    chunks, total = [], 0
+    while total < cap:
+        chunk = resp.read(min(65536, cap - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def _req(ip: str, port: int, path: str, tls: bool, method: str = "GET",
          body: str | None = None, timeout: float = _TIMEOUT):
     """Issue one request. Returns (status, parsed_json_or_text) or None."""
@@ -72,7 +89,11 @@ def _req(ip: str, port: int, path: str, tls: bool, method: str = "GET",
             headers["Content-Type"] = "application/json"
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
-        raw = resp.read(262144).decode("utf-8", "replace")
+        # Read to EOF up to a generous cap. A single small read() truncated a busy
+        # node's /pods or the apiserver's /secrets mid-buffer, so json.loads failed
+        # and the endpoint was misread as merely "reachable" (a critical exposure
+        # downgraded). The str fallback below still flags a >cap body as a real list.
+        raw = _read_capped(resp).decode("utf-8", "replace")
         try:
             return resp.status, json.loads(raw)
         except ValueError:
@@ -163,8 +184,12 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
 
 
 def _is_podlist(body) -> bool:
-    return isinstance(body, dict) and (body.get("kind") == "PodList"
-                                       or isinstance(body.get("items"), list))
+    if isinstance(body, dict):
+        return body.get("kind") == "PodList" or isinstance(body.get("items"), list)
+    if isinstance(body, str):     # oversized/truncated JSON still proves exposure
+        b = body.replace(" ", "")
+        return '"kind":"PodList"' in b or '"items"' in b
+    return False
 
 
 def _pod_count(body) -> int | None:
@@ -174,8 +199,13 @@ def _pod_count(body) -> int | None:
 
 
 def _is_list(body) -> bool:
-    return isinstance(body, dict) and (str(body.get("kind", "")).endswith("List")
-                                       or isinstance(body.get("items"), list))
+    if isinstance(body, dict):
+        return (str(body.get("kind", "")).endswith("List")
+                or isinstance(body.get("items"), list))
+    if isinstance(body, str):     # oversized/truncated JSON still proves exposure
+        b = body.replace(" ", "")
+        return '"items"' in b or bool(re.search(r'"kind":"\w+List"', b))
+    return False
 
 
 def _etcd_version(body) -> str:
