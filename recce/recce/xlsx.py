@@ -37,6 +37,9 @@ STYLE = {
     # wrap (raw evidence), so machine data reads like the HTML previews.
     "cell_mono": 20, "cell_band_mono": 21, "ip": 22, "ip_band": 23,
     "wrap_mono": 24, "wrap_band_mono": 25,
+    # Checklist step-header tint: green = the tool auto-ticks it, amber = your manual
+    # sign-off. Lets a reader see at a glance which columns fill themselves.
+    "header_auto": 26, "header_manual": 27,
 }
 
 # Characters that are illegal in XML 1.0 even when escaped. nmap NSE / service-
@@ -77,7 +80,7 @@ STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <font><sz val="10"/><color rgb="FF212121"/><name val="Consolas"/></font>
 <font><b/><sz val="10"/><color rgb="FF0E6E67"/><name val="Consolas"/></font>
 </fonts>
-<fills count="11">
+<fills count="13">
 <fill><patternFill patternType="none"/></fill>
 <fill><patternFill patternType="gray125"/></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FF0E6E67"/></patternFill></fill>
@@ -89,6 +92,8 @@ STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <fill><patternFill patternType="solid"><fgColor rgb="FFDDEBF7"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/></patternFill></fill>
 <fill><patternFill patternType="solid"><fgColor rgb="FFD7ECEA"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FF2E7D32"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFC55A11"/></patternFill></fill>
 </fills>
 <borders count="3">
 <border><left/><right/><top/><bottom/><diagonal/></border>
@@ -96,7 +101,7 @@ STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <border><left/><right/><top/><bottom style="medium"><color rgb="FF0A4F4A"/></bottom><diagonal/></border>
 </borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="26">
+<cellXfs count="28">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="2" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
 <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
@@ -123,6 +128,8 @@ STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <xf numFmtId="0" fontId="9" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
 <xf numFmtId="0" fontId="8" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
 <xf numFmtId="0" fontId="8" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="1" fillId="11" borderId="2" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="1" fillId="12" borderId="2" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
 </cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 <dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFE699"/></patternFill></fill></dxf></dxfs>
