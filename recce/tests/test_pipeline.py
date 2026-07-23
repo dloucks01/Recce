@@ -2572,6 +2572,113 @@ class WebPutProofTest(unittest.TestCase):
         self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED)
 
 
+class WebJwtNoneProofTest(unittest.TestCase):
+    """Gap-3: alg:none is PROVEN by forging an unsigned token and replaying it."""
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        import base64 as _b64
+        import json as _json
+        import re as _re
+
+        def _b64u(obj):
+            return _b64.urlsafe_b64encode(
+                _json.dumps(obj).encode()).rstrip(b"=").decode()
+        # A session token the app issues with the insecure alg:none.
+        cls.valid = f'{_b64u({"alg": "none", "typ": "JWT"})}.{_b64u({"user": "admin"})}.'
+
+        def _decode(seg):
+            return _b64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                authed = False
+                m = _re.search(r"session=([A-Za-z0-9_\-.]+)",
+                               self.headers.get("Cookie", ""))
+                if m:
+                    parts = m.group(1).split(".")
+                    if len(parts) >= 2:
+                        try:                    # the bug: trust claims, never verify sig
+                            hdr = _json.loads(_decode(parts[0]))
+                            pl = _json.loads(_decode(parts[1]))
+                            if str(hdr.get("alg", "")).lower() == "none" and pl.get("user"):
+                                authed = True
+                        except Exception:
+                            pass
+                body = (b"WELCOME ADMIN - secret dashboard: users, billing, settings, logs "
+                        b"and much more privileged content here" if authed
+                        else b"please log in")
+                self.send_response(200)
+                self.send_header("Set-Cookie", f"session={cls.valid}; Path=/")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def test_alg_none_is_proven_by_replay(self):
+        from recce import web, proofs
+        _profile, vulns = web.scan_endpoint("127.0.0.1",
+                                            Port(portid=self.port, service="http",
+                                                 state="open"), active=True)
+        proven = [v for v in vulns if v.script_id == "web-jwt"
+                  and "proven" in v.title.lower()]
+        self.assertTrue(proven, "alg:none acceptance should be proven")
+        self.assertEqual(proven[0].confidence, "confirmed")
+        self.assertEqual(proven[0].severity, "high")
+        self.assertIn("same authenticated response", proven[0].output)
+        h = Host(ip="127.0.0.1", ports=[Port(portid=self.port, state="open")],
+                 vulns=[proven[0]])
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED)
+
+    def test_alg_none_rejected_is_not_a_finding(self):
+        # A server that ignores the forged token (rejects unsigned) must NOT be flagged
+        # as exploitable - the forge-and-replay downgrades it.
+        from recce import web
+        import http.server
+        import threading
+        import base64 as _b64
+        import json as _json
+
+        def _b64u(obj):
+            return _b64.urlsafe_b64encode(_json.dumps(obj).encode()).rstrip(b"=").decode()
+        tok = f'{_b64u({"alg": "none"})}.{_b64u({"user": "admin"})}.'
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                # Always the same page regardless of token -> not gated / rejects it.
+                body = b"please log in"
+                self.send_response(200)
+                self.send_header("Set-Cookie", f"session={tok}; Path=/")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            _p, vulns = web.scan_endpoint("127.0.0.1",
+                                          Port(portid=port, service="http", state="open"),
+                                          active=True)
+        finally:
+            httpd.shutdown()
+        proven = [v for v in vulns if v.script_id == "web-jwt" and "proven" in v.title.lower()]
+        self.assertFalse(proven, "an ungated server must not be reported as proven")
+
+
 class WebModuleTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
