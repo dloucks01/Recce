@@ -815,11 +815,28 @@ python -m recce ftp --prove-write -o eng
 python -m recce ftp -u bob -p 'hunter2' --prove-write -o eng
 ```
 
+## Docker (`recce docker`)
+
+An **unauthenticated Docker Engine API** (TCP 2375, or 2376 without mutual-TLS) is
+remote **root** RCE on the host: anyone who can reach it can run a container that
+bind-mounts the host root (`-v /:/host`) as root. recce reads the API
+unauthenticated with **stdlib HTTP** (`/version`, `/info`, `/containers/json`,
+`/images/json`) and, if it answers, reports a **CONFIRMED critical** exposure plus a
+container/image-inventory info-leak — the successful unauthenticated read *is* the
+proof; recce deliberately does **not** create a container. Findings feed the main
+totals, the Vulnerabilities sheet and the write-ups, and populate a dedicated
+**Docker** tab with the escape command.
+
+```bash
+python -m recce docker -o eng                 # read the API; CONFIRM exposure
+python -m recce docker --screenshots -o eng   # + a `docker info` proof screenshot
+```
+
 ## Output (`<output-dir>/`)
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Docker** (exposed Engine API) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |

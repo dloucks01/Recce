@@ -297,6 +297,12 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["ftp"] = json.loads(ftp_blob)
         except ValueError:
             pass
+    docker_blob = store.get_meta("docker")
+    if docker_blob:
+        try:
+            meta["docker"] = json.loads(docker_blob)
+        except ValueError:
+            pass
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
@@ -3235,6 +3241,99 @@ def cmd_ftp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_docker(args: argparse.Namespace) -> int:
+    """Docker Engine API enumeration: read the API unauthenticated (stdlib HTTP) and,
+    if it answers, report the CONFIRMED critical exposure (remote root RCE on the
+    host). recce reads the API to prove it - it never creates a container."""
+    from . import docker
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose the Docker API.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = docker.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No Docker API endpoints in the datastore (no port 2375/2376). Run "
+              "`enum` against the Docker hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} Docker endpoint(s):")
+    for t in tgts:
+        state = "EXPOSED (unauth)" if t.get("exposed") else \
+            ("locked/tls" if t.get("exposed") is False else "not probed")
+        extra = f"  {t.get('version', '')}" if t.get("version") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{extra}")
+
+    # Optional proof screenshot of the (synthesised) `docker info` for exposed hosts.
+    if getattr(args, "screenshots", False):
+        for t in tgts:
+            pr = analysis["probes"].get(f"{t['ip']}:{t['port']}")
+            if pr and pr.get("exposed"):
+                out = (f"Server Version: {pr.get('server_version', '')}\n"
+                       f"Name: {pr.get('name', '')}\n"
+                       f"Containers: {pr.get('containers', '?')}  "
+                       f"Images: {pr.get('images', '?')}\n"
+                       f"Kernel Version: {pr.get('kernel', '')}")
+                _docker_shot(args, t["ip"],
+                             f"docker -H {docker._scheme(t['port'])}://{t['ip']}:"
+                             f"{t['port']} info", out)
+
+    host_by_ip = {h.ip: h for h in hosts}
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
+    analysis["stats"]["findings"] = len(analysis["findings"])
+    by_ip = docker.findings_to_vulns(analysis["findings"])
+    for ip, vulns in by_ip.items():
+        host = host_by_ip.get(ip) or store.get_host(ip)
+        if host is None:
+            continue
+        have = {v.key for v in host.vulns if v.source != "docker"}
+        host.vulns = [v for v in host.vulns if v.source != "docker"]   # refresh set
+        for v in vulns:
+            if v.key not in have:
+                have.add(v.key)
+                host.vulns.append(v)
+        store.upsert_host(host, merge=False)
+
+    store.set_meta("docker", json.dumps(analysis))
+    if analysis["findings"]:
+        by_sev: dict = {}
+        for f in analysis["findings"]:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        print("[+] {} Docker finding(s): ".format(len(analysis["findings"]))
+              + ", ".join(f"{by_sev[s]} {s}" for s in
+                          ("critical", "high", "medium", "low") if by_sev.get(s)))
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> Docker sheet written; findings folded into the main totals.")
+    return 0
+
+
+def _docker_shot(args, ip, command, output):
+    from . import docker, screenshot
+    if not screenshot.available():
+        return None
+    png = screenshot.capture_html(docker.proof_html(command, output))
+    if not png:
+        return None
+    shot_dir = os.path.join(args.output_dir, "screenshots")
+    os.makedirs(shot_dir, exist_ok=True)
+    path = os.path.join(shot_dir, f"docker_{ip.replace(':', '_')}.png")
+    with open(path, "wb") as fh:
+        fh.write(png)
+    print(f"      [+] {ip}: proof screenshot -> {path}")
+    return path
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3992,6 +4091,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     fp.add_argument("-o", "--output-dir", default="engagement")
     fp.add_argument("--title", default="Recce Engagement")
     fp.set_defaults(func=cmd_ftp)
+
+    # Docker Engine API enumeration.
+    dk = sub.add_parser("docker",
+                        help="Docker: read the Engine API (2375/2376) unauthenticated "
+                             "-> CONFIRMED exposed daemon = remote root RCE on the host")
+    dk.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "Docker hosts in the datastore)")
+    dk.add_argument("--screenshots", action="store_true",
+                    help="save a terminal-style `docker info` proof screenshot for "
+                         "each exposed daemon")
+    dk.add_argument("--no-probe", action="store_true",
+                    help="skip the live API read; just write the commands")
+    dk.add_argument("-o", "--output-dir", default="engagement")
+    dk.add_argument("--title", default="Recce Engagement")
+    dk.set_defaults(func=cmd_docker)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
