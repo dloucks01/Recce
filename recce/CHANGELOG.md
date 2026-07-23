@@ -141,6 +141,15 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
       `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
       version from its `readme.txt` Stable tag.
+- **Richer HTML report — detailed findings appendix.** The shareable one-file HTML
+  report now carries a **Finding details** section (below the summary table): one
+  card per grounded finding, severity-ranked, with the **vulnerability type**,
+  **CWE** and **CVE** references, **security aspect impacted (C/I/A)**, the
+  **tools/checks** that found it, the full **affected-systems** list, a
+  **Recommendation** block (the finding's remediation), and a trimmed **evidence
+  excerpt** — the client-facing detail that previously lived only in the DOCX,
+  now travelling in the self-contained HTML. Also embeds the Mermaid attack-path
+  graph in the Attack-path section (offline, copyable).
 - **Deeper service enum — product/version recovery (feeds CVE mapping).** `svcdetect`
   now mines a concrete **product + version** out of the banner it already holds
   (OpenSSH/dropbear, vsFTPd/ProFTPD/Pure-FTPd, Postfix/Exim/Sendmail,

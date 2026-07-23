@@ -2324,6 +2324,28 @@ class HtmlReportTest(unittest.TestCase):
         self.assertIn('class="mermaid', html)
         self.assertIn("flowchart LR", html)
 
+    def test_detailed_findings_section(self):
+        from recce import report_html
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.6", os_family="Linux",
+                 ports=[Port(portid=21, service="ftp")],
+                 vulns=[Vuln(ip="10.0.0.6", port=21, protocol="tcp",
+                             script_id="vsftpd-backdoor", title="vsFTPd backdoor",
+                             severity="critical", source="nse",
+                             ids=["CVE-2011-2523"],
+                             remediation="Upgrade vsFTPd to a patched release.",
+                             output="Backdoor shell on 6200 confirmed")])
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html([h], p)
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("Finding details", html)
+        self.assertIn("class=\"fcard\"", html)
+        self.assertIn("Upgrade vsFTPd", html)                 # remediation card
+        self.assertIn("Backdoor shell on 6200 confirmed", html)  # evidence excerpt
+        self.assertIn("10.0.0.6:21", html)                    # affected system
+
     def test_empty_hosts_ok(self):
         from recce import report_html
         with tempfile.TemporaryDirectory() as d:
