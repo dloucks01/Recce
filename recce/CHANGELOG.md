@@ -4,7 +4,14 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
-_Accumulating fixes since 0.2.3; folded into the next tagged release._
+_Nothing yet._
+
+## [0.2.4] - 2026-07-23
+
+_Adds four deep offensive service modules (SMB, FTP, Docker, Kubernetes), live AD
+Kerberos capture, executed web proofs (PUT / JWT alg:none), and closes the
+prove-out audit gaps — every finding is now proven by execution and wired into the
+totals, the prove engine, the reports, and its own workbook tab._
 
 ### Added
 - **`deploy` — credentialed mass local-enum & priv-esc.** Hand recce credentials
