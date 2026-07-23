@@ -166,6 +166,7 @@ _SOURCE_TOOL = {
     "adcs": "Certipy (AD CS / ESC enumeration)",
     "mssql": "MSSQL enum (recce probes + nxc / impacket-mssqlclient)",
     "smb": "SMB enum (recce stdlib negotiate probe + nxc / smbclient)",
+    "ftp": "FTP enum (recce stdlib control-channel probe + ftplib)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.

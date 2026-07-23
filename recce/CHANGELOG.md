@@ -50,6 +50,17 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   the "no AV/EDR evasion" boundary stays.)
 
 ### Added
+- **`recce ftp` — FTP gets its own deep offensive module + tab.** Credential-free
+  stdlib control-channel probe: reads the banner (→ product/version for the offline
+  CVE DB and a narrow **known-backdoor map** — vsFTPd 2.3.4 CVE-2011-2523, ProFTPD
+  1.3.3c, ProFTPD mod_copy CVE-2015-3306), tries an **anonymous** login, and
+  inspects **FEAT** for AUTH TLS/FTPS so it can flag **cleartext** authentication.
+  With an anonymous or credentialed session, a reversible **writable-directory
+  proof** (`--prove-write`: STOR a marker via stdlib `ftplib`, then DELE it).
+  Findings fold into the main totals, the Vulnerabilities sheet and the write-ups,
+  and populate a new **FTP** tab; the prove engine adjudicates anonymous-login
+  (CONFIRMED from the observed 230) and the backdoor/RCE builds (LIKELY, with the
+  exact non-destructive trigger). Airgapped-safe; the write proof degrades cleanly.
 - **`recce smb` — SMB / file sharing gets its own deep offensive module + tab.**
   Modelled on `recce mssql`, in two layers. **Credential-free (airgapped, stdlib):**
   recce crafts an SMB2 NEGOTIATE and reads the highest dialect and the *signing

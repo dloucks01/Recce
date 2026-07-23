@@ -3285,6 +3285,92 @@ class CredentialsTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
 
 
+class FtpTest(unittest.TestCase):
+    def _host(self):
+        return Host(ip="10.0.0.80", subnet="10.0.0.0/24", hostnames=["FTP01"],
+                    os_family="Linux", enumerated=True,
+                    ports=[Port(portid=21, service="ftp", product="vsftpd",
+                                version="2.3.4", state="open")])
+
+    def test_findings_from_probe(self):
+        from recce import ftp
+        pr = {("10.0.0.80", 21): {"banner": "(vsFTPd 2.3.4)", "anonymous": True,
+                                  "auth_tls": False}}
+        fs = ftp.findings([self._host()], pr)
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("backdoor", titles.lower())                  # vsftpd 2.3.4
+        self.assertIn("Anonymous FTP login", titles)
+        self.assertIn("cleartext", titles.lower())
+        self.assertTrue(all(f.get("narrative") for f in fs))
+
+    def test_findings_to_vulns_have_classified_cwes(self):
+        from recce import ftp
+        from recce.report_docx import _vuln_type
+        pr = {("10.0.0.80", 21): {"banner": "(vsFTPd 2.3.4)", "anonymous": True,
+                                  "auth_tls": False}}
+        by_ip = ftp.findings_to_vulns(ftp.findings([self._host()], pr))
+        self.assertIn("10.0.0.80", by_ip)
+        for v in by_ip["10.0.0.80"]:
+            vt, _ = _vuln_type(v.cwes)
+            self.assertTrue(vt, v.cwes)
+
+    def test_prove_engine_adjudicates_ftp(self):
+        from recce import ftp, proofs
+        pr = {("10.0.0.80", 21): {"banner": "(vsFTPd 2.3.4)", "anonymous": True,
+                                  "auth_tls": False}}
+        h = self._host()
+        h.vulns = ftp.findings_to_vulns(ftp.findings([h], pr))["10.0.0.80"]
+        verdicts = {r["vuln"]: r["verdict"] for r in proofs.verify_host(h)}
+        anon = next(v for k, v in verdicts.items() if "Anonymous FTP" in k)
+        back = next(v for k, v in verdicts.items() if "Backdoor" in k or "RCE FTP" in k)
+        self.assertEqual(anon, proofs.CONFIRMED)                   # 230 observed
+        self.assertEqual(back, proofs.LIKELY)                      # banner-based
+
+    def test_write_proof_finding(self):
+        from recce import ftp
+        f = ftp.write_proof_finding("10.0.0.80", 21,
+                                    {"writable": True, "evidence": "STOR ok\nDELE ok"},
+                                    None)
+        self.assertIsNotNone(f)
+        self.assertIn("proven", f["title"].lower())
+        self.assertIn("CWE-732", f["cwes"])
+        self.assertIsNone(ftp.write_proof_finding("10.0.0.80", 21,
+                                                  {"writable": False}, None))
+
+    def test_cmd_ftp_end_to_end(self):
+        from recce import cli, xlsx
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(self._host())
+            st.close()
+            rc = cli.main(["ftp", "-o", out, "--no-run", "--no-probe"])
+            self.assertEqual(rc, 0)
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            self.assertIn("FTP", sheets)
+            mtxt = "\n".join(" ".join(map(str, r)) for r in sheets["FTP"])
+            self.assertIn("10.0.0.80:21", mtxt)
+            vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+            self.assertIn("backdoor", vtxt.lower())                # folded into totals
+            st = Store(os.path.join(out, "results.sqlite"))
+            h = st.get_host("10.0.0.80")
+            st.close()
+            self.assertTrue([v for v in h.vulns if v.source == "ftp"])
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.7", ports=[Port(portid=22, service="ssh")]))
+            st.close()
+            self.assertEqual(cli.main(["ftp", "-o", out, "--no-probe", "--no-run"]), 0)
+
+
 class SmbTest(unittest.TestCase):
     def _host(self):
         return Host(ip="10.0.0.60", subnet="10.0.0.0/24", hostnames=["FS01"],
