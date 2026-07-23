@@ -999,6 +999,10 @@ def _build_runbook(wb, meta: dict) -> None:
         "Trigger the SQL service account to authenticate to your box (xp_dirtree) so a "
         "running impacket-ntlmrelayx catches it - relay to the DC's LDAP, another MSSQL, "
         "or an SMB-signing-off host (targets listed on the MSSQL sheet).")
+    cmd("  --exec 'whoami' --method xp|ole|agent|clr",
+        "Run an OS command for effect and capture the output - xp_cmdshell, OLE "
+        "Automation, or a SQL Agent job (clr hands off to mssqlpwner). Result is folded "
+        "into the findings as confirmed RCE.")
 
     section("6. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "

