@@ -50,6 +50,35 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   the "no AV/EDR evasion" boundary stays.)
 
 ### Added
+- **Findings are proven by execution, not just adjudicated (audit gaps closed).**
+  Several checks that used to stop at "advertised / version-matched" now actively
+  prove impact and downgrade themselves when the proof fails:
+  - **Web `PUT` write primitive.** When `OPTIONS` advertises `PUT` and the scan is
+    active, `recce web` PUTs a marker file, GETs it back to confirm the write
+    landed, then DELETEs it (reversible). A confirmed round-trip is a **CONFIRMED**
+    arbitrary-file-write finding (CWE-434, CWE-650); other advertised methods stay
+    a separate *potential* note.
+  - **Web JWT `alg:none`.** recce forges an unsigned token (`alg:none`, the
+    original claims plus a harmless marker), replays it in the token's real
+    location (cookie / `Authorization: Bearer`) against the same path, and compares
+    the response to the authenticated and anonymous baselines. Forged-accepted +
+    no-token-denied = **CONFIRMED** (signature not verified, tokens forgeable);
+    forged-treated-as-no-token downgrades to a *rejected / not-exploitable* note;
+    an ungated endpoint is reported inconclusive.
+  - **AD live Kerberos capture.** With credentials and `--dc-ip`, the `ad` command
+    can now *run* the published impacket tools to capture the real crackable
+    material and fold each capture back in as a **proven** finding: `--roast`
+    (`GetUserSPNs -request` → live TGS-REP hashes), `--asrep` (`GetNPUsers
+    -request` → live AS-REP hashes), and `--dcsync` (`secretsdump -just-dc` →
+    replicated NTLM hashes incl. krbtgt for golden-ticket persistence). All three
+    are read-only (request tickets / replicate secrets — nothing on the target is
+    modified) and only run when explicitly opted in. Captured hashes are written to
+    `engagement/loot/` ready for hashcat, and `--screenshots` saves terminal-output
+    proof images.
+  - **Offline version→CVE matches** now get an honest verdict from the prove
+    engine (LIKELY with the "distros backport without bumping the banner" caveat,
+    or INCONCLUSIVE when no version was captured), and end-of-life/legacy services
+    are CONFIRMED from the version fact itself.
 - **Per-web-finding PoC generation.** `exploitplan` now writes a tailored, benign,
   runnable proof for *each* web finding into `exploit-plan/poc/`, with the target
   URL filled in: a **`git-dumper` script** for exposed `.git`, an **HTML page** that

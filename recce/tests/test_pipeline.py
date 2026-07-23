@@ -4056,6 +4056,62 @@ class BloodHoundTest(unittest.TestCase):
         self.assertIn("AS-REP", titles)
         self.assertTrue(any("-hashes :" in a["command"] for a in acts))
 
+    def test_live_kerberos_parsers(self):
+        from recce import bloodhound as bh
+        tgs = ("[*] Getting TGS for svc_sql\n"
+               "$krb5tgs$23$*svc_sql$CORP.LOCAL$MSSQLSvc/db.corp.local:1433*$"
+               "a1b2c3d4e5f6a7b8c9d0e1f2$deadbeef" * 1 + "\n"
+               "$krb5tgs$23$*svc_web$CORP.LOCAL$HTTP/web.corp.local*$00112233$cafebabe\n")
+        rows = bh.parse_tgs(tgs)
+        self.assertEqual([r["user"] for r in rows], ["svc_sql", "svc_web"])
+        self.assertEqual(rows[0]["spn"], "MSSQLSvc/db.corp.local:1433")
+        asrep = ("[*] AS-REP for jdoe\n"
+                 "$krb5asrep$23$jdoe@CORP.LOCAL:aabbcc$ddeeff001122\n")
+        ar = bh.parse_asrep(asrep)
+        self.assertEqual(ar[0]["user"], "jdoe")
+        dump = ("Administrator:500:aad3b435b51404eeaad3b435b51404ee:"
+                "31d6cfe0d16ae931b73c59d7e0c089c0:::\n"
+                "CORP.LOCAL\\krbtgt:502:aad3b435b51404eeaad3b435b51404ee:"
+                "1a2b3c4d5e6f70819293a4b5c6d7e8f9:::\n")
+        sd = bh.parse_secretsdump(dump)
+        self.assertEqual(len(sd), 2)
+        krb = [h for h in sd if h["krbtgt"]]
+        self.assertEqual(len(krb), 1)
+        self.assertEqual(krb[0]["nt"], "1a2b3c4d5e6f70819293a4b5c6d7e8f9")
+
+    def test_live_kerberos_toolmissing_is_clean(self):
+        # No impacket installed in CI -> each runner reports the missing tool, never
+        # raises, and produces no findings.
+        from recce import bloodhound as bh
+        creds = {"domain": "CORP.LOCAL", "user": "bob", "secret": "Pw",
+                 "is_hash": False, "dc_ip": "10.0.0.1"}
+        res = bh.live_kerberos(creds, None, do_roast=True, do_asrep=True, do_dcsync=True)
+        self.assertEqual(res["findings"], [])
+        self.assertEqual(len(res["errors"]), 3)
+        self.assertTrue(all("not installed" in e for e in res["errors"]))
+
+    def test_live_capture_findings_fold_into_vulns(self):
+        # A captured TGS -> a proven 'roasted' finding -> a confirmed Vuln that reaches
+        # the main totals with the real hash as evidence and the right CWE.
+        from recce import bloodhound as bh
+        out = bh.parse_tgs("$krb5tgs$23$*svc_sql$CORP.LOCAL$MSSQLSvc/db*$aa$bb\n")
+        # Simulate a successful capture by exercising the finding-builder path.
+        creds = {"user": "bob", "domain": "CORP.LOCAL"}
+        fs = []
+        for h in out:
+            fs.append(bh._finding(
+                "roasted", "high", "Kerberoast hash captured (proven)", h["user"], "",
+                f"Captured a live TGS-REP for SPN '{h['spn']}'.\n\n{h['hash']}",
+                "hashcat", "hashcat -m 13100 kerberoast.hash rockyou.txt", "rotate"))
+        an = {"findings": fs}
+        vulns = bh.findings_to_vulns(an, "10.0.0.9", "CORP.LOCAL")
+        self.assertEqual(len(vulns), 1)
+        v = vulns[0]
+        self.assertEqual(v.confidence, "confirmed")
+        self.assertIn("CWE-262", v.cwes)
+        self.assertIn("$krb5tgs$", v.output)
+        _ = creds
+
     def test_analyze_is_json_serialisable(self):
         from recce import bloodhound as bh
         import json as _json

