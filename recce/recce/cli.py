@@ -279,6 +279,12 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["ad_bloodhound"] = json.loads(bh_blob)
         except ValueError:
             pass
+    mssql_blob = store.get_meta("mssql")
+    if mssql_blob:
+        try:
+            meta["mssql"] = json.loads(mssql_blob)
+        except ValueError:
+            pass
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
@@ -2547,6 +2553,118 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mssql(args: argparse.Namespace) -> int:
+    """MSSQL offensive enumeration: credential-free pre-auth probes (SQL Browser +
+    TDS pre-login), then - with credentials - the nxc access/privilege matrix and
+    the full MSSQLPwner-style runbook + attack chain, pre-filled with your creds."""
+    from . import mssql
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts run MSSQL.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    creds = None
+    if args.username:
+        user, domain = _split_userdomain(args.username, args.domain)
+        creds = {"user": user, "secret": args.password or "", "domain": domain,
+                 "dc_ip": args.dc_ip or ""}
+
+    active = not args.no_probe
+    analysis = mssql.analyze(hosts, creds=creds, active=active,
+                             lhost=args.lhost or "<LHOST>")
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No MSSQL endpoints in the datastore (no port 1433 / ms-sql "
+              "service). Run `enum` against the SQL hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} MSSQL endpoint(s):")
+    for t in tgts:
+        extra = []
+        if t.get("version"):
+            extra.append(mssql.version_name(t["version"]))
+        if t.get("encryption"):
+            extra.append(f"encryption={t['encryption']}")
+        if t.get("instances"):
+            extra.append(f"{len(t['instances'])} instance(s) via SQL Browser")
+        print(f"      {t['ip']}:{t['port']}  " + "  ".join(extra))
+
+    # Auto-run the nxc access/privilege matrix when creds + tool are present.
+    ran_nxc = False
+    if creds and not args.no_run:
+        tool = mssql.nxc_tool()
+        if tool:
+            ran_nxc = True
+            for t in tgts:
+                res, err = mssql.run_nxc_mssql(t["ip"], creds, port=t["port"],
+                                               local_auth=args.local_auth)
+                if res is None:
+                    print(f"      [!] nxc mssql {t['ip']}: {err}")
+                    continue
+                t["access"], t["admin"] = res["access"], res["admin"]
+                if res["access"]:
+                    lvl = "SYSADMIN (Pwn3d!)" if res["admin"] else "login OK"
+                    print(f"      [+] {t['ip']}:{t['port']}  {lvl} as {creds['user']}")
+                    if res["admin"]:
+                        analysis["findings"].insert(0, mssql._finding(
+                            "critical", "Credentials are sysadmin on this MSSQL instance",
+                            f"{t['ip']}:{t['port']}",
+                            f"{creds['user']} authenticates as sysadmin (xp_cmdshell / RCE).",
+                            "nxc / impacket-mssqlclient",
+                            mssql._fill("nxc mssql <ip> -u <user> -p <pass> -x whoami",
+                                        mssql._ctx(t, creds)),
+                            "Least-privilege the login; remove sysadmin.",
+                            ["CWE-250", "CWE-269"]))
+        else:
+            print("      [i] netexec/nxc not installed - writing the commands to run "
+                  "instead (see the MSSQL sheet).")
+    elif creds:
+        print("      [i] --no-run set - not executing nxc; commands are in the sheet.")
+
+    # Fold findings into the main severity totals + writeups (attach to each host).
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
+    analysis["stats"]["findings"] = len(analysis["findings"])
+    by_ip = mssql.findings_to_vulns(analysis["findings"])
+    host_by_ip = {h.ip: h for h in hosts}
+    for ip, vulns in by_ip.items():
+        host = host_by_ip.get(ip) or store.get_host(ip)
+        if host is None:
+            continue
+        have = {v.key for v in host.vulns if v.source != "mssql"}
+        host.vulns = [v for v in host.vulns if v.source != "mssql"]   # refresh MSSQL set
+        for v in vulns:
+            if v.key not in have:
+                have.add(v.key)
+                host.vulns.append(v)
+        store.upsert_host(host, merge=False)
+
+    store.set_meta("mssql", json.dumps(analysis))
+    if analysis["findings"]:
+        by_sev: dict = {}
+        for f in analysis["findings"]:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        print("[+] {} MSSQL finding(s): ".format(len(analysis["findings"]))
+              + ", ".join(f"{by_sev[s]} {s}" for s in
+                          ("critical", "high", "medium", "low") if by_sev.get(s)))
+    for t in tgts:
+        for line in analysis["runbooks"][next(i for i, r in enumerate(analysis["runbooks"])
+                                              if r["ip"] == t["ip"])]["chain"]:
+            print(f"      {line}")
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    hint = "ran nxc" if ran_nxc else "commands-only"
+    print(f"    -> MSSQL sheet written ({hint}); findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3194,6 +3312,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     bhp.add_argument("--title", default="Recce Engagement")
     bhp.set_defaults(func=cmd_bloodhound)
 
+    # MSSQL offensive enumeration + attack chain.
+    ms = sub.add_parser("mssql",
+                        help="MSSQL: pre-auth probes + (with creds) nxc access/priv "
+                             "matrix + MSSQLPwner-style runbook & attack chain")
+    ms.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "MSSQL hosts in the datastore)")
+    ms.add_argument("-u", "--username",
+                    help="your account - runs the nxc access/priv check and pre-fills "
+                         "every command ('CORP\\alice' / 'alice@corp.local' work too)")
+    ms.add_argument("-p", "--password", help="password for your account")
+    ms.add_argument("-d", "--domain", help="AD domain (omit + --local-auth for a SQL login)")
+    ms.add_argument("--local-auth", action="store_true",
+                    help="SQL Server authentication (not Windows/domain)")
+    ms.add_argument("--dc-ip", help="DC IP to fill into the generated commands")
+    ms.add_argument("--lhost", help="your capture/relay IP for the UNC/relay commands")
+    ms.add_argument("--no-run", action="store_true",
+                    help="don't execute nxc; just write the commands (airgapped-safe)")
+    ms.add_argument("--no-probe", action="store_true",
+                    help="skip the live SQL Browser / TDS pre-login probes")
+    ms.add_argument("-o", "--output-dir", default="engagement")
+    ms.add_argument("--title", default="Recce Engagement")
+    ms.set_defaults(func=cmd_mssql)
+
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
     r.add_argument("--title", default="Recce Engagement")
@@ -3241,6 +3383,8 @@ and, when you want more depth, run any of:
 Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
 SharpHound / Certipy data?   recce ad loot.zip certipy.json -u USER -p PASS -d DOMAIN
                              (AD vulns + ESC findings + paths to Domain Admin)
+MSSQL servers in scope?      recce mssql -u USER -p PASS -d DOMAIN -o eng
+                             (pre-auth probes + access/priv matrix + attack chain)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.

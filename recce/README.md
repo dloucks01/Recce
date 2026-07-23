@@ -717,11 +717,40 @@ python -m recce ad loot.zip 20260101_Certipy.json \
 python -m recce ad loot.zip -u alice -p 'Passw0rd!' -d corp.local --replace-ad -o eng
 ```
 
+## MSSQL (`recce mssql`)
+
+Offensive Microsoft SQL Server enumeration modelled on PowerUpSQL / impacket-
+mssqlclient / nxc mssql / **MSSQLPwner**:
+
+- **Credential-free (airgapped, recce's own stdlib probes):** SQL Browser (UDP
+  1434) instance/version/port enumeration and a **TDS pre-login** probe for the
+  exact server version and whether login encryption is enforced — no creds, no
+  tools. Plus the no-cred access checks (blank `sa`, anonymous, NTLM relay).
+- **With credentials (auto-runs `nxc mssql` when installed):** the access +
+  privilege matrix — which servers your creds log into and whether the login is
+  effectively **sysadmin** (`Pwn3d!` = xp_cmdshell / RCE).
+- **The MSSQLPwner route** (pre-filled runbook + attack chain): enumerate server
+  roles, databases, **TRUSTWORTHY** DBs, the **linked-server graph**,
+  **impersonatable logins**, `xp_cmdshell`/OLE/CLR status, `sys.sql_logins`
+  hashes and saved credentials → escalate (impersonation, TRUSTWORTHY+db_owner,
+  linked-server hops, UNC→relay) → **effect** (xp_cmdshell / sp_OACreate / CLR /
+  Agent). MSSQL findings feed the main **Overview** totals and the write-ups, and
+  populate a dedicated **MSSQL** sheet.
+
+```bash
+# No creds — pre-auth recon + the no-cred access commands:
+python -m recce mssql -o eng
+
+# Credentialed — access/priv matrix + the full attack chain, commands pre-filled:
+python -m recce mssql -u alice -p 'Passw0rd!' -d corp.local --lhost 10.10.14.5 -o eng
+python -m recce mssql -u sa -p 'Sql2019!' --local-auth -o eng     # SQL (not domain) auth
+```
+
 ## Output (`<output-dir>/`)
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |

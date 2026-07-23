@@ -160,6 +160,7 @@ _SOURCE_TOOL = {
     "cred": "netexec / impacket / ssh (credentialed)",
     "bloodhound": "BloodHound / SharpHound (AD graph analysis)",
     "adcs": "Certipy (AD CS / ESC enumeration)",
+    "mssql": "MSSQL enum (recce probes + nxc / impacket-mssqlclient)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.

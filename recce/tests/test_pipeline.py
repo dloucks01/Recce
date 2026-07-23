@@ -3087,6 +3087,121 @@ class CredentialsTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
 
 
+class MssqlTest(unittest.TestCase):
+    def _host(self):
+        from recce.models import Vuln
+        return Host(ip="10.0.0.50", subnet="10.0.0.0/24", hostnames=["SQL01"],
+                    os_family="Windows", enumerated=True,
+                    ports=[Port(portid=1433, service="ms-sql-s",
+                                product="Microsoft SQL Server", version="12.0.2000",
+                                state="open",
+                                scripts=[Script(id="ms-sql-ntlm-info",
+                                                output="NetBIOS_Domain_Name: CORP")])],
+                    vulns=[Vuln(ip="10.0.0.50", port=1433, protocol="tcp",
+                                script_id="ms-sql-empty-password",
+                                title="MSSQL sa empty password", severity="critical",
+                                source="nse")])
+
+    def test_sql_browser_parse(self):
+        from recce import mssql
+        insts = mssql._parse_browser(
+            "ServerName;WINSQL;InstanceName;SQLEXPRESS;IsClustered;No;"
+            "Version;15.0.2000.5;tcp;1433;;")
+        self.assertEqual(insts[0]["instance"], "SQLEXPRESS")
+        self.assertEqual(insts[0]["tcp"], "1433")
+        self.assertEqual(insts[0]["version"], "15.0.2000.5")
+
+    def test_prelogin_request_is_wellformed_and_response_parses(self):
+        import struct
+        from recce import mssql
+        req = mssql._build_prelogin()
+        self.assertEqual(req[0], 0x12)                              # PRELOGIN type
+        self.assertEqual(struct.unpack(">H", req[2:4])[0], len(req))  # length field
+        # Synthetic response: SQL 2019, encryption required.
+        table = struct.pack(">BHH", 0x00, 11, 6) + struct.pack(">BHH", 0x01, 17, 1) + b"\xff"
+        data = bytes([15, 0]) + struct.pack(">H", 2000) + b"\x00\x00" + bytes([3])
+        payload = table + data
+        resp = struct.pack(">BBHHBB", 0x04, 0x01, 8 + len(payload), 0, 0, 0) + payload
+        p = mssql._parse_prelogin(resp)
+        self.assertEqual(p["version"], "15.0.2000")
+        self.assertEqual(p["encryption"], "required")
+        self.assertIn("SQL Server 2019", mssql.version_name(p["version"]))
+
+    def test_findings_from_nse_and_version(self):
+        from recce import mssql
+        fs = mssql.findings([self._host()])
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("blank password", titles)                    # ms-sql-empty-password
+        self.assertIn("End-of-life", titles)                       # 12.x = 2014
+        self.assertIn("NetBIOS", titles)                           # ms-sql-ntlm-info
+        blank = next(f for f in fs if "blank password" in f["title"])
+        self.assertEqual(blank["severity"], "critical")
+        self.assertIn("impacket-mssqlclient", blank["command"])
+
+    def test_runbook_commands_prefilled_with_creds(self):
+        from recce import mssql
+        an = mssql.analyze([self._host()], creds={"user": "alice", "secret": "P@ss",
+                           "domain": "corp.local", "dc_ip": "10.0.0.9"}, active=False)
+        cmds = " ".join(s["cmd"] for s in an["runbooks"][0]["credentialed"])
+        self.assertIn("nxc mssql 10.0.0.50 -u alice -p P@ss", cmds)
+        self.assertIn("corp.local/alice:P@ss@10.0.0.50", cmds)     # mssqlclient target
+        self.assertIn("OPENQUERY", cmds)                           # linked-server chain
+        self.assertIn("EXECUTE AS LOGIN", cmds)                    # impersonation chain
+
+    def test_parse_nxc_mssql(self):
+        from recce import mssql
+        r = mssql.parse_nxc_mssql("MSSQL 10.0.0.50 1433 SQL01 [+] CORP\\alice:P@ss (Pwn3d!)")
+        self.assertTrue(r["access"] and r["admin"])
+        r2 = mssql.parse_nxc_mssql("MSSQL 10.0.0.50 1433 SQL01 [-] CORP\\bob:x")
+        self.assertFalse(r2["access"])
+
+    def test_findings_to_vulns_have_classified_cwes(self):
+        from recce import mssql
+        from recce.report_docx import _vuln_type
+        fs = mssql.findings([self._host()])
+        by_ip = mssql.findings_to_vulns(fs)
+        self.assertIn("10.0.0.50", by_ip)
+        for v in by_ip["10.0.0.50"]:
+            vt, _ = _vuln_type(v.cwes)
+            self.assertTrue(vt, v.cwes)                            # every CWE classifies
+
+    def test_cmd_mssql_end_to_end(self):
+        from recce import cli, xlsx
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(self._host())
+            st.close()
+            rc = cli.main(["mssql", "-o", out, "--no-run", "--no-probe",
+                           "-u", "alice", "-p", "P@ss", "-d", "corp.local",
+                           "--lhost", "10.0.0.9"])
+            self.assertEqual(rc, 0)
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            self.assertIn("MSSQL", sheets)
+            mtxt = "\n".join(" ".join(map(str, r)) for r in sheets["MSSQL"])
+            self.assertIn("10.0.0.50:1433", mtxt)
+            self.assertIn("corp.local/alice:P@ss", mtxt)           # runbook creds-filled
+            vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+            self.assertIn("blank password", vtxt)                  # folded into main totals
+            st = Store(os.path.join(out, "results.sqlite"))
+            h = st.get_host("10.0.0.50")
+            st.close()
+            self.assertTrue([v for v in h.vulns if v.source == "mssql"])
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.7", ports=[Port(portid=80, service="http")]))
+            st.close()
+            self.assertEqual(cli.main(["mssql", "-o", out, "--no-probe"]), 0)
+
+
 class BloodHoundTest(unittest.TestCase):
     BASE = "S-1-5-21-1-2-3"
 
@@ -3472,7 +3587,7 @@ class BloodHoundTest(unittest.TestCase):
                 paths=[d], username="alice", password="Passw0rd!", domain="CORP.LOCAL",
                 owned=None, creds=None, dc_ip="10.0.0.1", output_dir=out, title="T"))
             self.assertEqual(rc, 0)
-            from recce import report_excel, xlsx
+            from recce import xlsx
             sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
             paths_txt = "\n".join(" ".join(map(str, r))
                                   for r in sheets.get("AD Attack Paths", []))

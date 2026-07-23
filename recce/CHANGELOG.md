@@ -141,6 +141,26 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
       `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
       version from its `readme.txt` Stable tag.
+- **`mssql` — offensive Microsoft SQL Server enumeration + attack chain.** Modelled
+  on PowerUpSQL / impacket-mssqlclient / nxc mssql / **MSSQLPwner**:
+  - **Credential-free, airgapped (recce's own stdlib probes):** SQL Browser (UDP
+    1434) instance/version/port enumeration and a **TDS pre-login** probe for the
+    exact server version and whether login encryption is enforced - no creds, no
+    external tools. Plus the no-cred access checks (blank `sa`, anonymous, NTLM relay).
+  - **With credentials, auto-runs `nxc mssql`** (when installed; falls back to
+    commands otherwise): the access + privilege matrix - which servers your creds
+    log into and whether the login is effectively **sysadmin** (`Pwn3d!`).
+  - **The MSSQLPwner route** as a pre-filled runbook + attack chain: enumerate
+    roles/databases/**TRUSTWORTHY** DBs/**linked servers**/**impersonatable
+    logins**/`xp_cmdshell`-OLE-CLR status/`sys.sql_logins` hashes -> escalate
+    (impersonation, TRUSTWORTHY+db_owner, linked-server hops, UNC->relay) ->
+    **effect** (xp_cmdshell / sp_OACreate / CLR / Agent). Every command is
+    pre-filled with your credentials.
+  - Findings (blank-password login, xp_cmdshell enabled, pre-auth NTLM disclosure,
+    no login encryption, EOL SQL Server, sysadmin credentials) feed the main
+    **Overview** severity totals + write-ups, plus a dedicated **MSSQL** sheet with
+    the endpoints, findings and runbook. `--local-auth` for SQL logins, `--lhost`
+    for the relay commands, `--no-run`/`--no-probe` for airgapped use.
 - **`ad` — SharpHound + Certipy (ADCS) import: AD vulns, ESC findings, and paths to
   Domain Admin.** One simple command, credentials-first:
   `recce ad loot.zip certipy.json -u alice -p 'Passw0rd!' -d corp.local -o eng`.

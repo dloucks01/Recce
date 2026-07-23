@@ -49,6 +49,7 @@ cd recce
 | **Priv-esc** | `./bin/recce privesc -o eng` | per-host escalation playbook |
 | **Credentialed** | `./bin/recce credenum -u U -p P -d dom -o eng` | authed SMB/AD/SSH enum |
 | **AD graph** | `./bin/recce ad loot.zip certipy.json -u U -p P -d dom -o eng` | import SharpHound + Certipy → AD vulns, ESC findings, paths to Domain Admin |
+| **MSSQL** | `./bin/recce mssql -u U -p P -d dom -o eng` | pre-auth probes + nxc access/priv matrix + MSSQLPwner-style attack chain |
 | **On-target loot** | `./bin/recce ingest loot.txt -o eng` | fold `recce-enum.sh/.ps1` findings in |
 | **Mass local-enum** | `./bin/recce deploy -u U -p P -o eng` | run the local-enum + priv-esc scan on every host you have creds for (SSH/WinRM/SMB) |
 | **Exploit plan** | `./bin/recce exploitplan -o eng --lhost <ip>` | runnable msf `.rc` + tool commands |

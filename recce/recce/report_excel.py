@@ -81,7 +81,7 @@ TAB_COLORS = {
     "Exploitation": _TAB_FIND, "Attack Path": _TAB_FIND,
     "Services by Product": _TAB_INV, "Databases": _TAB_INV,
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
-    "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND,
+    "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND, "MSSQL": _TAB_FIND,
     "Raw NSE": _TAB_RAW,
 }
 
@@ -837,6 +837,9 @@ def _build_guide(wb, meta: dict) -> None:
                             "user) to Domain Admin / the domain / a DC, plus the "
                             "Kerberos actions to run. Run `recce ad -u USER -p PASS`."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
+        ("MSSQL", "SQL Server offensive view: endpoints (version/encryption/access/"
+                  "privilege), misconfig/vuln findings, and the credential-free + "
+                  "MSSQLPwner-style runbook & attack chain. Run `recce mssql`."),
         ("Priv-Esc", "Per-host escalation findings from the local sweep "
                      "(recce deploy/ingest) + remote signals. Un-swept hosts show a "
                      "'run recce deploy' to-do; dead IPs get no rows."),
@@ -861,6 +864,9 @@ def _build_guide(wb, meta: dict) -> None:
         ("privesc [targets]", "Priv-esc playbook (+ --scan for remote checks)."),
         ("credenum -u U -p P -d DOM", "Authenticated enum (netexec/impacket/ssh) "
                                       "- shares, roasting, local admin, hashes."),
+        ("mssql [-u U -p P -d DOM]",
+         "MSSQL: pre-auth probes (no creds) + nxc access/priv matrix + the "
+         "MSSQLPwner-style runbook & attack chain (commands pre-filled)."),
         ("ad <sharphound> <certipy> -u U -p P -d DOM",
          "Import SharpHound + Certipy (ADCS): AD vulns, ESC findings, and the "
          "shortest paths from your account to Domain Admin - commands pre-filled."),
@@ -971,6 +977,20 @@ def _build_runbook(wb, meta: dict) -> None:
     cmd("  --replace-ad",
         "Clear the previously-imported AD/ESC findings first, so remediated items drop "
         "off on re-import (default: accumulate across imports).")
+
+    section("5c. MSSQL - offensive SQL Server enumeration + attack chain",
+            "recce probes SQL Browser + TDS pre-login itself (no creds); with creds it "
+            "runs the nxc access/priv matrix and writes the MSSQLPwner-style runbook.")
+    cmd("mssql -o eng",
+        "Credential-free: SQL Browser (UDP 1434) instances + TDS pre-login version/"
+        "encryption for every MSSQL host, plus the no-cred access checks (blank sa, relay).")
+    cmd("mssql -u alice -p 'Passw0rd!' -d corp.local -o eng",
+        "With creds: nxc access/privilege matrix (Pwn3d! = sysadmin), then the full "
+        "enumerate -> escalate (impersonation/TRUSTWORTHY/linked-server) -> effect "
+        "(xp_cmdshell/OLE/CLR) runbook, pre-filled. Findings feed the main totals.")
+    cmd("  --local-auth / --lhost IP / --no-run",
+        "SQL (not Windows) auth / your capture-relay IP for the UNC commands / write the "
+        "commands without executing nxc (airgapped-safe).")
 
     section("6. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
@@ -1328,6 +1348,66 @@ def _build_ad_paths(wb, analysis: dict) -> None:
     sh.set_col(2, 120)
 
 
+def _build_mssql(wb, analysis: dict) -> None:
+    """MSSQL offensive sheet: endpoints (version/encryption/access/priv), findings,
+    and the credential-free + credentialed runbook with the attack chain."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    sh = wb.add_sheet("MSSQL")
+    sh.write([("Microsoft SQL Server - offensive enumeration & attack chain", "title")])
+    sh.write([("Pre-auth probes are recce's own (SQL Browser + TDS pre-login); "
+               "authenticated actions reference nxc / impacket / mssqlpwner.", "sub")])
+    sh.write([""])
+    # Endpoints.
+    sh.write([("Endpoints", "title")])
+    sh.write([(h, "bold") for h in
+              ("IP:Port", "Version", "Encryption", "Access", "Privilege", "Instances")])
+    for t in tgts:
+        acc = "yes" if t.get("access") else ("" if t.get("access") is None else "no")
+        priv = "SYSADMIN" if t.get("admin") else ("login" if t.get("access") else "")
+        style = "sev_critical" if t.get("admin") else None
+        sh.write([f"{t['ip']}:{t['port']}",
+                  _mssql_vname(t.get("version")), t.get("encryption", ""),
+                  acc, (priv, style) if style else priv,
+                  ", ".join(i.get("instance", "") for i in t.get("instances") or [])])
+    sh.write([""])
+    # Findings.
+    if fs:
+        sh.write([("Findings", "title")])
+        sh.write([(h, "bold") for h in
+                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
+                   "Remediation")])
+        for f in fs:
+            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
+                      f["title"], f["target"], f.get("detail", ""),
+                      f.get("command", ""), f.get("remediation", "")])
+        sh.write([""])
+    # Runbook + chain, per endpoint.
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        for line in rb.get("chain") or []:
+            sh.write(["", line])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"{step['step']}  [{step['tool']}]"])
+            sh.write(["", f"    {step['cmd']}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _mssql_vname(ver: str) -> str:
+    from . import mssql
+    return mssql.version_name(ver) if ver else ""
+
+
 # --- public entry points --------------------------------------------------------
 
 def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
@@ -1405,6 +1485,9 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         nav.append("AD Findings")
     if bh.get("paths") or bh.get("kerberos"):
         nav.append("AD Attack Paths")
+    ms = meta.get("mssql") or {}
+    if ms.get("targets") or ms.get("findings"):
+        nav.append("MSSQL")
     nav += [s.title for s in post if not (s.skip_if_empty and not s.rows)]
 
     # Pre-compute each host's Checklist row (header is row 1, data from row 2) so
@@ -1429,6 +1512,7 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     _build_active_directory(wb, hosts, domains)
     _build_ad_findings(wb, bh)
     _build_ad_paths(wb, bh)
+    _build_mssql(wb, meta.get("mssql") or {})
     for spec in post:
         if spec.skip_if_empty and not spec.rows:
             continue
