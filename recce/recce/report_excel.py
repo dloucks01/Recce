@@ -81,6 +81,7 @@ TAB_COLORS = {
     "Exploitation": _TAB_FIND, "Attack Path": _TAB_FIND,
     "Services by Product": _TAB_INV, "Databases": _TAB_INV,
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
+    "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND,
     "Raw NSE": _TAB_RAW,
 }
 
@@ -1242,6 +1243,68 @@ def _build_active_directory(wb, hosts: list[Host], domains: list[Domain]) -> Non
     sh.set_col(2, 70)
 
 
+_SEV_STYLE = {"critical": "sev_critical", "high": "sev_high", "medium": "sev_medium",
+              "low": "sev_low", "info": "sev_info"}
+
+
+def _build_ad_findings(wb, analysis: dict) -> None:
+    """AD misconfigurations / vulnerabilities from a SharpHound import - one row per
+    finding, most-severe first, each with the exact prove/abuse command."""
+    findings = (analysis or {}).get("findings") or []
+    if not findings:
+        return
+    sh = wb.add_sheet("AD Findings")
+    sh.write([("Active Directory - Findings (from BloodHound/SharpHound)", "title")])
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+    sh.write([("  ".join(f"{k}: {counts[k]}" for k in
+               ("critical", "high", "medium", "low") if counts.get(k)), "bold")])
+    sh.write([""])
+    headers = ["Severity", "Category", "Finding", "Principal", "Target", "Detail",
+               "Tool", "Prove / abuse command", "Remediation"]
+    sh.write([(h, "bold") for h in headers])
+    for f in findings:
+        style = _SEV_STYLE.get(f["severity"])
+        sh.write([(f["severity"].upper(), style), f["category"], f["title"],
+                  f["principal"], f["target"], f["detail"], f["tool"],
+                  f["command"], f["remediation"]])
+    for i, w in enumerate((10, 12, 34, 26, 22, 46, 22, 70, 44), start=1):
+        sh.set_col(i, w)
+
+
+def _build_ad_paths(wb, analysis: dict) -> None:
+    """AD attack paths (owned/low-priv principal -> Domain Admin / domain / DC) and,
+    when a credential was supplied, the Kerberos actions to run for effect."""
+    paths = (analysis or {}).get("paths") or []
+    kerb = (analysis or {}).get("kerberos") or []
+    if not paths and not kerb:
+        return
+    sh = wb.add_sheet("AD Attack Paths")
+    sh.write([("Active Directory - Attack Paths to Domain Admin", "title")])
+    sh.write([("Shortest privilege-escalation paths grounded in the collected graph. "
+               "Walk each edge with the named EXISTING tool.", "sub")])
+    sh.write([""])
+    for i, p in enumerate(paths, start=1):
+        who = "ANY authenticated user" if p.get("any_user") else p["start"]
+        head = f"Path {i}: {who} -> {p['target']}  ({p['length']} hop(s))"
+        sh.write([(head, "boldred" if p["length"] <= 2 else "bold")])
+        sh.write(["", p["chain"]])
+        for st in p["steps"]:
+            sh.write(["", f"[{st['label']}] {st['src']} -> {st['dst']}:  {st['abuse']}"])
+        sh.write([""])
+    if kerb:
+        sh.write([("Kerberos actions (for effect - with the supplied credential/hash)",
+                   "title")])
+        for a in kerb:
+            sh.write([(a["title"], "bold")])
+            sh.write(["", a["command"]])
+            sh.write(["", a["why"]])
+            sh.write([""])
+    sh.set_col(1, 4)
+    sh.set_col(2, 120)
+
+
 # --- public entry points --------------------------------------------------------
 
 def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
@@ -1311,9 +1374,14 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     # Which sheets will actually exist (skip_if_empty ones may not), in tab order,
     # so the Overview's jump bar only links to sheets that are really there.
     ad_present = bool(domains or ad.domain_controllers(hosts))
+    bh = meta.get("ad_bloodhound") or {}
     nav = [s.title for s in pre if not (s.skip_if_empty and not s.rows)]
     if ad_present:
         nav.append("Active Directory")
+    if bh.get("findings"):
+        nav.append("AD Findings")
+    if bh.get("paths") or bh.get("kerberos"):
+        nav.append("AD Attack Paths")
     nav += [s.title for s in post if not (s.skip_if_empty and not s.rows)]
 
     # Pre-compute each host's Checklist row (header is row 1, data from row 2) so
@@ -1336,6 +1404,8 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         _write_spec(wb.add_sheet(spec.title), spec, tracking,
                     order_map.get(spec.title), statuses)
     _build_active_directory(wb, hosts, domains)
+    _build_ad_findings(wb, bh)
+    _build_ad_paths(wb, bh)
     for spec in post:
         if spec.skip_if_empty and not spec.rows:
             continue

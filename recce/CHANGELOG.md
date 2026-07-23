@@ -141,6 +141,31 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
       `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
       version from its `readme.txt` Stable tag.
+- **`bloodhound` — SharpHound import, AD vulnerabilities, and paths to Domain Admin.**
+  Point recce at a SharpHound collection (`recce bloodhound loot.zip -o eng`, or a
+  directory / single `.json`) and it parses the AD object graph offline (stdlib
+  `json`/`zipfile`, no BloodHound/neo4j needed) and turns it into a provable
+  runbook:
+  - **AD Findings sheet** — every misconfiguration / vulnerability the graph
+    reveals, most-severe first, each with the **exact EXISTING-tool command to
+    prove or abuse it**: Kerberoastable & AS-REP-roastable accounts (with the
+    `GetUserSPNs`/`GetNPUsers` + hashcat lines), **DCSync rights held off tier-0**
+    (`secretsdump -just-dc`), unconstrained/constrained delegation & **RBCD**,
+    **shadow-credential** (`AddKeyCredentialLink`) edges (`certipy shadow`),
+    dangerous ACLs from low-priv principals (`dacledit`/`bloodyAD`), passwords in
+    descriptions, `PASSWD_NOTREQD`, and a non-zero **MachineAccountQuota**.
+  - **AD Attack Paths sheet** — the **shortest privilege-escalation path from an
+    owned / low-priv principal to Domain Admins / the domain object / a DC**
+    (`--owned USER` to start from a principal you control; otherwise it shows what
+    *any authenticated user* can reach), rendered as an edge chain with the exact
+    tool + action to walk each hop.
+  - **Kerberos for effect** — pass `--creds 'DOMAIN/user:secret'` (an NT hash if
+    it's 32 hex chars) and recce stages the actions to run: roast, AS-REP, DCSync,
+    and delegation ticket forging, parametrised with your credential/`-hashes`.
+  - Merges the collected domain facts (functional level, trusts, MachineAccountQuota)
+    into the Active Directory sheet even with no network scan. References existing
+    published tooling (impacket / certipy / netexec / bloodyAD / Rubeus); generates
+    no exploit code.
 - **Engagement folder stays operator-accessible after sudo runs.** recce often
   runs under sudo (raw-socket scans, reading protected files), which left the
   output files root-owned and unreadable/uneditable to the normal user afterward.
