@@ -153,7 +153,14 @@ def _attack_path(hosts):
             f'<div class="step"><div class="t">{escape(s["title"])} '
             f'<span class="muted">— {escape(tgt)}</span></div>'
             f'<div class="mono muted">{escape(s["cmd"])}</div></div>')
-    out.append("</div></section>")
+    out.append("</div>")
+    # Copyable graph source (airgapped-friendly: no external JS required; paste
+    # into mermaid.live / GitHub, or `dot -Tpng` the DOT form recce writes).
+    out.append(
+        '<details class="graph"><summary>Attack-path graph (Mermaid — paste into '
+        'mermaid.live or GitHub)</summary>'
+        f'<pre class="mermaid mono">{escape(ap.mermaid(hosts, steps))}</pre></details>')
+    out.append("</section>")
     return "".join(out)
 
 

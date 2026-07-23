@@ -1575,6 +1575,19 @@ def cmd_attackpath(args: argparse.Namespace) -> int:
         tgt = s["ip"] + (f" ({s['hostname']})" if s["hostname"] else "")
         print(f"  [{tgt}] {s['title']}")
         print(f"       {s['tool']}:  {s['cmd']}")
+    # Graph artifacts - Mermaid (paste anywhere) + Graphviz DOT (render to PNG).
+    mmd_path = os.path.join(args.output_dir, "attack_path.mmd")
+    dot_path = os.path.join(args.output_dir, "attack_path.dot")
+    try:
+        os.makedirs(args.output_dir, exist_ok=True)
+        with open(mmd_path, "w", encoding="utf-8") as fh:
+            fh.write(ap.mermaid(hosts, steps))
+        with open(dot_path, "w", encoding="utf-8") as fh:
+            fh.write(ap.dot(hosts, steps))
+        print(f"\n  Graph: {mmd_path}  (paste into mermaid.live / GitHub)")
+        print(f"  Graph: {dot_path}  (render: dot -Tpng {dot_path} -o attack_path.png)")
+    except OSError as exc:
+        print(f"  [!] Could not write graph files: {exc}")
     print("\n  Full table on the Attack Path sheet; runnable artifacts via "
           "`recce exploitplan`.")
     return 0
