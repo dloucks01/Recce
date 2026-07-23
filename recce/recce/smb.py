@@ -441,12 +441,29 @@ def prove_writable(ip: str, share: str, creds: dict | None = None,
     if err:
         return {"writable": False, "error": err, "command": " ".join(cmd)}
     low = out.lower()
-    # A successful put shows the marker in the subsequent `ls`; failures say
-    # NT_STATUS_ACCESS_DENIED / NT_STATUS_... .
-    wrote = _PROBE_MARK in low and "nt_status_access_denied" not in low \
-        and "nt_status_" not in low.split(_PROBE_MARK, 1)[0][-40:]
-    return {"writable": bool(wrote), "evidence": out.strip(),
-            "command": " ".join(cmd), "error": None}
+    # Judge the WRITE from the put itself, not the whole transcript: smbclient prints
+    # "putting file ... as \marker (rate)" only on a successful STOR, and
+    # "NT_STATUS_..._DENIED opening remote file" when the put is refused. (Keying off
+    # the whole blob would let the trailing `del` result - which can be ACCESS_DENIED
+    # on a create-but-not-delete share - flip a real write to a false negative.)
+    wrote = "putting file" in low and "opening remote file" not in low
+    # Cleanup contract: if the write landed but the in-script `del` was refused, the
+    # marker is still on the share - make one more explicit delete attempt so we never
+    # leave it behind, and record whether cleanup succeeded.
+    cleanup_ok = wrote and "deleting remote file" not in low  # no delete error seen
+    if wrote and not cleanup_ok:
+        del_cmd = [tool, f"//{ip}/{share}"] + authflag + ["-c", f"del {marker}"]
+        if port and port != _DEFAULT_PORT:
+            del_cmd += ["-p", str(port)]
+        d_out, _d_err = _run(del_cmd, timeout=30)
+        cleanup_ok = "nt_status" not in (d_out or "").lower()
+        out += "\n" + d_out
+    ev = out.strip()
+    if wrote and not cleanup_ok:
+        ev += (f"\n\n[!] cleanup: the delete of {marker} was refused - the marker may "
+               "remain on the share; remove it manually.")
+    return {"writable": bool(wrote), "cleanup_ok": bool(cleanup_ok),
+            "evidence": ev, "command": " ".join(cmd), "error": None}
 
 
 def null_session_findings(ip: str, port: int, session: dict) -> list[dict]:
@@ -490,7 +507,7 @@ def write_proof_finding(ip: str, port: int, share: str, proof: dict,
         return None
     anon = "" if (creds and creds.get("user")) else "anonymous/guest "
     return _finding(
-        "high", "Writable SMB share (proven)", f"{ip}:{port}",
+        "high", f"Writable SMB share (proven): {share}", f"{ip}:{port}",
         f"recce PROVED write access to \\\\{ip}\\{share} with {anon}access by "
         "dropping a marker file, listing it, then deleting it (fully reversible):\n\n"
         + (proof.get("evidence") or ""),

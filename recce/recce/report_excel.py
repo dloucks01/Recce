@@ -841,6 +841,17 @@ def _build_guide(wb, meta: dict) -> None:
         ("MSSQL", "SQL Server offensive view: endpoints (version/encryption/access/"
                   "privilege), misconfig/vuln findings, and the credential-free + "
                   "MSSQLPwner-style runbook & attack chain. Run `recce mssql`."),
+        ("SMB", "SMB offensive view: pre-auth posture (dialect / signing / SMBv1), "
+                "anonymous & credentialed share enumeration, and a reversible "
+                "writable-share proof. Run `recce smb`."),
+        ("FTP", "FTP offensive view: banner / anonymous-login / AUTH-TLS posture, "
+                "known-backdoor matches (vsftpd 2.3.4, ProFTPD), and a reversible "
+                "writable-directory proof. Run `recce ftp`."),
+        ("Docker", "Docker Engine API exposure: an unauthenticated API is remote root "
+                   "RCE on the host. recce READS the API to prove it. Run `recce docker`."),
+        ("Kubernetes", "Kubernetes attack surface: unauthenticated reads of the kubelet "
+                       "(exec-into-pods), kube-apiserver (anonymous LIST / Secrets) and "
+                       "etcd (all cluster secrets). Run `recce k8s`."),
         ("Priv-Esc", "Per-host escalation findings from the local sweep "
                      "(recce deploy/ingest) + remote signals. Un-swept hosts show a "
                      "'run recce deploy' to-do; dead IPs get no rows."),
@@ -868,6 +879,17 @@ def _build_guide(wb, meta: dict) -> None:
         ("mssql [-u U -p P -d DOM]",
          "MSSQL: pre-auth probes (no creds) + nxc access/priv matrix + the "
          "MSSQLPwner-style runbook & attack chain (commands pre-filled)."),
+        ("smb [-u U -p P -d DOM] [--prove-write]",
+         "SMB: stdlib signing/SMBv1 posture + anonymous/credentialed share enum + "
+         "a reversible writable-share proof."),
+        ("ftp [-u U -p P] [--prove-write]",
+         "FTP: anonymous-login / AUTH-TLS posture + known-backdoor match + a "
+         "reversible writable-directory proof."),
+        ("docker", "Docker: read the Engine API (2375/2376) unauthenticated -> a "
+                   "CONFIRMED exposed daemon is remote root RCE on the host."),
+        ("kubernetes / k8s", "Kubernetes: unauthenticated reads of the kubelet, "
+                             "kube-apiserver and etcd (exec-into-pods / anonymous "
+                             "Secrets / all cluster secrets)."),
         ("ad <sharphound> <certipy> -u U -p P -d DOM",
          "Import SharpHound + Certipy (ADCS): AD vulns, ESC findings, and the "
          "shortest paths from your account to Domain Admin - commands pre-filled."),
@@ -1016,6 +1038,25 @@ def _build_runbook(wb, meta: dict) -> None:
     cmd("  --screenshots",
         "Capture terminal-style PROOF screenshots of executed actions (RCE output, "
         "write-proof, data mining) into engagement/screenshots/ for the walkthroughs.")
+
+    section("5d. Additional services - SMB / FTP / Docker / Kubernetes",
+            "Deep, per-service offensive enumeration. Each probes with recce's own "
+            "stdlib code (no creds needed to start), folds findings into the main "
+            "totals, and fills its own tab. Run the ones your enum turned up.")
+    cmd("smb -o eng   [-u alice -p 'Passw0rd!' -d corp.local] [--prove-write]",
+        "SMB: stdlib SMB2/SMBv1 negotiate posture (signing NOT required -> NTLM relay; "
+        "SMBv1 -> EternalBlue surface), anonymous & credentialed share enumeration, and "
+        "a reversible writable-share proof (drop a marker, list it, delete it).")
+    cmd("ftp -o eng   [-u bob -p 'hunter2'] [--prove-write]",
+        "FTP: banner / anonymous-login / AUTH-TLS posture, known-backdoor match (vsftpd "
+        "2.3.4, ProFTPD mod_copy), and a reversible writable-directory proof.")
+    cmd("docker -o eng   [--screenshots]",
+        "Docker: read the Engine API (2375/2376) unauthenticated - a CONFIRMED exposed "
+        "daemon is remote ROOT RCE on the host (recce only READS to prove it).")
+    cmd("k8s -o eng",
+        "Kubernetes: unauthenticated reads of the kubelet (exec-into-pods), "
+        "kube-apiserver (anonymous LIST / Secrets = cluster compromise) and etcd "
+        "(all cluster secrets in the clear).")
 
     section("6. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
@@ -1766,7 +1807,8 @@ def _build_kubernetes(wb, analysis: dict) -> None:
     sh.write([(h, "bold") for h in ("IP:Port", "Surface", "Exposure", "Detail")])
     for t in tgts:
         role = t.get("role", "")
-        exposed = t.get("anon_pods") or t.get("anon_list") or t.get("v2_readable")
+        exposed = (t.get("anon_pods") or t.get("anon_list")
+                   or t.get("v2_readable") or t.get("v3_readable"))
         expcell = ("EXPOSED", "sev_critical") if exposed else \
             ("reachable" if t.get("reachable") else "?")
         detail = ""

@@ -3323,6 +3323,24 @@ class KubernetesTest(unittest.TestCase):
         self.assertIn(proofs.CONFIRMED, verdicts)                  # kubelet read
         self.assertIn(proofs.LIKELY, verdicts)                     # anonymous-auth 403
 
+    def test_v3_etcd_is_flagged(self):
+        # Modern etcd disables the v2 keys API; a readable v3 gateway must still fire.
+        from recce import kubernetes as k8s
+        pr = {("10.0.0.90", 2379): {"role": "etcd", "v2_readable": False,
+                                    "v3_readable": True, "etcd_version": "3.5.9"}}
+        h = Host(ip="10.0.0.90", ports=[Port(portid=2379, state="open")])
+        fs = k8s.findings([h], pr)
+        self.assertTrue(any("etcd exposed" in f["title"] for f in fs))
+        self.assertIn("v3", " ".join(f["detail"] for f in fs))
+
+    def test_8080_is_not_auto_selected_as_apiserver(self):
+        from recce import kubernetes as k8s
+        self.assertEqual(k8s.role(8080), "unknown")
+        self.assertFalse(k8s.is_k8s(Port(portid=8080, state="open", service="http")))
+        # but a service explicitly named kube-apiserver is still caught
+        self.assertTrue(k8s.is_k8s(Port(portid=8080, state="open",
+                                        service="kube-apiserver")))
+
     def test_probe_parsers(self):
         from recce import kubernetes as k8s
         self.assertTrue(k8s._is_podlist({"kind": "PodList", "items": [1, 2]}))
@@ -3455,6 +3473,16 @@ class DockerTest(unittest.TestCase):
         verdicts = [r["verdict"] for r in proofs.verify_host(h)]
         self.assertIn(proofs.CONFIRMED, verdicts)
 
+    def test_probed_but_not_exposed_marks_false(self):
+        # A Docker port that answers TCP but whose API read fails (TLS-locked/auth) must
+        # come back exposed=False + probed=True, not an unset 'not probed'.
+        from recce import docker
+        h = Host(ip="127.0.0.1", ports=[Port(portid=2375, state="open")])
+        an = docker.analyze([h], active=True)   # nothing is listening on 2375 here
+        t = an["targets"][0]
+        self.assertFalse(t.get("exposed"))
+        self.assertTrue(t.get("probed"))
+
     def test_cmd_docker_end_to_end(self):
         from recce import cli, xlsx, docker
         from recce.store import Store
@@ -3547,6 +3575,51 @@ class FtpTest(unittest.TestCase):
         self.assertIn("CWE-732", f["cwes"])
         self.assertIsNone(ftp.write_proof_finding("10.0.0.80", 21,
                                                   {"writable": False}, None))
+
+    def test_multiline_220_banner_reaches_backdoor_match(self):
+        # A ProFTPD version on the SECOND 220 line must still be captured + matched.
+        import socket
+        import threading
+        from recce import ftp
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def serve():
+            try:
+                c, _ = srv.accept()
+                c.sendall(b"220-Welcome to ACME FTP\r\n220 ProFTPD 1.3.5 Server ready\r\n")
+                while True:
+                    data = c.recv(1024)
+                    if not data:
+                        break
+                    cmd = data.decode("latin-1", "replace").upper()
+                    if cmd.startswith("FEAT"):
+                        c.sendall(b"211-Features:\r\n AUTH TLS\r\n211 End\r\n")
+                    elif cmd.startswith("USER"):
+                        c.sendall(b"331 password please\r\n")
+                    elif cmd.startswith("PASS"):
+                        c.sendall(b"530 login incorrect\r\n")
+                    elif cmd.startswith("SYST"):
+                        c.sendall(b"215 UNIX Type: L8\r\n")
+                    elif cmd.startswith("QUIT"):
+                        c.sendall(b"221 bye\r\n")
+                        break
+                c.close()
+            except OSError:
+                pass
+        threading.Thread(target=serve, daemon=True).start()
+        try:
+            pr = ftp.probe("127.0.0.1", port, timeout=3.0)
+        finally:
+            srv.close()
+        self.assertIsNotNone(pr)
+        self.assertIn("ProFTPD 1.3.5", pr["banner"])              # 2nd line captured
+        h = Host(ip="127.0.0.1", ports=[Port(portid=21, state="open", service="ftp")])
+        fs = ftp.findings([h], {("127.0.0.1", 21): pr})
+        self.assertTrue(any("mod_copy" in f["title"].lower() for f in fs))
 
     def test_cmd_ftp_end_to_end(self):
         from recce import cli, xlsx
@@ -3656,6 +3729,61 @@ class SmbTest(unittest.TestCase):
         signing = next(v for k, v in verdicts.items() if "signing" in k.lower())
         self.assertEqual(smbv1, proofs.CONFIRMED)
         self.assertEqual(signing, proofs.CONFIRMED)
+
+    def test_writable_shares_do_not_collapse(self):
+        # Two writable shares on one host must survive as two distinct findings/Vulns.
+        from recce import smb
+        f1 = smb.write_proof_finding("10.0.0.60", 445, "data",
+                                     {"writable": True, "evidence": "e"}, None)
+        f2 = smb.write_proof_finding("10.0.0.60", 445, "backups",
+                                     {"writable": True, "evidence": "e"}, None)
+        self.assertNotEqual(f1["title"], f2["title"])
+        vulns = smb.findings_to_vulns([f1, f2])["10.0.0.60"]
+        self.assertEqual(len({v.key for v in vulns}), 2)          # both survive dedup
+
+    def test_writable_share_confirmed_by_prove_engine(self):
+        from recce import smb, proofs
+        f = smb.write_proof_finding("10.0.0.60", 445, "data",
+                                    {"writable": True, "evidence": "e"}, None)
+        h = Host(ip="10.0.0.60", ports=[Port(portid=445, state="open")],
+                 vulns=smb.findings_to_vulns([f])["10.0.0.60"])
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)                 # dedicated recipe
+
+    def test_prove_writable_judges_the_put_and_cleans_up(self):
+        from recce import smb
+        orig_tool, orig_run = smb.smbclient_tool, smb._run
+        smb.smbclient_tool = lambda: "/usr/bin/smbclient"
+        try:
+            # Success: put lands, delete is silent -> writable + cleaned up.
+            smb._run = lambda cmd, timeout=60: (
+                "putting file /tmp/x as \\recce_smb_probe.txt (10.0 kb/s)\n"
+                "  recce_smb_probe.txt\n", None)
+            r = smb.prove_writable("1.2.3.4", "data", None)
+            self.assertTrue(r["writable"])
+            self.assertTrue(r["cleanup_ok"])
+            # Write lands but the in-script delete is DENIED -> still writable, and a
+            # second explicit delete is attempted (cleanup retried).
+            calls = []
+
+            def run_deldenied(cmd, timeout=60):
+                calls.append(cmd)
+                if len(calls) == 1:
+                    return ("putting file /tmp/x as \\recce_smb_probe.txt (9 kb/s)\n"
+                            "NT_STATUS_ACCESS_DENIED deleting remote file "
+                            "\\recce_smb_probe.txt\n", None)
+                return ("", None)                                 # explicit retry del
+            smb._run = run_deldenied
+            r = smb.prove_writable("1.2.3.4", "data", None)
+            self.assertTrue(r["writable"])
+            self.assertEqual(len(calls), 2)                       # cleanup retried
+            # Put refused -> not writable (no false positive from a trailing marker).
+            smb._run = lambda cmd, timeout=60: (
+                "NT_STATUS_ACCESS_DENIED opening remote file "
+                "\\recce_smb_probe.txt\n", None)
+            self.assertFalse(smb.prove_writable("1.2.3.4", "data", None)["writable"])
+        finally:
+            smb.smbclient_tool, smb._run = orig_tool, orig_run
 
     def test_null_session_findings(self):
         from recce import smb

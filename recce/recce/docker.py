@@ -275,6 +275,7 @@ def analyze(hosts: list[Host], active: bool = True) -> dict:
     probes: dict = {}
     if active:
         for t in targets:
+            t["probed"] = True
             pr = probe(t["ip"], t["port"])
             if pr:
                 probes[(t["ip"], t["port"])] = pr
@@ -283,6 +284,10 @@ def analyze(hosts: list[Host], active: bool = True) -> dict:
                 t["containers"] = pr.get("containers")
                 t["images"] = pr.get("images")
                 t["name"] = pr.get("name", "")
+            else:
+                # The port answered TCP (it's a target) but the API read failed -
+                # mutual-TLS-locked or authenticated, not unauth-exposed.
+                t["exposed"] = False
     fs = findings(hosts, probes)
     runbooks = [{"target": f"{t['ip']}:{t['port']}", "ip": t["ip"],
                  "credfree": runbook(t["ip"], t["port"]), "credentialed": []}
