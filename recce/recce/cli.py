@@ -11,6 +11,7 @@ Subcommands (see `recce -h` for the full, authoritative list):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -271,7 +272,14 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     hosts = store.all_hosts()
     tracking = store.get_tracking()
     domains = _resolve_domains(store, hosts)
-    update_workbook(paths["xlsx"], hosts, meta={"subtitle": title},
+    meta = {"subtitle": title}
+    bh_blob = store.get_meta("ad_bloodhound")
+    if bh_blob:
+        try:
+            meta["ad_bloodhound"] = json.loads(bh_blob)
+        except ValueError:
+            pass
+    update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
                     credentials=store.all_credentials())
@@ -2356,6 +2364,95 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bloodhound(args: argparse.Namespace) -> int:
+    """Import a SharpHound/BloodHound collection (.zip / dir / .json), identify AD
+    misconfigurations + vulnerabilities, map the shortest paths from an owned /
+    low-priv principal to Domain Admin, and - if a credential/hash is given - emit
+    the Kerberos actions to run for effect. Airgapped, stdlib-only."""
+    from . import bloodhound as bh
+    src = args.path
+    if not os.path.exists(src):
+        print(f"[x] Not found: {src}")
+        return 1
+    if not bh.is_sharphound(src):
+        print(f"[!] {src} doesn't look like a SharpHound collection (no typed "
+              "users/computers/groups/domains JSON). Parsing anyway.")
+    owned = set()
+    if args.owned:
+        for chunk in args.owned:
+            owned.update(o.strip() for o in chunk.split(",") if o.strip())
+    creds = None
+    if args.creds:
+        c = _parse_cred_spec(args.creds)
+        creds = {"domain": c.domain, "user": c.username, "secret": c.secret,
+                 "is_hash": c.kind == "nthash", "dc_ip": args.dc_ip or ""}
+
+    print(f"[*] Parsing SharpHound collection: {src}")
+    analysis = bh.analyze(src, owned=owned, creds=creds)
+    st = analysis["stats"]
+    print(f"[+] Graph: {st['nodes']} node(s), {st['edges']} edge(s) "
+          f"({', '.join(f'{k}={v}' for k, v in sorted(st['by_type'].items()))})")
+
+    fs = analysis["findings"]
+    if fs:
+        by_sev: dict[str, int] = {}
+        for f in fs:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        print(f"[+] {len(fs)} AD finding(s): "
+              + ", ".join(f"{by_sev[s]} {s}" for s in
+                          ("critical", "high", "medium", "low") if by_sev.get(s)))
+        for f in fs[:8]:
+            print(f"      [{f['severity'].upper():8}] {f['title']} - {f['principal']}")
+        if len(fs) > 8:
+            print(f"      ... and {len(fs) - 8} more (see the AD Findings sheet)")
+
+    paths_found = analysis["paths"]
+    if paths_found:
+        print(f"[+] {len(paths_found)} attack path(s) to a high-value target:")
+        for p in paths_found[:5]:
+            who = "ANY user" if p.get("any_user") else p["start"]
+            print(f"      {who} -> {p['target']}  ({p['length']} hop): {p['chain']}")
+    else:
+        print("[!] No path to a high-value target from the chosen start set"
+              + ("" if owned else " (pass --owned <user> to start from a principal "
+                 "you control)") + ".")
+    if analysis["kerberos"]:
+        print(f"[+] {len(analysis['kerberos'])} Kerberos action(s) staged "
+              "(see the AD Attack Paths sheet).")
+
+    paths = _open_paths(args.output_dir)
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    if not store.get_meta("engagement"):
+        store.set_meta("engagement", args.title)
+    store.set_meta("ad_bloodhound", json.dumps(analysis))
+    # Merge domain facts (trusts, functional level, MachineAccountQuota) so the
+    # Active Directory sheet reflects the import even without a network scan.
+    from .models import Domain
+    for dom in analysis["domains"]:
+        name = (dom.get("name") or "").lower()
+        if not name:
+            continue
+        existing = store.get_domain(name)
+        d = existing or Domain(name=name)
+        d.functional_level = d.functional_level or str(dom.get("functionallevel") or "")
+        d.machine_account_quota = d.machine_account_quota or str(
+            dom.get("machineaccountquota") or "")
+        d.trusts = d.trusts or [
+            {"name": t.get("TargetDomainName"), "direction": t.get("TrustDirection"),
+             "type": t.get("TrustType")} for t in dom.get("trusts") or []]
+        if "bloodhound" not in d.sources:
+            d.sources.append("bloodhound")
+        store.upsert_domain(d)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> AD Findings + AD Attack Paths sheets written to the workbook.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -2976,6 +3073,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="also map exploits via searchsploit (needs the tool)")
     imp.set_defaults(func=cmd_import)
 
+    # Import a SharpHound/BloodHound collection -> AD findings + paths to DA.
+    bhp = sub.add_parser("bloodhound",
+                         help="import SharpHound/BloodHound data -> AD vulns + paths to DA")
+    bhp.add_argument("path", help="SharpHound output: a .zip, a directory, or a .json")
+    bhp.add_argument("--owned", action="append", metavar="USER[,USER...]",
+                     help="principal(s) you already control - paths start here "
+                          "(repeatable / comma-separated). Default: any authenticated user")
+    bhp.add_argument("--creds", metavar="DOMAIN/user:secret",
+                     help="a credential or NT hash to stage Kerberos actions "
+                          "(secret is treated as an NT hash if it's 32 hex chars)")
+    bhp.add_argument("--dc-ip", help="DC IP to substitute into the staged commands")
+    bhp.add_argument("-o", "--output-dir", default="engagement")
+    bhp.add_argument("--title", default="Recce Engagement")
+    bhp.set_defaults(func=cmd_bloodhound)
+
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
     r.add_argument("--title", default="Recce Engagement")
@@ -3021,6 +3133,8 @@ and, when you want more depth, run any of:
       recce writeups -o eng · recce status -o eng
 
 Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
+SharpHound/BloodHound data?  recce bloodhound loot.zip --owned USER -o eng
+                             (AD vulns + shortest paths to Domain Admin)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.

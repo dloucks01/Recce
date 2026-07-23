@@ -3087,6 +3087,169 @@ class CredentialsTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
 
 
+class BloodHoundTest(unittest.TestCase):
+    BASE = "S-1-5-21-1-2-3"
+
+    def _collection(self, d):
+        """Write a synthetic SharpHound collection into dir `d`. Encodes:
+        BOB(user, Domain Users) --GenericAll--> HELPDESK --MemberOf--> Domain Admins,
+        BOB has DCSync on the domain, is kerberoastable, and has a pwd in its
+        description; ALICE is AS-REP roastable; SVC has unconstrained delegation."""
+        B = self.BASE
+        users = {"meta": {"type": "users", "count": 3}, "data": [
+            {"ObjectIdentifier": f"{B}-1001",
+             "Properties": {"name": "BOB@CORP.LOCAL", "domain": "CORP.LOCAL",
+                            "enabled": True, "hasspn": True,
+                            "serviceprincipalnames": ["MSSQL/db.corp.local"],
+                            "description": "svc account pwd=Summer2024!"},
+             "Aces": []},
+            {"ObjectIdentifier": f"{B}-1002",
+             "Properties": {"name": "ALICE@CORP.LOCAL", "enabled": True,
+                            "dontreqpreauth": True}, "Aces": []},
+            {"ObjectIdentifier": f"{B}-1003",
+             "Properties": {"name": "SVC@CORP.LOCAL", "enabled": True,
+                            "unconstraineddelegation": True}, "Aces": []},
+        ]}
+        groups = {"meta": {"type": "groups", "count": 3}, "data": [
+            {"ObjectIdentifier": f"{B}-512",
+             "Properties": {"name": "DOMAIN ADMINS@CORP.LOCAL", "highvalue": True},
+             "Members": [{"ObjectIdentifier": f"{B}-1105", "ObjectType": "Group"}],
+             "Aces": []},
+            {"ObjectIdentifier": f"{B}-513",
+             "Properties": {"name": "DOMAIN USERS@CORP.LOCAL"},
+             "Members": [{"ObjectIdentifier": f"{B}-1001", "ObjectType": "User"}],
+             "Aces": []},
+            {"ObjectIdentifier": f"{B}-1105",
+             "Properties": {"name": "HELPDESK@CORP.LOCAL"}, "Members": [],
+             "Aces": [{"PrincipalSID": f"{B}-1001", "PrincipalType": "User",
+                       "RightName": "GenericAll"}]},
+        ]}
+        domains = {"meta": {"type": "domains", "count": 1}, "data": [
+            {"ObjectIdentifier": B,
+             "Properties": {"name": "CORP.LOCAL", "functionallevel": "2016",
+                            "machineaccountquota": 10},
+             "Trusts": [],
+             "Aces": [{"PrincipalSID": f"{B}-1001", "RightName": "GetChanges"},
+                      {"PrincipalSID": f"{B}-1001", "RightName": "GetChangesAll"}]},
+        ]}
+        import json as _json
+        for name, blob in (("users", users), ("groups", groups), ("domains", domains)):
+            with open(os.path.join(d, f"2026_{name}.json"), "w") as fh:
+                fh.write(_json.dumps(blob))
+
+    def test_load_graph_builds_nodes_and_edges(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            g = bh.load_graph(d)
+        self.assertEqual(g["nodes"][f"{self.BASE}-1001"]["type"], "User")
+        # GenericAll ACE -> edge; group Members -> MemberOf; GetChanges*2 -> DCSync.
+        labels = {(s.split("-")[-1], lbl, dd.split("-")[-1]) for s, lbl, dd in g["edges"]}
+        self.assertIn(("1001", "GenericAll", "1105"), labels)
+        self.assertIn(("1105", "MemberOf", "512"), labels)
+        self.assertTrue(any(lbl == "DCSync" for _s, lbl, _d in g["edges"]))
+
+    def test_is_sharphound_detects_collection(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            self.assertTrue(bh.is_sharphound(d))
+        with tempfile.TemporaryDirectory() as d2:
+            with open(os.path.join(d2, "x.json"), "w") as fh:
+                fh.write('{"nope": 1}')
+            self.assertFalse(bh.is_sharphound(d2))
+
+    def test_findings_cover_the_classics(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            fs = bh.findings(bh.load_graph(d))
+        cats = {f["category"] for f in fs}
+        for expect in ("kerberoast", "asrep", "delegation", "dcsync", "hygiene", "creds"):
+            self.assertIn(expect, cats)
+        dcsync = next(f for f in fs if f["category"] == "dcsync")
+        self.assertEqual(dcsync["severity"], "critical")
+        self.assertIn("secretsdump", dcsync["command"])
+
+    def test_attack_path_owned_user_to_domain_admin(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            g = bh.load_graph(d)
+        paths = bh.attack_paths(g, owned={"BOB@CORP.LOCAL"})
+        da = next((p for p in paths if "DOMAIN ADMINS" in p["target"].upper()), None)
+        self.assertIsNotNone(da)
+        self.assertEqual(da["length"], 2)                       # BOB->HELPDESK->DA
+        self.assertEqual([s["label"] for s in da["steps"]], ["GenericAll", "MemberOf"])
+        self.assertIn("GenericAll", da["chain"])
+        # The domain object is reachable in one DCSync hop.
+        self.assertTrue(any(p["length"] == 1 and s["label"] == "DCSync"
+                            for p in paths for s in p["steps"]))
+
+    def test_kerberos_actions_with_hash(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            g = bh.load_graph(d)
+        acts = bh.kerberos_actions(g, {"domain": "CORP.LOCAL", "user": "bob",
+                                       "secret": "aad3b...:31d6c...", "is_hash": True,
+                                       "dc_ip": "10.0.0.1"})
+        titles = " ".join(a["title"] for a in acts)
+        self.assertIn("Kerberoast", titles)
+        self.assertIn("AS-REP", titles)
+        self.assertTrue(any("-hashes :" in a["command"] for a in acts))
+
+    def test_analyze_is_json_serialisable(self):
+        from recce import bloodhound as bh
+        import json as _json
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            an = bh.analyze(d, owned={"BOB@CORP.LOCAL"})
+        _json.dumps(an)                                          # must round-trip
+        self.assertEqual(an["stats"]["nodes"], 7)
+        self.assertTrue(an["stats"]["findings"] >= 6)
+        self.assertTrue(an["paths"])
+
+    def test_report_sheets_render(self):
+        from recce import bloodhound as bh, report_excel, xlsx
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            an = bh.analyze(d, owned={"BOB@CORP.LOCAL"},
+                            creds={"domain": "CORP.LOCAL", "user": "bob",
+                                   "secret": "x", "is_hash": False, "dc_ip": "1.2.3.4"})
+            p = os.path.join(d, "wb.xlsx")
+            report_excel.build_workbook([], p, meta={"subtitle": "T", "ad_bloodhound": an})
+            sheets = xlsx.read_sheets(p)
+        self.assertIn("AD Findings", sheets)
+        self.assertIn("AD Attack Paths", sheets)
+        findings_txt = "\n".join(" ".join(map(str, r)) for r in sheets["AD Findings"])
+        self.assertIn("DCSync", findings_txt)
+        self.assertIn("secretsdump", findings_txt)               # the prove command
+        paths_txt = "\n".join(" ".join(map(str, r)) for r in sheets["AD Attack Paths"])
+        self.assertIn("DOMAIN ADMINS", paths_txt)
+        self.assertIn("MemberOf", paths_txt)                     # the edge chain
+        self.assertIn("GetUserSPNs", paths_txt)                  # kerberos action
+
+    def test_cmd_bloodhound_end_to_end(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            out = os.path.join(d, "eng")
+            rc = cli.cmd_bloodhound(SimpleNamespace(
+                path=d, owned=["BOB@CORP.LOCAL"], creds=None, dc_ip=None,
+                output_dir=out, title="T"))
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(os.path.join(out, "enumeration.xlsx")))
+            st = Store(os.path.join(out, "results.sqlite"))
+            blob = st.get_meta("ad_bloodhound")
+            doms = {dm.name: dm for dm in st.all_domains()}
+            st.close()
+            self.assertTrue(blob)                                # analysis persisted
+            self.assertIn("corp.local", doms)                    # domain merged in
+            self.assertIn("bloodhound", doms["corp.local"].sources)
+
+
 class AttackPathTest(unittest.TestCase):
     def _hosts(self):
         from recce.models import Vuln, Account
