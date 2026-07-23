@@ -2908,6 +2908,37 @@ class ProofEngineTest(unittest.TestCase):
         self.assertEqual(r["verdict"], proofs.LIKELY)
         self.assertTrue(any("61616 is OPEN" in e for e in r["evidence"]))
 
+    def _ver_host(self, portid, prod, ver, title, ids=None):
+        h = Host(ip="10.0.0.5", ports=[Port(portid=portid, service="x", product=prod,
+                                            version=ver, state="open")])
+        h.vulns = [self._vuln(port=portid, title=title, source="version-db",
+                              ids=ids or [])]
+        return h
+
+    def test_version_cve_findings_now_get_a_verdict(self):
+        # Gap-1: version->CVE matches that previously had NO prove path.
+        from recce import proofs
+        # regreSSHion: patched build -> FALSE POSITIVE (catches the over-flag).
+        h = self._ver_host(22, "OpenSSH", "9.8p1", "OpenSSH regreSSHion pre-auth RCE",
+                           ["CVE-2024-6387"])
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.FALSE_POSITIVE)
+        # regreSSHion: affected window -> LIKELY.
+        h = self._ver_host(22, "OpenSSH", "9.2p1", "OpenSSH regreSSHion", ["CVE-2024-6387"])
+        r = proofs.verify_host(h)[0]
+        self.assertEqual(r["verdict"], proofs.LIKELY)
+        self.assertTrue(any("backport" in e.lower() or "glibc" in e.lower()
+                            for e in r["evidence"]))
+        # Apache smuggling: version match -> LIKELY with the backport caveat.
+        h = self._ver_host(80, "Apache httpd", "2.4.52",
+                           "Apache httpd < 2.4.59 mod_proxy SSRF / smuggling")
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.LIKELY)
+        # EOL software: the version fact IS the proof -> CONFIRMED.
+        for prod, ver, title in [("MySQL", "5.6.0", "End-of-life MySQL (< 5.7) exposed"),
+                                 ("MongoDB", "3.4", "Legacy MongoDB (< 3.6) exposure"),
+                                 ("Microsoft IIS", "6.0", "Legacy Microsoft IIS - unsupported")]:
+            h = self._ver_host(3306, prod, ver, title)
+            self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED, title)
+
     def test_smb_signing_confirmed_vs_false_positive(self):
         from recce import proofs
         h = Host(ip="10.0.0.5", smb_signing="not required",
