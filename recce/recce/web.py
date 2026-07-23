@@ -12,9 +12,12 @@ gobuster / wpscan / sslscan). Airgapped-safe: only touches the target, stdlib on
 
 from __future__ import annotations
 
+import base64
 import http.client
+import json
 import re
 import ssl
+from urllib.parse import quote
 
 from .models import Host, Port, Vuln
 from . import probes
@@ -345,6 +348,160 @@ _PATHS = [
 _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
 
 
+# --- JWT weakness detection (from data already fetched - free) ------------------
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*")
+
+
+def _b64url(seg: str):
+    try:
+        return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _scan_jwts(ip: str, port: Port, headers: dict, body: str) -> list[Vuln]:
+    blob = (headers.get("set-cookie", "") + " " + headers.get("authorization", "")
+            + " " + body)
+    out: list[Vuln] = []
+    seen: set[str] = set()
+    for tok in _JWT_RE.findall(blob):
+        head_seg = tok.split(".", 1)[0]
+        raw = _b64url(head_seg)
+        if not raw:
+            continue
+        try:
+            alg = str(json.loads(raw).get("alg", "")).lower()
+        except Exception:  # noqa: BLE001
+            continue
+        if alg in seen:
+            continue
+        seen.add(alg)
+        red = f"{tok[:12]}…{tok[-6:]}"
+        if alg == "none":
+            out.append(_mk(ip, port, "web-jwt", "high",
+                           "JWT accepts 'alg:none' (unsigned - forgeable)", ["CWE-347"],
+                           f"A JWT with header alg=none was observed ({red}). If the server "
+                           "verifies it, tokens can be forged with any claims.",
+                           "Reject 'none'; pin the expected algorithm server-side."))
+        elif alg.startswith("hs"):
+            out.append(_mk(ip, port, "web-jwt", "low",
+                           f"JWT uses symmetric {alg.upper()} (offline-crackable secret)", ["CWE-347"],
+                           f"JWT header alg={alg.upper()} ({red}). If the HMAC secret is weak it "
+                           "cracks offline, letting you forge tokens.",
+                           "Use a long random secret (or RS256); rotate it.",
+                           confidence="potential"))
+        elif alg.startswith(("rs", "es", "ps")):
+            out.append(_mk(ip, port, "web-jwt", "info",
+                           f"JWT uses {alg.upper()} (check RS256->HS256 key-confusion)", ["CWE-347"],
+                           f"JWT header alg={alg.upper()} ({red}). Test the algorithm-confusion "
+                           "attack (sign with the public key as an HS256 secret).",
+                           "Pin the algorithm; don't accept alg switching.",
+                           confidence="potential"))
+    return out
+
+
+# --- SSTI / reflected-input quick check -----------------------------------------
+def _scan_reflection(ip: str, port: Port, base: str, auth) -> list[Vuln]:
+    # One request. {{7*7}} / ${7*7} / <%=7*7%> evaluating to 49 near our canary is a
+    # strong, low-false-positive SSTI signal; an unencoded <i> reflection is an
+    # XSS lead to verify. Injected into a throwaway param - non-destructive.
+    payload = "recceA{{7*7}}recceB${7*7}recceC<%=7*7%>recceD<i>"
+    r = _fetch(ip, port, "/?rc=" + quote(payload), auth=auth)
+    if not r or r[0] >= 500 or not r[2]:
+        return []
+    b = r[2]
+    out: list[Vuln] = []
+    if "recceA49" in b or "recceB49" in b or "recceC49" in b:
+        out.append(_mk(ip, port, "web-ssti", "high",
+                       "Server-Side Template Injection (7*7 evaluated to 49)", ["CWE-1336", "CWE-94"],
+                       f"GET {base}/?rc=<7*7 payload> returned the evaluated '49' next to the canary "
+                       "-> the template engine executed our input.",
+                       "Never render user input as a template; sandbox/escape it."))
+    elif "recceD<i>" in b:
+        out.append(_mk(ip, port, "web-reflected", "medium",
+                       "Input reflected unencoded (reflected-XSS lead)", ["CWE-79"],
+                       f"GET {base}/?rc=…<i> reflected the '<i>' unencoded -> verify for reflected XSS.",
+                       "Context-encode all reflected user input.", confidence="potential"))
+    return out
+
+
+# --- client-side JS secret scraping ---------------------------------------------
+_JS_SECRETS = [
+    (re.compile(r"AIza[0-9A-Za-z_\-]{35}"), "Google API key"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "AWS access key id"),
+    (re.compile(r"sk_live_[0-9A-Za-z]{16,}"), "Stripe live secret key"),
+    (re.compile(r"gh[pousr]_[0-9A-Za-z]{36}"), "GitHub token"),
+    (re.compile(r"xox[baprs]-[0-9A-Za-z-]{10,}"), "Slack token"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key"),
+    (re.compile(r'apiKey["\']\s*:\s*["\'][^"\']{8,}'), "hardcoded apiKey"),
+]
+_SCRIPT_SRC = re.compile(r'<script[^>]+src=["\']([^"\']+)["\']', re.I)
+
+
+def _scan_js(ip: str, port: Port, base: str, body: str, auth) -> list[Vuln]:
+    out: list[Vuln] = []
+    seen_secret: set[str] = set()
+    srcs = [s for s in _SCRIPT_SRC.findall(body)
+            if "://" not in s and not s.startswith("//")][:8]
+    for src in srcs:
+        path = src if src.startswith("/") else "/" + src
+        r = _fetch(ip, port, path, auth=auth, read=131072)
+        if not r or r[0] != 200:
+            continue
+        js = r[2]
+        for rx, label in _JS_SECRETS:
+            m = rx.search(js)
+            if m and label not in seen_secret:
+                seen_secret.add(label)
+                out.append(_mk(ip, port, "web-js-secret", "high",
+                               f"Secret in client-side JS: {label}", ["CWE-615", "CWE-200"],
+                               f"{base}{path} contains a {label} (starts '{m.group(0)[:12]}…').",
+                               "Move secrets server-side; rotate any exposed key."))
+    return out
+
+
+# --- WordPress plugin / version enum (wpscan-lite) ------------------------------
+_WP_PLUGINS = ["contact-form-7", "woocommerce", "elementor", "wordpress-seo", "wordfence",
+               "akismet", "jetpack", "wpforms-lite", "revslider", "wp-file-manager",
+               "duplicator", "all-in-one-wp-migration"]
+
+
+def _scan_wordpress(ip: str, port: Port, base: str, body: str, auth) -> list[Vuln]:
+    out: list[Vuln] = []
+    # Core version from the generator meta or /readme.html.
+    ver = ""
+    m = re.search(r"WordPress\s+([\d.]+)", body)
+    if not m:
+        rd = _fetch(ip, port, "/readme.html", auth=auth)
+        if rd and rd[0] == 200:
+            m = re.search(r"[Vv]ersion\s+([\d.]+)", rd[2])
+    if m:
+        ver = m.group(1)
+        out.append(_mk(ip, port, "web-wp-version", "info",
+                       f"WordPress {ver} detected", ["CWE-1104"],
+                       f"WordPress core version {ver} (check for known core CVEs; run wpscan).",
+                       "Keep WordPress core current."))
+    # XML-RPC (brute-force / amplification surface).
+    x = _fetch(ip, port, "/xmlrpc.php", method="POST", body="<methodCall></methodCall>", auth=auth)
+    if x and x[0] in (200, 405) and "xml" in x[1].get("content-type", "").lower():
+        out.append(_mk(ip, port, "web-wp-xmlrpc", "low",
+                       "WordPress XML-RPC enabled", ["CWE-799"],
+                       f"{base}/xmlrpc.php is enabled (password brute-force + pingback amplification).",
+                       "Disable xmlrpc.php if unused."))
+    # Installed plugins + their version (readme Stable tag).
+    for slug in _WP_PLUGINS:
+        r = _fetch(ip, port, f"/wp-content/plugins/{slug}/readme.txt", auth=auth)
+        if r and r[0] == 200 and "=== " in r[2]:
+            pv = re.search(r"Stable tag:\s*([\d.]+)", r[2])
+            pver = pv.group(1) if pv else "?"
+            out.append(_mk(ip, port, "web-wp-plugin", "info",
+                           f"WordPress plugin '{slug}' v{pver} present", ["CWE-1104"],
+                           f"{base}/wp-content/plugins/{slug}/ (readme Stable tag {pver}); "
+                           "check it against wpscan/searchsploit.",
+                           "Keep plugins current; remove unused ones."))
+    return out
+
+
 def scan_endpoint(ip: str, port: Port, active: bool = True,
                   auth: dict | None = None, creds: bool = False) -> tuple[dict, list[Vuln]]:
     """Deep, non-intrusive scan of one web endpoint. Returns (profile, [Vuln]).
@@ -374,6 +531,9 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     findings.extend(probes.http_findings(ip, port))
     if probes._is_tls(port):
         findings.extend(probes.tls_findings(ip, port))
+    # JWT weaknesses read from the root response - free, so runs even passively.
+    if root:
+        findings.extend(_scan_jwts(ip, port, headers, body))
     # The active HTTP checks only make sense if the port actually spoke HTTP -
     # skip them for a TLS-only non-HTTP port (LDAPS/IMAPS) so we don't waste a
     # dozen dead requests there (its TLS findings above still count).
@@ -457,6 +617,10 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
     # Deep dives (each self-gates so they cost nothing when absent).
     findings.extend(_scan_actuator(ip, port, base, auth))
     findings.extend(_scan_backups(ip, port, base, auth))
+    findings.extend(_scan_reflection(ip, port, base, auth))
+    findings.extend(_scan_js(ip, port, base, body, auth))
+    if any("wordpress" in t.lower() for t in fp["tech"]):
+        findings.extend(_scan_wordpress(ip, port, base, body, auth))
     if creds:
         findings.extend(_basic_auth_defaults(ip, port, base,
                                              ["/", "/manager/html", "/admin", "/console"]))

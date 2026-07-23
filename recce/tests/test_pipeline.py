@@ -2540,12 +2540,27 @@ class WebModuleTest(unittest.TestCase):
                     if "Authorization" not in self.headers:
                         return self._send(401, b"auth", extra={"WWW-Authenticate": 'Basic realm="x"'})
                     return self._send(200, b"secret area")
+                if self.path.startswith("/?rc="):
+                    from urllib.parse import unquote
+                    val = unquote(self.path.split("=", 1)[1])
+                    # Evaluate {{7*7}} like a vulnerable template engine.
+                    rendered = val.replace("{{7*7}}", "49")
+                    return self._send(200, ("<html>" + rendered + "</html>").encode())
+                if self.path == "/app.js":
+                    return self._send(200, b"var k='AIzaSyA1234567890abcdefghijklmnopqrstuvw';")
+                if self.path == "/readme.html":
+                    return self._send(200, b"<h1>WordPress</h1> Version 6.4.2")
+                if self.path == "/wp-content/plugins/woocommerce/readme.txt":
+                    return self._send(200, b"=== WooCommerce ===\nStable tag: 8.3.1\n")
+                if self.path == "/jwt":
+                    return self._send(200, b"token=eyJhbGciOiJub25lIn0.eyJ1c2VyIjoiYSJ9.")
                 if self.path == "/.git/HEAD":
                     return self._send(200, b"ref: refs/heads/main\n")
                 if self.path == "/.env":
                     return self._send(200, b"APP_KEY=base64:x\nDB_PASSWORD=secret\n")
                 if self.path == "/":
-                    body = (b"<html><head><title>My Site</title></head><body>"
+                    body = (b"<html><head><title>My Site</title>"
+                            b"<script src=\"/app.js\"></script></head><body>"
                             b"Directory listing for /  wp-content/themes</body></html>")
                     return self._send(200, body, extra={"Set-Cookie": "PHPSESSID=abc; path=/"})
                 return self._send(404, b"nope")
@@ -2624,6 +2639,30 @@ class WebModuleTest(unittest.TestCase):
         prod, ver = web.product_version({}, '<meta name="generator" content="WordPress 6.4.2">')
         self.assertEqual(prod, "WordPress")
         self.assertEqual(ver, "6.4.2")
+
+    def test_ssti_js_secret_and_wordpress_enum(self):
+        from recce import web
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        sids = {v.script_id for v in findings}
+        self.assertIn("web-ssti", sids)          # {{7*7}} -> 49 in the reflected page
+        self.assertIn("web-js-secret", sids)     # AIza… key in /app.js
+        self.assertIn("web-wp-version", sids)    # readme.html -> 6.4.2
+        self.assertIn("web-wp-plugin", sids)     # woocommerce readme
+        js = next(v for v in findings if v.script_id == "web-js-secret")
+        self.assertIn("Google API key", js.title)
+
+    def test_jwt_alg_none_detected(self):
+        from recce import web
+        # A header.payload.sig where header = {"alg":"none"}.
+        findings = web._scan_jwts("1.1.1.1", Port(portid=443, service="https"),
+                                  {"set-cookie": "t=eyJhbGciOiJub25lIn0.eyJ1IjoiYSJ9."}, "")
+        self.assertTrue(findings)
+        self.assertEqual(findings[0].severity, "high")
+        self.assertIn("alg:none", findings[0].title.lower())
+        # Proof engine renders a verdict + jwt_tool step.
+        from recce import proofs
+        r = proofs.recipe_for(findings[0])
+        self.assertEqual(r["id"], "web-jwt")
 
     def test_passive_mode_skips_path_probes(self):
         from recce import web
