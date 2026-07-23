@@ -3250,6 +3250,45 @@ class BloodHoundTest(unittest.TestCase):
             self.assertIn("corp.local", doms)                    # domain merged in
             self.assertIn("bloodhound", doms["corp.local"].sources)
 
+    def test_findings_to_vulns_feed_main_findings_and_writeups(self):
+        from recce import bloodhound as bh
+        from recce.report_docx import group_findings, list_findings, _vuln_type
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            an = bh.analyze(d, owned={"BOB@CORP.LOCAL"})
+        vulns = bh.findings_to_vulns(an, "10.0.0.9", "CORP.LOCAL")
+        self.assertTrue(vulns)
+        h = Host(ip="10.0.0.9", os_family="Windows", roles=["Domain Controller"],
+                 vulns=vulns)
+        # group_findings powers the severity rollup, Vulnerabilities sheet + writeups.
+        groups = group_findings([h])
+        titles = {f.title for f in groups}
+        self.assertIn("DCSync rights held off tier-0", titles)
+        dcsync = next(f for f in groups if f.title == "DCSync rights held off tier-0")
+        self.assertEqual(dcsync.severity, "critical")
+        self.assertTrue(dcsync.remediation)                      # remediation carried
+        self.assertIn("secretsdump", " ".join(o for _i, _p, o in dcsync.evidence))
+        # Every AD CWE must classify (keeps the CWE-coverage test green) + have a type.
+        for f in groups:
+            vt, _cia = _vuln_type(f.cwes)
+            self.assertTrue(vt, f.cwes)
+        # list_findings (the appendix/HTML feed) includes them with severity.
+        lf = list_findings([h], min_severity="info")
+        self.assertTrue(any("DCSync" in x["title"] for x in lf))
+
+    def test_ad_findings_reach_vulnerabilities_sheet_e2e(self):
+        from recce import cli, xlsx
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            out = os.path.join(d, "eng")
+            cli.cmd_bloodhound(SimpleNamespace(
+                paths=[d], username="alice", password="Passw0rd!", domain="corp.local",
+                owned=None, creds=None, dc_ip="10.0.0.9", output_dir=out, title="T"))
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+        vtxt = "\n".join(" ".join(map(str, r)) for r in sheets.get("Vulnerabilities", []))
+        self.assertIn("DCSync", vtxt)                            # in the MAIN vuln sheet
+        self.assertIn("Kerberoastable", vtxt)
+
     def test_fill_creds_makes_commands_copy_paste_ready(self):
         from recce import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:

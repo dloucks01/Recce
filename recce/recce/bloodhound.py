@@ -613,6 +613,43 @@ def fill_creds(analysis: dict, creds: dict | None) -> dict:
 
 # --- top-level analysis ---------------------------------------------------------
 
+# AD finding category -> CWE(s). Every id here is already classified in
+# report_docx (so writeups + the CWE-coverage test stay green). ADCS ESCx ->
+# privilege escalation via certificate abuse (CWE-269).
+_CATEGORY_CWE = {
+    "kerberoast": ["CWE-262"], "asrep": ["CWE-262"], "dcsync": ["CWE-269"],
+    "delegation": ["CWE-266"], "rbcd": ["CWE-266"], "shadowcred": ["CWE-287"],
+    "acl": ["CWE-732"], "creds": ["CWE-522"], "hygiene": ["CWE-521"],
+}
+
+
+def findings_to_vulns(analysis: dict, ip: str, hostname: str = "") -> list:
+    """Convert the AD findings into first-class Vuln objects (attached to the DC /
+    domain host) so they feed the main severity totals, the Vulnerabilities sheet,
+    and the per-finding writeups - not just the AD-only sheets. Each keeps its
+    exact prove/abuse command as evidence."""
+    from .models import Vuln
+    out = []
+    for f in analysis.get("findings", []):
+        cat = f["category"]
+        cwes = ["CWE-269"] if cat.startswith("adcs-") else \
+            _CATEGORY_CWE.get(cat, ["CWE-284"])
+        who = f.get("principal") or ""
+        tgt = f.get("target") or ""
+        evidence = f.get("detail") or ""
+        if who or tgt:
+            evidence += f"\n\nPrincipal: {who}" + (f"  ->  {tgt}" if tgt else "")
+        if f.get("command"):
+            evidence += f"\n\nProve / abuse:\n{f['command']}"
+        out.append(Vuln(
+            ip=ip, port=None, protocol="tcp",
+            script_id=f"ad-{cat}", state="finding", title=f["title"],
+            severity=f["severity"], source="adcs" if cat.startswith("adcs-") else "bloodhound",
+            confidence="confirmed", cwes=list(cwes),
+            output=evidence.strip(), remediation=f.get("remediation", "")))
+    return out
+
+
 def empty_analysis() -> dict:
     """A base analysis dict for when there is no SharpHound graph (e.g. only a
     Certipy ADCS import). Findings get merged in by the caller."""
