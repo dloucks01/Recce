@@ -3388,6 +3388,72 @@ class MssqlTest(unittest.TestCase):
         self.assertFalse([f for f in fs3 if "TRUSTWORTHY" in f["title"]
                           or "CONFIRMED" in f["title"]])
 
+    def test_server_level_deep_checks(self):
+        from recce import mssql
+        enum = mssql.parse_enum(
+            "@@B:server\nSQL01|CORP\\alice|0|0|15.0.2000.5\n@@E:server\n"
+            "@@B:logins\nsa|1\n@@E:logins\n@@B:databases\nmaster|0|sa\n@@E:databases\n"
+            "@@B:links\n@@E:links\n@@B:impersonate\n@@E:impersonate\n@@B:config\n@@E:config\n"
+            "@@B:hashes\n@@E:hashes\n@@B:credentials\n@@E:credentials\n@@B:proxies\n@@E:proxies\n"
+            "@@B:linkedlogins\n@@E:linkedlogins\n"
+            "@@B:serverperms\nCONNECT SQL|GRANT\nIMPERSONATE ANY LOGIN|GRANT\n@@E:serverperms\n"
+            "@@B:publicserver\nALTER ANY LOGIN|GRANT\n@@E:publicserver\n"
+            "@@B:startup\nsp_backdoor|startup\n@@E:startup\n")
+        fs, chain, summary = mssql.chains_from_enum(
+            {"ip": "10.0.0.50", "port": 1433}, enum, {"user": "alice"})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("mixed_mode", kinds)                       # IsIntegratedSecurityOnly=0
+        self.assertIn("server_perms", kinds)                     # IMPERSONATE ANY LOGIN
+        self.assertIn("public_role", kinds)                      # ALTER ANY LOGIN to public
+        self.assertIn("startup_proc", kinds)                     # sp_backdoor
+        sp = next(f for f in fs if f["kind"] == "server_perms")
+        self.assertEqual(sp["severity"], "high")
+        self.assertIn("IMPERSONATE ANY LOGIN", sp["detail"])
+        self.assertIn("abuse server permission(s) IMPERSONATE ANY LOGIN", " -> ".join(chain))
+        # public ALTER ANY LOGIN is a dangerous perm -> high.
+        self.assertEqual(next(f for f in fs if f["kind"] == "public_role")["severity"], "high")
+        self.assertTrue(summary["mixed_mode"])
+        self.assertEqual(summary["public_server"], ["ALTER ANY LOGIN"])
+
+    def test_permission_mining_guest_and_public_grants(self):
+        from recce import mssql
+        dbs = ["master", "payroll", "hr"]
+        script = mssql.build_permmine_script(dbs)
+        self.assertIn("USE [payroll]", script)
+        self.assertIn("guest", script.lower())
+        out = ("@@GST:1\npayroll|guest_enabled\n@@GSTE:1\n"
+               "@@PBP:1\npayroll|public|SELECT|dbo.Salaries\npayroll|guest|EXECUTE|dbo.sp_Pay\n@@PBPE:1\n"
+               "@@GST:2\n@@GSTE:2\n@@PBP:2\nhr|public|SELECT|dbo.Employees\n@@PBPE:2\n")
+        perms = mssql.parse_permmine(out, dbs)
+        self.assertTrue(perms["payroll"]["guest"])
+        self.assertFalse(perms["hr"]["guest"])
+        self.assertIn(("guest", "EXECUTE", "dbo.sp_Pay"), perms["payroll"]["grants"])
+        fs = mssql.permmine_findings({"ip": "10.0.0.50", "port": 1433}, perms, {"user": "a"})
+        kinds = {f["kind"] for f in fs}
+        self.assertIn("guest_enabled", kinds)
+        obj = next(f for f in fs if f["kind"] == "object_perms")
+        self.assertEqual(obj["severity"], "high")                # EXECUTE = write/execute
+        self.assertIn("dbo.sp_Pay", obj["detail"])
+
+    def test_permmine_context_guard(self):
+        from recce import mssql
+        # Rows tagged with the wrong DB_NAME (failed USE) are rejected.
+        out = "@@GST:0\nmaster|guest_enabled\n@@GSTE:0\n@@PBP:0\n@@PBPE:0\n"
+        perms = mssql.parse_permmine(out, ["payroll"])
+        self.assertFalse(perms["payroll"]["guest"])
+
+    def test_proof_screenshot_html_and_gating(self):
+        from recce import mssql, cli
+        from types import SimpleNamespace
+        html = mssql.proof_html("Confirmed RCE", "10.0.0.50 as svc",
+                                "EXEC xp_cmdshell 'whoami'", "nt service\\mssql <b>x</b>")
+        self.assertIn("Confirmed RCE", html)
+        self.assertIn("&lt;b&gt;", html)                         # output is HTML-escaped
+        self.assertIn("PROOF", html)
+        # _mssql_shot is a no-op unless --screenshots is set.
+        self.assertIsNone(cli._mssql_shot(
+            SimpleNamespace(screenshots=False), "10.0.0.50", "n", "t", "s", "c", "o"))
+
     def test_datamine_finds_tables_and_sensitive_columns(self):
         from recce import mssql
         dbs = ["master", "payroll", "appdb"]

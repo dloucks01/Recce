@@ -1006,9 +1006,15 @@ def _build_runbook(wb, meta: dict) -> None:
     cmd("  --data",
         "Mine the databases: enumerate every table (+ row counts) and find sensitive "
         "columns/tables (passwords, PII, financial) across all databases.")
+    cmd("  --perms",
+        "Per-database object-permission mining: guest-enabled databases + exactly what "
+        "public/guest can read/write/execute (every login inherits it).")
     cmd("  --prove-write",
         "Prove write + permission-modify impact REVERSIBLY: create a table, modify a "
         "field, toggle a role - capture before/after, then undo everything.")
+    cmd("  --screenshots",
+        "Capture terminal-style PROOF screenshots of executed actions (RCE output, "
+        "write-proof, data mining) into engagement/screenshots/ for the walkthroughs.")
 
     section("6. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
@@ -1477,6 +1483,18 @@ def _build_mssql(wb, analysis: dict) -> None:
                 if v.get("interesting"):
                     line += "  |  SENSITIVE COLUMNS: " + ", ".join(v["interesting"][:10])
                 sh.write(["", line])
+        perms = rb.get("permmine")
+        if perms:
+            guest = [db for db, v in perms.items() if v.get("guest")]
+            sh.write([(f"Object permissions (guest enabled in {len(guest)} db)", "bold")])
+            for db, v in perms.items():
+                bits = []
+                if v.get("guest"):
+                    bits.append("GUEST ENABLED")
+                for principal, perm, obj in (v.get("grants") or [])[:8]:
+                    bits.append(f"{principal}:{perm} {obj}")
+                if bits:
+                    sh.write(["", f"{db}: " + "  |  ".join(bits)])
         cur = None
         for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
             if step["phase"] != cur:
