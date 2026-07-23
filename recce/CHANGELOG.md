@@ -141,6 +141,16 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
       `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
       version from its `readme.txt` Stable tag.
+- **Deeper service enum — product/version recovery (feeds CVE mapping).** `svcdetect`
+  now mines a concrete **product + version** out of the banner it already holds
+  (OpenSSH/dropbear, vsFTPd/ProFTPD/Pure-FTPd, Postfix/Exim/Sendmail,
+  MySQL/MariaDB, Dovecot/Courier, Apache/nginx/IIS/Tomcat `Server:` headers, …) —
+  so a port nmap named but left version-blank (or one recce banner-grabbed itself)
+  gets a version the offline CVE mapper can key on. A no-traffic `enrich_versions`
+  pass runs over **every** open port (even nmap-named ones) reading the servicefp
+  and captured banner; it only ever *fills* a blank product, never overwrites what
+  nmap concretely reported. Runs automatically in the enum path just before the
+  version→CVE assessment.
 - **Attack-path graph.** `recce attackpath` now also writes the synthesised path
   as a diagram — `attack_path.mmd` (Mermaid: stage subgraphs left-to-right, one
   node per confirmed step `host + finding`, dashed edges tracking a single box

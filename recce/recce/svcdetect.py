@@ -98,6 +98,50 @@ def _match_signature(data: str) -> tuple[str, str] | None:
     return None
 
 
+# --- product/version extraction (feeds CVE mapping) -----------------------------
+# nmap -sV names the *service* but frequently leaves product/version blank on the
+# ports it half-identified (and always on the ones we banner-grabbed ourselves).
+# A concrete "OpenSSH 8.9p1" / "Exim 4.94" / "vsFTPd 3.0.3" is what the CVE mapper
+# keys on, so we mine it out of the banner ourselves - no new traffic beyond the
+# banner we already hold. Each pattern captures named groups `prod` and `ver`.
+_PRODUCT_RE: list[re.Pattern] = [
+    # SSH: "SSH-2.0-OpenSSH_8.9p1 Ubuntu" / "SSH-2.0-dropbear_2020.81"
+    re.compile(r"SSH-2\.0-(?P<prod>OpenSSH|dropbear|libssh|ROSSSH)[_-]"
+               r"(?P<ver>\d[\w.]*)", re.I),
+    # FTP: "220 (vsFTPd 3.0.3)", "220 ProFTPD 1.3.5 Server", "FileZilla Server 0.9.60"
+    re.compile(r"(?P<prod>vsFTPd|ProFTPD|Pure-FTPd|FileZilla Server|CrushFTP|"
+               r"wu-ftpd|Serv-U)\)?\s*v?(?P<ver>\d[\w.]*)", re.I),
+    # SMTP: "220 x ESMTP Postfix (Ubuntu)" / "Exim 4.94" / "Sendmail 8.15.2"
+    re.compile(r"(?P<prod>Postfix|Exim|Sendmail|OpenSMTPD|Haraka|Microsoft ESMTP)"
+               r"[\s/v]*(?P<ver>\d[\w.]*)", re.I),
+    # MySQL/MariaDB handshake carries the version first: "5.5.5-10.3.34-MariaDB"
+    re.compile(r"(?P<ver>\d+\.\d+\.\d+)-(?P<prod>MariaDB|MySQL)", re.I),
+    re.compile(r"(?P<prod>MySQL|MariaDB|Percona)[\s/v]*(?P<ver>\d+\.\d+\.\d+)", re.I),
+    # POP3/IMAP greeters
+    re.compile(r"(?P<prod>Dovecot|Courier|Cyrus)(?:[\s/v]+(?P<ver>\d[\w.]*))?", re.I),
+    # HTTP Server header (non-web-classified ports still get product for CVEs)
+    re.compile(r"Server:\s*(?P<prod>Apache|nginx|Microsoft-IIS|lighttpd|Jetty|"
+               r"Caddy|openresty|Tomcat|Werkzeug|gunicorn|Boa|GoAhead|mini_httpd)"
+               r"/(?P<ver>\d[\w.]*)", re.I),
+    # SMTP/other generic "Product/1.2.3" fallback (bounded to word-ish products)
+]
+
+
+def parse_product_version(text: str) -> tuple[str, str] | None:
+    """Best-effort (product, version) from a banner/servicefp string. Returns None
+    when nothing concrete matches. Version may be '' if only a product is sure."""
+    if not text:
+        return None
+    for pat in _PRODUCT_RE:
+        m = pat.search(text)
+        if m:
+            prod = (m.groupdict().get("prod") or "").strip()
+            ver = (m.groupdict().get("ver") or "").strip()
+            if prod:
+                return prod, ver
+    return None
+
+
 # --- active banner grab (layer 3) -----------------------------------------------
 
 _BANNER_TIMEOUT = 4.0
@@ -186,7 +230,40 @@ def enrich_port(ip: str, port: Port, active: bool = True) -> bool:
             port.extrainfo = port.extrainfo or sig[1]
             port.detect_source = "banner"      # strongest of our own evidence
             changed = True
+        if _fill_product(port, banner):        # concrete product+version -> CVEs
+            changed = True
     return changed
+
+
+def _fill_product(port: Port, text: str) -> bool:
+    """Set port.product/version from a banner when nmap left them blank. Never
+    overwrites a product nmap already gave us. Returns True if it filled one."""
+    if port.product:                           # nmap's product wins; don't clobber
+        return False
+    pv = parse_product_version(text)
+    if not pv:
+        return False
+    port.product, ver = pv
+    if ver and not port.version:
+        port.version = ver
+    return True
+
+
+def enrich_versions(host: Host) -> int:
+    """No-traffic pass: recover product/version from evidence we ALREADY hold
+    (nmap's kept servicefp + any banner we captured) for ports that have a service
+    name but no product - so the CVE mapper gets a version to key on. Runs even on
+    nmap-named ports; only ever *fills* a blank product, never overwrites. Returns
+    the number of ports enriched."""
+    n = 0
+    for port in host.open_ports:
+        if port.product:
+            continue
+        for src in (port.banner, port.servicefp):
+            if _fill_product(port, src):
+                n += 1
+                break
+    return n
 
 
 def enrich_host(host: Host, active: bool = True) -> int:
@@ -198,6 +275,9 @@ def enrich_host(host: Host, active: bool = True) -> int:
             continue
         if enrich_port(host.ip, port, active=active):
             n += 1
+    # No-traffic version recovery across ALL ports (incl. nmap-named ones that
+    # lack a product) - fills the version the CVE mapper keys on.
+    enrich_versions(host)
     return n
 
 
