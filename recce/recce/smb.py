@@ -544,24 +544,8 @@ def proof_html(command, output, banner: str = "") -> str:
 
 def findings_to_vulns(fs: list[dict]) -> dict:
     """SMB findings -> {ip: [Vuln]} (source='smb'), for the main totals + writeups."""
-    from .models import Vuln
-    by_ip: dict[str, list] = {}
-    for f in fs:
-        parts = f["target"].split(":")
-        ip = parts[0]
-        port = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else _DEFAULT_PORT
-        evidence = f.get("detail", "")
-        if f.get("narrative"):
-            evidence += f"\n\nWhat this enables:\n{f['narrative']}"
-        if f.get("command"):
-            evidence += f"\n\nProve / next step:\n{f['command']}"
-        by_ip.setdefault(ip, []).append(Vuln(
-            ip=ip, port=port, protocol="tcp",
-            script_id=f"smb:{f['title'][:40]}", state="finding", title=f["title"],
-            severity=f["severity"], source="smb", confidence="confirmed",
-            cwes=list(f.get("cwes") or ["CWE-284"]),
-            output=evidence.strip(), remediation=f.get("remediation", "")))
-    return by_ip
+    from .svccommon import findings_to_vulns as _f2v
+    return _f2v(fs, "smb", _DEFAULT_PORT)
 
 
 def analyze(hosts: list[Host], creds: dict | None = None,
