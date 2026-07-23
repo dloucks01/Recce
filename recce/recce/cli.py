@@ -3418,6 +3418,40 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _service_module_coverage(store, hosts) -> list[dict]:
+    """Per deep-service-module (mssql/smb/ftp/docker/kubernetes): how many hosts with
+    an applicable open port have actually had the module run. 'Run' = the host appears
+    in the module's stored analysis targets, or it carries a finding from that source.
+    Ordered highest-impact first so `status` surfaces the critical exposures."""
+    from . import mssql, smb, ftp, docker, kubernetes as k8s
+    mods = [
+        ("Docker", "docker", docker.is_docker, "recce docker"),
+        ("Kubernetes", "kubernetes", k8s.is_k8s, "recce k8s"),
+        ("MSSQL", "mssql", mssql.is_mssql, "recce mssql -u USER -p PASS -d DOM"),
+        ("SMB", "smb", smb.is_smb, "recce smb"),
+        ("FTP", "ftp", ftp.is_ftp, "recce ftp"),
+    ]
+    out = []
+    for name, key, pred, command in mods:
+        applicable = [h for h in hosts if any(pred(p) for p in h.open_ports)]
+        covered_ips: set = set()
+        blob = store.get_meta(key)
+        if blob:
+            try:
+                for t in (json.loads(blob).get("targets") or []):
+                    if t.get("ip"):
+                        covered_ips.add(t["ip"])
+            except ValueError:
+                pass
+        for h in hosts:
+            if any(v.source == key for v in h.vulns):
+                covered_ips.add(h.ip)
+        out.append({"name": name, "key": key, "command": command,
+                    "applicable": len(applicable),
+                    "covered": sum(1 for h in applicable if h.ip in covered_ips)})
+    return out
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3484,6 +3518,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"    Web           {web_d}/{web_t}   (hosts serving HTTP/HTTPS)")
     print(f"    DB-scanned    {db_d}/{db_t}   (hosts with DB services)")
 
+    # Deep service-module coverage (mssql / smb / ftp / docker / kubernetes): for each
+    # module, how many hosts with an applicable service have actually had it run.
+    svc_cov = _service_module_coverage(store, hosts)
+    shown = [m for m in svc_cov if m["applicable"]]
+    if shown:
+        print("\n  Service deep-dives (per applicable service) - hosts run / applicable:")
+        for m in shown:
+            flag = "" if m["covered"] >= m["applicable"] else f"   ! run: {m['command']}"
+            print(f"    {m['name']:<13} {m['covered']}/{m['applicable']}{flag}")
+
     # Manual sign-offs (from your ticks): AD review + the kill-chain.
     ad_d, ad_t = manual_count("ad")
     ac_d, ac_t = manual_count("access")
@@ -3536,6 +3580,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         nxt = f"recce vulns --unscanned -o {o}   # vuln-scan the rest"
     elif db_t and db_d < db_t:
         nxt = f"recce db -o {o}   # enumerate the databases"
+    elif any(m["applicable"] > m["covered"] for m in svc_cov):
+        m = next(m for m in svc_cov if m["applicable"] > m["covered"])
+        gap = m["applicable"] - m["covered"]
+        nxt = (f"{m['command']} -o {o}   # deep-enum {m['name']} "
+               f"({gap} applicable host(s) not yet run)")
     elif pe_done < len(hosts):
         nxt = f"recce privesc -o {o}   # build the priv-esc playbook"
     else:
