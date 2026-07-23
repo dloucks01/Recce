@@ -89,6 +89,11 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     Non-HTTP TLS ports (LDAPS/IMAPS) skip the HTTP path probes but keep TLS checks.
   - **Authenticated web scanning**: `recce web --cookie 'session=…'` and repeatable
     `--header 'Authorization: Bearer …'` run the whole scan as a logged-in user.
+  - **Authenticated crawling** (`recce web --crawl`): a same-origin BFS crawler
+    (as the logged-in user) discovers pages, forms and params, tests each
+    **discovered param** for reflection/SSTI (so the `7*7→49` proof lands on real
+    parameters), and flags **password forms over cleartext HTTP** and **POST login
+    forms without an anti-CSRF token**. Bounded (≤40 pages, depth 2), stdlib-only.
   - **Per-endpoint screenshots**: `recce web --screenshots` captures each endpoint
     with the headless browser into `engagement/screenshots/`.
   - **Web is now a coverage category.** Every HTTP/HTTPS endpoint counts toward a

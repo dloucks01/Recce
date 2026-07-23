@@ -17,7 +17,7 @@ import http.client
 import json
 import re
 import ssl
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 
 from .models import Host, Port, Vuln
 from . import probes
@@ -500,6 +500,149 @@ def _scan_wordpress(ip: str, port: Port, base: str, body: str, auth) -> list[Vul
                            "check it against wpscan/searchsploit.",
                            "Keep plugins current; remove unused ones."))
     return out
+
+
+# --- authenticated crawler ------------------------------------------------------
+# attribute values may be quoted or bare, so accept both.
+_HREF_RE = re.compile(r'(?:href|action|src)\s*=\s*["\']?([^"\'>\s]+)', re.I)
+_FORM_RE = re.compile(r"<form\b[^>]*>.*?</form>", re.I | re.S)
+_ACTION_RE = re.compile(r'action\s*=\s*["\']?([^"\'>\s]+)', re.I)
+_METHOD_RE = re.compile(r'method\s*=\s*["\']?([^"\'>\s]+)', re.I)
+_INPUT_RE = re.compile(r"<input\b[^>]*>", re.I)
+_NAME_RE = re.compile(r'name\s*=\s*["\']?([^"\'>\s]+)', re.I)
+_ITYPE_RE = re.compile(r'type\s*=\s*["\']?([^"\'>\s]+)', re.I)
+
+
+def _same_origin_path(href: str, ip: str, cur_url: str) -> str | None:
+    href = (href or "").split("#")[0].strip()
+    if not href or href.lower().startswith(("mailto:", "javascript:", "tel:", "data:")):
+        return None
+    pr = urlparse(urljoin(cur_url, href))
+    if pr.scheme not in ("http", "https"):
+        return None
+    if pr.hostname and pr.hostname != ip:       # same host (IP) only
+        return None
+    path = pr.path or "/"
+    return f"{path}?{pr.query}" if pr.query else path
+
+
+def _parse_form(html: str, page_path: str) -> dict:
+    am = _ACTION_RE.search(html)
+    mm = _METHOD_RE.search(html)
+    inputs, has_pw, has_token = [], False, False
+    for inp in _INPUT_RE.findall(html):
+        nm = _NAME_RE.search(inp)
+        tm = _ITYPE_RE.search(inp)
+        name = nm.group(1) if nm else ""
+        if tm and tm.group(1).lower() == "password":
+            has_pw = True
+        if name and re.search(r"csrf|token|authenticity|nonce", name, re.I):
+            has_token = True
+        if name:
+            inputs.append(name)
+    return {"action": am.group(1) if am else page_path,
+            "method": (mm.group(1).lower() if mm else "get"),
+            "inputs": inputs, "password": has_pw, "csrf": has_token}
+
+
+def crawl(ip: str, port: Port, auth: dict | None = None,
+          max_pages: int = 40, max_depth: int = 2) -> dict:
+    """Same-origin BFS crawl (as the authenticated user if `auth` is set). Returns
+    {'pages': [...], 'forms': [...], 'params': [(path, name), ...]}."""
+    from collections import deque
+    base = url_for(ip, port)
+    seen = {"/"}
+    q = deque([("/", 0)])
+    pages: list[dict] = []
+    forms: list[dict] = []
+    params: list[tuple] = []
+    pseen: set = set()
+    while q and len(pages) < max_pages:
+        path, depth = q.popleft()
+        r = _fetch(ip, port, path, auth=auth)
+        if not r:
+            continue
+        status, headers, body = r
+        pages.append({"path": path, "status": status})
+        if "?" in path:
+            bp, qs = path.split("?", 1)
+            for kv in qs.split("&"):
+                if "=" in kv:
+                    key = (bp, kv.split("=", 1)[0])
+                    if key not in pseen:
+                        pseen.add(key)
+                        params.append(key)
+        if "html" not in headers.get("content-type", "").lower() and body.lstrip()[:1] != "<":
+            continue
+        cur_url = base + path
+        for href in _HREF_RE.findall(body):
+            npath = _same_origin_path(href, ip, cur_url)
+            if npath and npath not in seen:
+                seen.add(npath)
+                if depth < max_depth:
+                    q.append((npath, depth + 1))
+        for fm in _FORM_RE.findall(body):
+            forms.append(_parse_form(fm, path))
+    return {"pages": pages, "forms": forms, "params": params[:15]}
+
+
+def _reflect_param(ip: str, port: Port, page_path: str, param: str, auth) -> list[Vuln]:
+    payload = "recceA{{7*7}}recceD<i>"
+    sep = "&" if "?" in page_path else "?"
+    r = _fetch(ip, port, f"{page_path}{sep}{param}=" + quote(payload), auth=auth)
+    if not r or not r[2]:
+        return []
+    b = r[2]
+    if "recceA49" in b:
+        return [_mk(ip, port, "web-ssti", "high",
+                    "Server-Side Template Injection (7*7 evaluated to 49)", ["CWE-1336", "CWE-94"],
+                    f"param '{param}' on {page_path} evaluated our template payload to 49.",
+                    "Never render user input as a template; sandbox/escape it.")]
+    if "recceD<i>" in b:
+        return [_mk(ip, port, "web-reflected", "medium",
+                    f"Input reflected unencoded in param '{param}' (reflected-XSS lead)", ["CWE-79"],
+                    f"param '{param}' on {page_path} reflected '<i>' unencoded - verify for XSS.",
+                    "Context-encode reflected user input.", confidence="potential")]
+    return []
+
+
+def _crawl_findings(ip: str, port: Port, cres: dict) -> list[Vuln]:
+    out: list[Vuln] = []
+    tls = probes._is_tls(port)
+    for f in cres["forms"]:
+        if f["password"] and not tls:
+            out.append(_mk(ip, port, "web-cleartext-login", "high",
+                           "Password form submitted over cleartext HTTP", ["CWE-319"],
+                           f"A login form (action {f['action']}) submits credentials over HTTP.",
+                           "Serve authentication over HTTPS + HSTS."))
+        if f["method"] == "post" and f["password"] and not f["csrf"]:
+            out.append(_mk(ip, port, "web-csrf", "low",
+                           "Login/POST form without an anti-CSRF token", ["CWE-352"],
+                           f"Form action {f['action']} (POST, password) has no csrf/token hidden field.",
+                           "Add a per-session anti-CSRF token.", confidence="potential"))
+    return out
+
+
+def scan_crawl(host: Host, auth: dict | None = None) -> tuple[int, int]:
+    """Crawl every web endpoint (authenticated if auth is set), test discovered
+    params for reflection/SSTI, flag risky forms. Returns (pages_crawled, findings_added)."""
+    existing = {v.key for v in host.vulns}
+    pages = added = 0
+    for port in host.open_ports:
+        if not is_web(port):
+            continue
+        cres = crawl(host.ip, port, auth=auth)
+        pages += len(cres["pages"])
+        fs = _crawl_findings(host.ip, port, cres)
+        for pth, prm in cres["params"]:
+            fs += _reflect_param(host.ip, port, pth, prm, auth)
+        for v in fs:
+            if v.key in existing:
+                continue
+            existing.add(v.key)
+            host.vulns.append(v)
+            added += 1
+    return pages, added
 
 
 def scan_endpoint(ip: str, port: Port, active: bool = True,
