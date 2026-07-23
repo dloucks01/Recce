@@ -832,11 +832,31 @@ python -m recce docker -o eng                 # read the API; CONFIRM exposure
 python -m recce docker --screenshots -o eng   # + a `docker info` proof screenshot
 ```
 
+## Kubernetes (`recce kubernetes` / `recce k8s`)
+
+Stdlib-only unauthenticated reads of the cluster's most dangerous exposures:
+
+- **kubelet** (10250): an anonymous-auth kubelet answers `/pods` and exposes
+  `/exec` — **code execution inside any pod** on the node. The deprecated
+  **read-only port** (10255, HTTP) leaks full pod specs (env-var secrets).
+- **kube-apiserver** (6443/8443): whether `system:anonymous` can LIST namespaces —
+  and, critically, **Secrets** (every service-account token and TLS key = cluster
+  compromise). A 403 downgrades to an "anonymous-auth enabled" note.
+- **etcd** (2379): an unauthenticated key read = every Secret in the clear.
+
+Each successful read *is* the proof — recce only **reads** (it never execs into a
+pod or writes to etcd). Findings feed the main totals, the Vulnerabilities sheet
+and the write-ups, and populate a dedicated **Kubernetes** tab.
+
+```bash
+python -m recce k8s -o eng          # probe kubelet / apiserver / etcd, CONFIRM exposure
+```
+
 ## Output (`<output-dir>/`)
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Docker** (exposed Engine API) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Docker** (exposed Engine API) · **Kubernetes** (kubelet/API/etcd exposure) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |

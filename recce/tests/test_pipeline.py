@@ -3285,6 +3285,117 @@ class CredentialsTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
 
 
+class KubernetesTest(unittest.TestCase):
+    def _host(self):
+        return Host(ip="10.0.0.90", os_family="Linux",
+                    ports=[Port(portid=10250, state="open"),
+                           Port(portid=2379, state="open"),
+                           Port(portid=6443, state="open")])
+
+    def test_findings_all_surfaces(self):
+        from recce import kubernetes as k8s
+        from recce.report_docx import _vuln_type
+        pr = {("10.0.0.90", 10250): {"role": "kubelet", "anon_pods": True, "pod_count": 7},
+              ("10.0.0.90", 2379): {"role": "etcd", "v2_readable": True,
+                                    "etcd_version": "3.5.9"},
+              ("10.0.0.90", 6443): {"role": "apiserver", "version": "v1.28",
+                                    "anon_list": True, "anon_secrets": True,
+                                    "anon_status": 200}}
+        fs = k8s.findings([self._host()], pr)
+        titles = " | ".join(f["title"] for f in fs)
+        self.assertIn("Kubelet allows anonymous", titles)
+        self.assertIn("etcd exposed", titles)
+        self.assertIn("anonymous resource listing", titles)
+        by = k8s.findings_to_vulns(fs)
+        for v in by["10.0.0.90"]:
+            vt, _ = _vuln_type(v.cwes)
+            self.assertTrue(vt, v.cwes)
+
+    def test_prove_engine_confirms_and_downgrades(self):
+        from recce import kubernetes as k8s, proofs
+        pr = {("10.0.0.90", 10250): {"role": "kubelet", "anon_pods": True, "pod_count": 3},
+              ("10.0.0.90", 6443): {"role": "apiserver", "version": "v1.28",
+                                    "anon_list": False, "anon_status": 403}}
+        h = Host(ip="10.0.0.90", ports=[Port(portid=10250, state="open"),
+                                        Port(portid=6443, state="open")])
+        h.vulns = k8s.findings_to_vulns(k8s.findings([h], pr))["10.0.0.90"]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)                  # kubelet read
+        self.assertIn(proofs.LIKELY, verdicts)                     # anonymous-auth 403
+
+    def test_probe_parsers(self):
+        from recce import kubernetes as k8s
+        self.assertTrue(k8s._is_podlist({"kind": "PodList", "items": [1, 2]}))
+        self.assertEqual(k8s._pod_count({"items": [1, 2, 3]}), 3)
+        self.assertTrue(k8s._is_list({"kind": "NamespaceList", "items": []}))
+        self.assertEqual(k8s._etcd_version({"etcdserver": "3.5.9"}), "3.5.9")
+        self.assertEqual(k8s.role(10250), "kubelet")
+        self.assertEqual(k8s.role(2379), "etcd")
+
+    def test_cmd_kubernetes_end_to_end(self):
+        from recce import cli, xlsx, kubernetes as k8s
+        from recce.store import Store
+        import http.server
+        import threading
+        import json as _json
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path == "/pods":
+                    b = _json.dumps({"kind": "PodList",
+                                     "items": [{"m": 1}, {"m": 2}]}).encode()
+                    self.send_response(200)
+                else:
+                    b = b"{}"
+                    self.send_response(404)
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        orig_role, orig_is = k8s.role, k8s.is_k8s
+        k8s.role = lambda p: "kubelet-ro" if p == port else orig_role(p)
+        k8s.is_k8s = lambda p: (p.state == "open" and (p.portid == port or orig_is(p)))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=port, state="open",
+                                                service="kubelet")]))
+                st.close()
+                rc = cli.main(["k8s", "-o", out])
+                self.assertEqual(rc, 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("Kubernetes", sheets)
+                vtxt = "\n".join(" ".join(map(str, r))
+                                 for r in sheets["Vulnerabilities"])
+                self.assertIn("Kubelet", vtxt)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                self.assertTrue([v for v in h.vulns if v.source == "kubernetes"])
+        finally:
+            httpd.shutdown()
+            k8s.role, k8s.is_k8s = orig_role, orig_is
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.7", ports=[Port(portid=80, service="http")]))
+            st.close()
+            self.assertEqual(cli.main(["kubernetes", "-o", out, "--no-probe"]), 0)
+
+
 class DockerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

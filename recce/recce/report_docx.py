@@ -168,6 +168,7 @@ _SOURCE_TOOL = {
     "smb": "SMB enum (recce stdlib negotiate probe + nxc / smbclient)",
     "ftp": "FTP enum (recce stdlib control-channel probe + ftplib)",
     "docker": "Docker Engine API enum (recce stdlib HTTP probe)",
+    "kubernetes": "Kubernetes enum (recce stdlib kubelet/API/etcd probe)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.
