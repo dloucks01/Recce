@@ -3289,6 +3289,63 @@ class BloodHoundTest(unittest.TestCase):
         self.assertIn("DCSync", vtxt)                            # in the MAIN vuln sheet
         self.assertIn("Kerberoastable", vtxt)
 
+    def _collection_small(self, d):
+        """A reduced collection - only ALICE (AS-REP roastable) - simulating a
+        follow-up import after the other findings were remediated."""
+        B = self.BASE
+        import json as _json
+        users = {"meta": {"type": "users"}, "data": [
+            {"ObjectIdentifier": f"{B}-1002",
+             "Properties": {"name": "ALICE@CORP.LOCAL", "enabled": True,
+                            "dontreqpreauth": True}, "Aces": []}]}
+        domains = {"meta": {"type": "domains"}, "data": [
+            {"ObjectIdentifier": B, "Properties": {"name": "CORP.LOCAL"},
+             "Trusts": [], "Aces": []}]}
+        for n, b in (("users", users), ("domains", domains)):
+            with open(os.path.join(d, f"2026_{n}.json"), "w") as fh:
+                fh.write(_json.dumps(b))
+
+    def test_replace_ad_clears_remediated_findings_but_keeps_scan_vulns(self):
+        from recce import cli
+        from recce.models import Host, Vuln
+        from recce.store import Store
+
+        def db(out):
+            st = Store(os.path.join(out, "results.sqlite"))
+            h = st.get_host("10.0.0.9")
+            st.close()
+            return {v.title for v in h.vulns}
+        with tempfile.TemporaryDirectory() as d:
+            full = os.path.join(d, "full")
+            small = os.path.join(d, "small")
+            out = os.path.join(d, "eng")
+            os.makedirs(full)
+            os.makedirs(small)
+            os.makedirs(out)
+            self._collection(full)
+            self._collection_small(small)
+            # Pre-seed the DC host with a scan-sourced vuln that must SURVIVE replace.
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.9",
+                                ports=[Port(portid=445, service="microsoft-ds")],
+                                vulns=[Vuln(ip="10.0.0.9", port=445, protocol="tcp",
+                                            script_id="smb-vuln-ms17-010", title="MS17-010",
+                                            severity="critical", source="nse")]))
+            st.close()
+            base = dict(username="alice", password="p", domain="corp.local", owned=None,
+                        creds=None, dc_ip="10.0.0.9", output_dir=out, title="T")
+            cli.cmd_bloodhound(SimpleNamespace(paths=[full], replace_ad=False, **base))
+            t1 = db(out)
+            self.assertIn("Kerberoastable account", t1)
+            self.assertIn("MS17-010", t1)
+            # Re-import the remediated (smaller) collection WITH --replace-ad.
+            cli.cmd_bloodhound(SimpleNamespace(paths=[small], replace_ad=True, **base))
+            t2 = db(out)
+            self.assertNotIn("Kerberoastable account", t2)       # remediated -> gone
+            self.assertNotIn("DCSync rights held off tier-0", t2)
+            self.assertIn("AS-REP roastable account (no Kerberos pre-auth)", t2)  # kept
+            self.assertIn("MS17-010", t2)                        # scan vuln survived
+
     def test_fill_creds_makes_commands_copy_paste_ready(self):
         from recce import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:

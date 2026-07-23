@@ -2502,21 +2502,35 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
         dom_name = analysis["domains"][0]["name"] if analysis["domains"] else ""
         ad_ip = (creds and creds.get("dc_ip")) or dom_name or "active-directory"
         vulns = bh.findings_to_vulns(analysis, ad_ip, dom_name)
+        replace = getattr(args, "replace_ad", False)
         host = store.get_host(ad_ip)
+        removed = 0
         if host is None:
             host = Host(ip=ad_ip, hostnames=[dom_name] if dom_name else [],
                         os_family="Windows")
             if creds and creds.get("dc_ip"):
                 host.roles = ["Domain Controller"]
+        elif replace:
+            # Drop the previously-imported AD/ADCS findings so a re-import reflects
+            # the CURRENT state (fixed items disappear); other host data is kept.
+            before = len(host.vulns)
+            host.vulns = [v for v in host.vulns
+                          if v.source not in ("bloodhound", "adcs")]
+            removed = before - len(host.vulns)
         host.enumerated = True
         have = {v.key for v in host.vulns}
         for v in vulns:
             if v.key not in have:
                 have.add(v.key)
                 host.vulns.append(v)
-        store.upsert_host(host)
-        print(f"    -> {len(vulns)} AD finding(s) folded into the main severity "
-              f"totals + writeups (host {ad_ip}).")
+        # merge=False on replace so the old AD vulns aren't re-introduced by the
+        # union-merge (we've already loaded and rewritten the full host).
+        store.upsert_host(host, merge=not replace)
+        msg = (f"    -> {len(vulns)} AD finding(s) folded into the main severity "
+               f"totals + writeups (host {ad_ip})")
+        if replace:
+            msg += f"; replaced {removed} prior AD finding(s)"
+        print(msg + ".")
 
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
@@ -3164,6 +3178,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                           "(repeatable / comma-separated)")
     bhp.add_argument("--creds", metavar="DOMAIN/user:secret",
                      help="alternative to -u/-p/-d; an NT hash if it's 32 hex chars")
+    bhp.add_argument("--replace-ad", action="store_true",
+                     help="clear previously-imported AD/ESC findings on the DC host "
+                          "before folding this import, so remediated items disappear "
+                          "(default: accumulate across imports)")
     bhp.add_argument("-o", "--output-dir", default="engagement")
     bhp.add_argument("--title", default="Recce Engagement")
     bhp.set_defaults(func=cmd_bloodhound)
