@@ -78,6 +78,9 @@ class SheetSpec:
     group_by: str | None = None        # row["group"] value to fold rows under collapsible bands
     # (group_value, [row dicts]) -> band label; default = "<group> · <hostname> · N <noun>".
     group_summary: Callable | None = None
+    # An optional one-line note written ABOVE the header row (e.g. a colour legend).
+    # The header then sits on row 2 and everything downstream accounts for the shift.
+    legend: str | None = None
 
 
 # Tab colours group the sheets into visual bands in Excel's tab bar, by role:
@@ -159,10 +162,16 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
         *step_cols,
         ("Notes", "notes", 28), ("Key", "key", 4),
     ]
+    # Show only hosts we can PROVE are up. `is_up` is deliberately one-directional:
+    # any concrete sign of life (open port, enum/finding, a real nmap discovery reply,
+    # DNS/ARP/OS evidence) keeps a host on the list, so a live host is never dropped;
+    # only IPs with zero evidence (e.g. -Pn phantoms in a 900-host sweep) fall away.
+    up_hosts = [h for h in hosts if h.is_up]
+    hidden = len(hosts) - len(up_hosts)
     rows = []
     # Sort by subnet (keeps each subnet's rows contiguous for the band), then by risk
     # so the hosts with critical/high findings float to the top of each subnet, then IP.
-    for h in sorted(hosts, key=lambda x: (_subnet_sort_key(x.subnet),
+    for h in sorted(up_hosts, key=lambda x: (_subnet_sort_key(x.subnet),
                                           _host_sev_rank(x), _ip_sort_key(x.ip))):
         checks = {header: (tr.step_key(step, h.ip), tr.step_auto(h, step),
                            tr.step_applies(h, step))
@@ -179,8 +188,17 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
             "Roles": ", ".join(h.roles), "Open ports": open_ports,
             "# Vulns": len(h.vulns), "AV / EDR": "; ".join(h.defenses),
             "_maxsev": _host_maxsev(h)}})
+    legend = (
+        "Legend:   green step headers = auto-ticked by recce as each phase finishes"
+        "  ·  amber step headers = your manual sign-off"
+        "  ·  ☑ done   ☐ to do   — = not applicable to this host.        "
+        "This tab lists only hosts confirmed UP (an open port or a real reply); "
+        "a host is never shown as down unless it is provably down.")
+    if hidden:
+        legend += (f"   {hidden} scanned IP{'s' if hidden != 1 else ''} with no sign "
+                   "of life hidden — see the Overview for the full count.")
     return SheetSpec(CHECKLIST_TITLE, cols, rows, _styler_checklist,
-                     group_by="Subnet", group_summary=_checklist_band)
+                     group_by="Subnet", group_summary=_checklist_band, legend=legend)
 
 
 def _checklist_band(subnet: str, grows: list[dict], tracking: Tracking) -> str:
@@ -746,6 +764,13 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             step = tr.STEP_COLUMNS.get(header)
             return "header_manual" if step in tr.MANUAL_STEPS else "header_auto"
         return "header"
+    # An optional legend/note line sits ABOVE the header (row 1); the column headers
+    # then land on row 2. header_row keeps freeze-pane, auto-filter and the tall
+    # header height aligned to wherever the headers actually are.
+    if spec.legend:
+        sheet.write([(spec.legend, "sub")]
+                    + [("", "sub")] * (len(spec.cols) - 1))
+        sheet.header_row = 2
     sheet.write([(h, _hdr_style(h, role)) for h, role, _w in spec.cols])
 
     rows_by_key = {r["key"]: r for r in spec.rows}
@@ -772,7 +797,9 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
     # real checkbox rather than an N/A dash - used to scope validation/formatting.
     active_check_rows: dict[int, list[int]] = {}
     data_rows: list[int] = []            # detail (non-group-header) row numbers
-    excel_row = 1
+    # First data/band row sits just below the header, wherever the header ended up
+    # (row 1 normally, row 2 when a legend line precedes it).
+    excel_row = sheet.header_row
     for kind, key in items:
         excel_row += 1
         if kind == "hdr":
@@ -937,7 +964,9 @@ def _build_guide(wb, meta: dict) -> None:
                       "+ host detail + Reviewed + Notes. Step headers are colour-coded - "
                       "GREEN = auto (the tool ticks it), AMBER = your manual sign-off. "
                       "# Vulns is coloured by worst severity; risky hosts sort to the "
-                      "top of each subnet."),
+                      "top of each subnet. Lists only hosts CONFIRMED up (an open port "
+                      "or a real reply); a host is never written off as down - IPs with "
+                      "no proof of life are tallied on the Overview as UNKNOWN instead."),
         ("Services", "The other working tab: every open port folded under a collapsible "
                      "per-host band, each with a Status (not started / in progress / "
                      "done) and Notes - track each port you work."),
@@ -1313,6 +1342,10 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     win = sum(1 for h in hosts if "windows" in (h.os_family or h.os_name).lower())
     lin = sum(1 for h in hosts if "linux" in (h.os_family or h.os_name).lower())
     crit = sum(1 for h in hosts for v in h.vulns if v.severity in ("critical", "high"))
+    # Confirmed-up vs scanned-but-unconfirmed. The Checklist shows only the confirmed
+    # set; the unconfirmed count is surfaced here so a host is never silently dropped.
+    up_hosts = [h for h in hosts if h.is_up]
+    unconfirmed = len(hosts) - len(up_hosts)
 
     sh.write([("Engagement Overview", "title")])
     sh.write([(meta.get("subtitle", ""), "sub")])
@@ -1356,7 +1389,8 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     confirmed = sum(1 for r in proofs.verify_hosts(hosts)
                     if r["verdict"] == proofs.CONFIRMED)
     _links = {
-        "Live hosts": "Checklist", "Open service ports": "Services",
+        "Hosts confirmed up (on Checklist)": "Checklist",
+        "Open service ports": "Services",
         "Vuln findings": "Vulnerabilities", "High / Critical findings": "Vulnerabilities",
         "Confirmed by recce (prove engine)": "Verification",
         "Findings with a curated exploit": "Vulnerabilities",
@@ -1365,7 +1399,7 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         "Kerberoastable / AS-REP": "AD Quick Wins",
     }
     for label, val in [
-        ("Live hosts", len(hosts)),
+        ("Hosts confirmed up (on Checklist)", len(up_hosts)),
         ("Windows / Linux", f"{win} / {lin}"),
         ("Open service ports", len(open_ports)),
         ("Vuln findings", sum(len(h.vulns) for h in hosts)),
@@ -1387,6 +1421,14 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
             sh.link_to(r, 1, target)
         else:
             sh.write([(label, "bold"), val])
+    if unconfirmed:
+        # Not hidden away: these IPs were scanned but returned no proof of life, so
+        # they're kept off the Checklist. Flagged here so nobody assumes they're down.
+        sh.write([("Scanned, not confirmed up (kept off Checklist)", "bold"),
+                  unconfirmed])
+        sh.write([("These IPs showed no open port and no reply - treat as UNKNOWN, "
+                   "not down. Re-scan (e.g. -Pn, UDP, or a slower sweep) before ruling "
+                   "them out.", "sub")])
     sh.write([""])
 
     # --- Credentialed access matrix (only when credenum has run) ---
@@ -1439,9 +1481,13 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     sh.write([("Subnet", "bold"), ("In range", "bold"), ("Live hosts", "bold"),
               ("Enumerated", "bold"), ("Vuln-scanned", "bold"), ("Web", "bold"),
               ("DB", "bold"), ("# Vulns", "bold")])
+    # Only confirmed-up hosts count here, so this table agrees exactly with the
+    # Checklist (which also shows only up hosts). Unconfirmed IPs are tallied
+    # separately in the Totals block, never folded into a subnet's "Live hosts".
     agg: dict[str, list] = defaultdict(list)
     for h in hosts:
-        agg[h.subnet or "unknown"].append(h)
+        if h.is_up:
+            agg[h.subnet or "unknown"].append(h)
 
     def cell(done, total):
         # Denominator counts only hosts the step applies to, so "x/y" reflects
@@ -2140,9 +2186,10 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         nav.append(accounts_spec.title)
     nav += [s.title for s in tail if _spec_here(s)]
 
-    # Pre-compute each host's Checklist row (header is row 1, data from row 2) so
-    # the Overview can deep-link an IP straight to it. Uses the SAME ordering the
-    # Checklist writer will use, so the links land on the right rows.
+    # Pre-compute each host's Checklist row so the Overview can deep-link an IP
+    # straight to it. Uses the SAME ordering the Checklist writer will use, so the
+    # links land on the right rows. The header sits on row 1 normally, or row 2 when
+    # a legend line precedes it - mirror that offset here.
     checklist_spec = next((s for s in pre if s.title == CHECKLIST_TITLE), None)
     host_rows: dict[str, int] = {}
     if checklist_spec:
@@ -2153,7 +2200,8 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         # collapsible band row precedes each new group, so the host rows shift down by
         # one per group seen - account for that or the Overview links land wrong.
         grouped = bool(checklist_spec.group_by)
-        excel_row, seen = 1, set()
+        header_row = 2 if checklist_spec.legend else 1
+        excel_row, seen = header_row, set()
         for k in ck_keys:
             if grouped:
                 g = by_key[k].get("group", "")
@@ -2220,6 +2268,17 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
                           statuses, issues, credentials)
 
 
+def _header_index(rows: list[list[str]], *must_have: str) -> int:
+    """Row index of the column-header row: the first row that contains every token
+    in `must_have`. Sheets normally put headers on row 0, but a legend/note line can
+    push them down (e.g. the Checklist), so we locate them instead of assuming row 0.
+    Falls back to 0 when nothing matches, preserving the old behaviour."""
+    for i, r in enumerate(rows):
+        if all(tok in r for tok in must_have):
+            return i
+    return 0
+
+
 def read_key_order(path: str) -> dict[str, list[str]]:
     """{sheet_title: [keys in current row order]} from an existing workbook."""
     order: dict[str, list[str]] = {}
@@ -2230,11 +2289,12 @@ def read_key_order(path: str) -> dict[str, list[str]]:
     for title, rows in sheets.items():
         if not rows:
             continue
-        header = rows[0]
+        hidx = _header_index(rows, "Key")
+        header = rows[hidx]
         if "Key" not in header:
             continue
         kidx = header.index("Key")
-        order[title] = [r[kidx] for r in rows[1:] if len(r) > kidx and r[kidx]]
+        order[title] = [r[kidx] for r in rows[hidx + 1:] if len(r) > kidx and r[kidx]]
     return order
 
 
@@ -2254,32 +2314,37 @@ def read_workbook_edits(path: str) -> tuple[Tracking, dict]:
     for title, rows in sheets.items():
         if not rows:
             continue
-        header = rows[0]
         # Per-host step checkboxes live only on the Checklist (other sheets have
-        # a same-named "Vuln-scan" text column that must NOT be read as steps).
-        if title == CHECKLIST_TITLE and "IP" in header:
-            ipc = header.index("IP")
-            step_cols = [(header.index(h), s) for h, s in tr.STEP_COLUMNS.items()
-                         if h in header]
-            for r in rows[1:]:
-                if len(r) <= ipc or not r[ipc]:
-                    continue
-                ip = str(r[ipc])
-                for ci, step in step_cols:
-                    if ci >= len(r):
+        # a same-named "Vuln-scan" text column that must NOT be read as steps). The
+        # Checklist carries a legend line above its header, so find the header row.
+        if title == CHECKLIST_TITLE:
+            chidx = _header_index(rows, "IP")
+            cheader = rows[chidx]
+            if "IP" in cheader:
+                ipc = cheader.index("IP")
+                step_cols = [(cheader.index(h), s) for h, s in tr.STEP_COLUMNS.items()
+                             if h in cheader]
+                for r in rows[chidx + 1:]:
+                    if len(r) <= ipc or not r[ipc]:
                         continue
-                    cell = str(r[ci]).strip()
-                    if not cell or cell == tr.STEP_NA:
-                        continue   # N/A step - not a real checkbox, never an override
-                    result[tr.step_key(step, ip)] = (as_bool(r[ci]), "")
+                    ip = str(r[ipc])
+                    for ci, step in step_cols:
+                        if ci >= len(r):
+                            continue
+                        cell = str(r[ci]).strip()
+                        if not cell or cell == tr.STEP_NA:
+                            continue  # N/A step - not a real checkbox, never an override
+                        result[tr.step_key(step, ip)] = (as_bool(r[ci]), "")
 
+        hidx = _header_index(rows, "Key")
+        header = rows[hidx]
         if "Key" not in header:
             continue
         kidx = header.index("Key")
         cbidx = next((i for i, h in enumerate(header) if h in CHECKBOX_HEADERS), None)
         stidx = next((i for i, h in enumerate(header) if h in STATUS_HEADERS), None)
         nidx = header.index("Notes") if "Notes" in header else None
-        for r in rows[1:]:
+        for r in rows[hidx + 1:]:
             if len(r) <= kidx or not r[kidx]:
                 continue
             key = str(r[kidx])

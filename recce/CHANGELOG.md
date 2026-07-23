@@ -4,7 +4,25 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **Checklist shows only hosts confirmed UP — and never writes a live host off as
+  down.** A new one-directional `Host.is_up` gates the Checklist: a host stays on
+  the list on *any* concrete proof of life (an open port, enumeration/a finding, a
+  real nmap discovery reply, or DNS/ARP/OS evidence), so a live host is never
+  dropped; only IPs with zero evidence (e.g. `-Pn` phantoms across a 900-host
+  sweep) fall away. The nmap status *reason* is now parsed (`echo-reply`,
+  `syn-ack`, `arp-response`, … = a real reply; `user-set` = the `-Pn` blanket
+  assume-up, which is **not** proof), and a store merge can never downgrade a
+  confirmed reply back to an assume-up. Scanned-but-unconfirmed IPs are tallied
+  explicitly on the Overview ("Scanned, not confirmed up — treat as UNKNOWN, not
+  down") and in the Markdown/HTML summaries, so nothing is silently lost.
+- **Legend line on the Checklist tab itself.** A one-line legend now sits above the
+  header (green step headers = auto-ticked by recce, amber = your manual sign-off;
+  ☑/☐/— key; and the up-only rule spelled out). The workbook writer, freeze pane,
+  auto-filter and every tracking read-back now locate the header row instead of
+  assuming row 1, so the shifted header round-trips operator edits intact.
+
+## [0.2.4] - 2026-07-23
 
 ## [0.2.4] - 2026-07-23
 

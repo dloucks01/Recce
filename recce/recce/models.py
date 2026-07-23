@@ -174,6 +174,9 @@ class Host:
     ip: str
     subnet: str = ""
     state: str = "up"
+    up_reason: str = ""            # nmap status reason: echo-reply / syn-ack / arp-
+                                   # response = a real reply (proof of life); "user-set"
+                                   # = the -Pn blanket assume-up, which is NOT proof
     hostnames: list[str] = field(default_factory=list)
     mac: str = ""
     vendor: str = ""
@@ -209,6 +212,36 @@ class Host:
     @property
     def open_ports(self) -> list[Port]:
         return [p for p in self.ports if p.state == "open"]
+
+    # nmap status reasons that mean the host genuinely REPLIED (proof of life).
+    # "user-set" is the -Pn blanket assume-up and does NOT count. "" / "unknown" /
+    # "no-response" are non-committal. Everything else is an actual packet back.
+    _NOT_A_REPLY = ("", "user-set", "unknown", "no-response", "unknown-response")
+
+    @property
+    def is_up(self) -> bool:
+        """Positive, defensible proof the host is up. Deliberately conservative in
+        one direction only: it must NEVER treat a live host as down (a missed host
+        is a hole in the assessment), so ANY concrete sign of life makes it up, and
+        only a host with zero evidence at all is treated as not-confirmed-up.
+
+        Signals, any one of which is proof:
+          * an open port                 - unambiguous, the host answered a probe
+          * enumeration / findings ran   - a service or script got a response
+          * a real nmap discovery reply  - echo-reply / syn-ack / arp-response ...
+                                           (but NOT the -Pn "user-set" assume-up)
+          * DNS / ARP / OS evidence      - it answered a name/MAC/fingerprint probe
+        """
+        if self.open_ports:
+            return True
+        if (self.enumerated or self.vulns or self.host_scripts
+                or self.local_findings or self.accounts):
+            return True
+        if self.up_reason and self.up_reason not in self._NOT_A_REPLY:
+            return True
+        if self.hostnames or self.mac or self.os_name:
+            return True
+        return False
 
     @property
     def status(self) -> str:

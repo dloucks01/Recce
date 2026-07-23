@@ -169,6 +169,9 @@ class Sheet:
         self.col_widths: dict[int, float] = {}
         self.hidden_cols: set[int] = set()
         self.freeze_header = False
+        self.header_row = 1            # 1-based row the column headers sit on; >1 when
+                                      # a legend/note row precedes them (freeze + filter
+                                      # + custom height all follow this row, not row 1)
         self.freeze_cols = 0            # also freeze the first N columns (left pane)
         self.hide_gridlines = False     # hide native gridlines (we draw our own rules)
         self.header_height: float | None = None
@@ -259,7 +262,7 @@ class Sheet:
         for r, row in enumerate(self._rows, start=1):
             cells = []
             attrs = f' r="{r}"'
-            if r == 1 and self.header_height:
+            if r == self.header_row and self.header_height:
                 attrs += f' ht="{self.header_height:.0f}" customHeight="1"'
             lvl = self._row_outline[r - 1] if r - 1 < len(self._row_outline) else 0
             if lvl:
@@ -284,7 +287,7 @@ class Sheet:
 
     def _pane_xml(self) -> str:
         """Frozen pane: header row and/or the first N identity columns."""
-        x, y = self.freeze_cols, (1 if self.freeze_header else 0)
+        x, y = self.freeze_cols, (self.header_row if self.freeze_header else 0)
         if not x and not y:
             return ""
         top_left = f"{col_letter(x + 1)}{y + 1}"
@@ -325,7 +328,9 @@ class Sheet:
 
         autofilter = ""
         if self.autofilter_cols:
-            autofilter = f'<autoFilter ref="A1:{col_letter(self.autofilter_cols)}1"/>'
+            hr = self.header_row
+            autofilter = (f'<autoFilter ref="A{hr}:'
+                          f'{col_letter(self.autofilter_cols)}{hr}"/>')
 
         cf = ""
         for i, (sq, value, dxf_id) in enumerate(self._cf_rules):

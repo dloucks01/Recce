@@ -23,6 +23,16 @@ from recce.targets import apply_exclusions, load_targets
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
 
+def header_index(rows, *must_have):
+    """Row index of the real column-header row (first row holding every token in
+    must_have). The Checklist puts a legend line above its header, so callers must
+    locate it rather than assume row 0."""
+    for i, r in enumerate(rows):
+        if all(tok in r for tok in must_have):
+            return i
+    return 0
+
+
 class TargetsTest(unittest.TestCase):
     def test_cidr_and_range(self):
         hosts, sm = load_targets(["10.0.0.0/30", "192.168.1.5-8"])
@@ -441,10 +451,11 @@ class InPlaceUpdateTest(unittest.TestCase):
             update_workbook(out, self._hosts(["10.0.0.10", "10.0.0.20", "10.0.0.1"]),
                             tracking={tr.host_key("10.0.0.10"): (True, "done")})
             rows = xlsx.read_sheets(out)["Checklist"]
-            hdr = rows[0]
+            hidx = header_index(rows, "IP")
+            hdr = rows[hidx]
             ipc = hdr.index("IP")
             # Skip the collapsible subnet band rows (empty Reviewed checkbox cell).
-            data_rows = [r for r in rows[1:]
+            data_rows = [r for r in rows[hidx + 1:]
                          if r[0] in (xlsx.CHECK_ON, xlsx.CHECK_OFF)]
             ips = [r[ipc] for r in data_rows]
         # Existing order kept; new IP appended last (not sorted in).
@@ -1551,8 +1562,10 @@ class SubnetCoverageTest(unittest.TestCase):
 
     def test_checklist_grouped_by_subnet(self):
         from recce.report_excel import _spec_checklist
-        hosts = [Host(ip="10.0.20.9", subnet="10.0.20.0/24"),
-                 Host(ip="10.0.10.5", subnet="10.0.10.0/24")]
+        # up_reason set: a real discovery reply keeps a 0-port host on the list (the
+        # Checklist shows only confirmed-up hosts).
+        hosts = [Host(ip="10.0.20.9", subnet="10.0.20.0/24", up_reason="syn-ack"),
+                 Host(ip="10.0.10.5", subnet="10.0.10.0/24", up_reason="echo-reply")]
         spec = _spec_checklist(hosts)
         rows = spec.rows
         # Sorted by subnet then IP -> 10.0.10.x before 10.0.20.x.
@@ -1578,13 +1591,14 @@ class SubnetCoverageTest(unittest.TestCase):
             build_workbook([clean, crit], out,
                            tracking={_tr.host_key("10.0.10.1"): (True, "")})
             rows = xlsx.read_sheets(out)["Checklist"]
-        ipc = rows[0].index("IP")
-        band = next(r for r in rows[1:] if str(r[ipc]).startswith("10.0.10.0/24"))
+        hidx = header_index(rows, "IP")
+        ipc = rows[hidx].index("IP")
+        band = next(r for r in rows[hidx + 1:] if str(r[ipc]).startswith("10.0.10.0/24"))
         self.assertIn("2 hosts", str(band[ipc]))
         self.assertIn("1/2 reviewed", str(band[ipc]))
         self.assertIn("high/crit", str(band[ipc]))                # the critical host
         # Risk-first: the critical host sorts above the clean host within the subnet.
-        host_ips = [r[ipc] for r in rows[1:]
+        host_ips = [r[ipc] for r in rows[hidx + 1:]
                     if r[0] in (_x.CHECK_ON, _x.CHECK_OFF)]
         self.assertEqual(host_ips, ["10.0.10.9", "10.0.10.1"])
 
@@ -1594,6 +1608,90 @@ class SubnetCoverageTest(unittest.TestCase):
             store.set_scope("10.0.0.0/24", 254)
             store.set_scope("10.0.0.0/24", 100)  # keeps the larger
             self.assertEqual(store.get_scope()["10.0.0.0/24"], 254)
+            store.close()
+
+
+class HostUpCertaintyTest(unittest.TestCase):
+    """The Checklist shows only hosts we can PROVE are up - but is never allowed to
+    write a live host off as down. is_up is the single source of that judgement."""
+
+    def test_is_up_only_on_positive_evidence(self):
+        # An open port is unambiguous proof.
+        self.assertTrue(Host(ip="1.1.1.1",
+                             ports=[Port(portid=22, state="open")]).is_up)
+        # Enumeration / a finding got a response.
+        self.assertTrue(Host(ip="1.1.1.1", enumerated=True).is_up)
+        # A real nmap discovery reply (not the -Pn assume-up).
+        self.assertTrue(Host(ip="1.1.1.1", up_reason="echo-reply").is_up)
+        self.assertTrue(Host(ip="1.1.1.1", up_reason="arp-response").is_up)
+        # DNS / ARP / OS evidence => it answered something.
+        self.assertTrue(Host(ip="1.1.1.1", mac="00:11:22:33:44:55").is_up)
+        self.assertTrue(Host(ip="1.1.1.1", hostnames=["dc01"]).is_up)
+        # A closed/filtered-only port is NOT an open port.
+        self.assertFalse(Host(ip="1.1.1.1",
+                              ports=[Port(portid=22, state="filtered")]).is_up)
+        # The -Pn blanket assume-up ("user-set") is NOT proof, and a bare host isn't.
+        self.assertFalse(Host(ip="1.1.1.1", state="up", up_reason="user-set").is_up)
+        self.assertFalse(Host(ip="1.1.1.1").is_up)
+
+    def test_checklist_hides_unconfirmed_keeps_confirmed(self):
+        from recce.report_excel import build_workbook
+        confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24", state="up",
+                         up_reason="syn-ack", ports=[Port(portid=445, state="open")])
+        phantom = Host(ip="10.0.0.6", subnet="10.0.0.0/24", state="up",
+                       up_reason="user-set")     # -Pn assume-up, no proof of life
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([confirmed, phantom], out)
+            rows = xlsx.read_sheets(out)["Checklist"]
+        hidx = header_index(rows, "IP")
+        ipc = rows[hidx].index("IP")
+        ips = {str(r[ipc]) for r in rows[hidx + 1:]}
+        self.assertIn("10.0.0.5", ips)            # confirmed-up host shown
+        self.assertNotIn("10.0.0.6", ips)         # unconfirmed phantom hidden
+
+    def test_checklist_carries_legend_above_header_and_round_trips(self):
+        from recce.report_excel import (build_workbook, read_workbook_tracking,
+                                         CHECKLIST_TITLE)
+        h = Host(ip="10.0.0.5", subnet="10.0.0.0/24", state="up", enumerated=True,
+                 ports=[Port(portid=445, service="smb", state="open", vuln_scanned=True)])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([h], out)
+            rows = xlsx.read_sheets(out)["Checklist"]
+            # A legend line precedes the header row (row 0 is not the header).
+            hidx = header_index(rows, "IP")
+            self.assertGreater(hidx, 0)
+            self.assertIn("Legend", str(rows[0][0]))
+            self.assertIn("confirmed UP", str(rows[0][0]))
+            # Tracking still round-trips despite the shifted header: an auto-ticked
+            # vuln step reads back True.
+            back = read_workbook_tracking(out)
+            self.assertTrue(back[tr.step_key("vuln", "10.0.0.5")][0])
+
+    def test_overview_tallies_unconfirmed_hosts(self):
+        from recce.report_excel import build_workbook
+        confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                         ports=[Port(portid=445, state="open")])
+        phantom = Host(ip="10.0.0.6", subnet="10.0.0.0/24", up_reason="user-set")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([confirmed, phantom], out)
+            rows = xlsx.read_sheets(out)["Overview"]
+        blob = "\n".join(" ".join(str(c) for c in r) for r in rows)
+        self.assertIn("Scanned, not confirmed up", blob)
+        self.assertIn("Hosts confirmed up", blob)
+
+    def test_merge_never_downgrades_proof_of_life(self):
+        # A real reply must survive a later -Pn re-scan that only knows "user-set".
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(os.path.join(d, "s.sqlite"))
+            store.upsert_host(Host(ip="10.0.0.5", up_reason="echo-reply"))
+            store.upsert_host(Host(ip="10.0.0.5", up_reason="user-set"))
+            got = store.get_host("10.0.0.5")
+            self.assertEqual(got.up_reason, "echo-reply")
+            self.assertTrue(got.is_up)
             store.close()
 
 
@@ -2071,9 +2169,10 @@ class StepCheckboxTest(unittest.TestCase):
             out = os.path.join(d, "wb.xlsx")
             build_workbook([h], out)
             rows = xlsx.read_sheets(out)["Checklist"]
-            header = rows[0]
-            # rows[1] is now the collapsible subnet band; take the first host row.
-            row = next(r for r in rows[1:] if r[0] in (xlsx.CHECK_ON, xlsx.CHECK_OFF))
+            hidx = header_index(rows, "IP")
+            header = rows[hidx]
+            # The row after the header is the collapsible subnet band; take the first host row.
+            row = next(r for r in rows[hidx + 1:] if r[0] in (xlsx.CHECK_ON, xlsx.CHECK_OFF))
             for col in ("DB", "Web", "AD"):
                 self.assertEqual(row[header.index(col)], tr.STEP_NA)
             back = read_workbook_tracking(out)
