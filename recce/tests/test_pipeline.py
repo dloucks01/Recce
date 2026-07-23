@@ -3237,7 +3237,8 @@ class BloodHoundTest(unittest.TestCase):
             self._collection(d)
             out = os.path.join(d, "eng")
             rc = cli.cmd_bloodhound(SimpleNamespace(
-                path=d, owned=["BOB@CORP.LOCAL"], creds=None, dc_ip=None,
+                paths=[d], username=None, password=None, domain=None,
+                owned=["BOB@CORP.LOCAL"], creds=None, dc_ip=None,
                 output_dir=out, title="T"))
             self.assertEqual(rc, 0)
             self.assertTrue(os.path.exists(os.path.join(out, "enumeration.xlsx")))
@@ -3248,6 +3249,113 @@ class BloodHoundTest(unittest.TestCase):
             self.assertTrue(blob)                                # analysis persisted
             self.assertIn("corp.local", doms)                    # domain merged in
             self.assertIn("bloodhound", doms["corp.local"].sources)
+
+    def test_fill_creds_makes_commands_copy_paste_ready(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            an = bh.analyze(d, owned={"BOB@CORP.LOCAL"})
+        bh.fill_creds(an, {"domain": "corp.local", "user": "alice",
+                           "secret": "Passw0rd!", "is_hash": False, "dc_ip": "10.0.0.1"})
+        cmds = " ".join(f["command"] for f in an["findings"])
+        self.assertIn("corp.local/alice:Passw0rd!", cmds)        # DOMAIN/user:pass filled
+        self.assertIn("10.0.0.1", cmds)                          # dc-ip filled
+        self.assertNotIn("<dc>", cmds)
+        self.assertNotIn("<DOMAIN>", cmds)
+
+    def test_simple_credentialed_run_defaults_owned_to_you(self):
+        # -u alice with no --owned: paths must start from ALICE (the simple UX).
+        from recce import cli
+        with tempfile.TemporaryDirectory() as d:
+            # ALICE has GenericAll on HELPDESK instead of BOB.
+            self._collection(d)
+            import json as _json
+            groups_path = os.path.join(d, "2026_groups.json")
+            g = _json.loads(open(groups_path).read())
+            for obj in g["data"]:
+                if obj["ObjectIdentifier"].endswith("-1105"):
+                    obj["Aces"] = [{"PrincipalSID": f"{self.BASE}-1002",
+                                    "RightName": "GenericAll"}]
+            open(groups_path, "w").write(_json.dumps(g))
+            out = os.path.join(d, "eng")
+            rc = cli.cmd_bloodhound(SimpleNamespace(
+                paths=[d], username="alice", password="Passw0rd!", domain="CORP.LOCAL",
+                owned=None, creds=None, dc_ip="10.0.0.1", output_dir=out, title="T"))
+            self.assertEqual(rc, 0)
+            from recce import report_excel, xlsx
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            paths_txt = "\n".join(" ".join(map(str, r))
+                                  for r in sheets.get("AD Attack Paths", []))
+            self.assertIn("ALICE", paths_txt.upper())            # path starts from ALICE
+            # Kerberos command carries the real creds, not placeholders.
+            self.assertIn("CORP.LOCAL/alice", paths_txt)
+
+
+class AdcsCertipyTest(unittest.TestCase):
+    def _certipy(self, path):
+        data = {
+            "Certificate Authorities": {
+                "0": {"CA Name": "CORP-CA", "DNS Name": "ca.corp.local",
+                      "Web Enrollment": "Enabled",
+                      "[!] Vulnerabilities": {
+                          "ESC8": "Web Enrollment is enabled and Request Disposition is Issue"}}},
+            "Certificate Templates": {
+                "0": {"Template Name": "VulnUser", "Enabled": True,
+                      "Client Authentication": True, "Enrollee Supplies Subject": True,
+                      "Certificate Authorities": ["CORP-CA"],
+                      "Permissions": {"Enrollment Permissions": {
+                          "Enrollment Rights": ["CORP.LOCAL\\Domain Users"]}},
+                      "[!] Vulnerabilities": {
+                          "ESC1": "'CORP.LOCAL\\Domain Users' can enroll and supply a SAN"}},
+                "1": {"Template Name": "Boring", "Enabled": True,
+                      "[!] Vulnerabilities": {}}}}
+        import json as _json
+        with open(path, "w") as fh:
+            fh.write(_json.dumps(data))
+
+    def test_is_certipy_detects_file(self):
+        from recce import adcs
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "20260101_Certipy.json")
+            self._certipy(p)
+            self.assertTrue(adcs.is_certipy(p))
+            other = os.path.join(d, "sh.json")
+            with open(other, "w") as fh:
+                fh.write('{"meta": {"type": "users"}, "data": []}')
+            self.assertFalse(adcs.is_certipy(other))
+
+    def test_findings_map_esc_to_exact_commands(self):
+        from recce import adcs
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "c.json")
+            self._certipy(p)
+            fs = adcs.findings(p)
+        cats = {f["category"] for f in fs}
+        self.assertIn("adcs-esc1", cats)
+        self.assertIn("adcs-esc8", cats)
+        esc1 = next(f for f in fs if f["category"] == "adcs-esc1")
+        self.assertEqual(esc1["severity"], "critical")
+        self.assertIn("certipy req", esc1["command"])
+        self.assertIn("VulnUser", esc1["command"])               # real template name
+        self.assertIn("Domain Users", esc1["principal"])         # who can enroll
+
+    def test_certipy_flows_into_workbook_with_creds(self):
+        from recce import cli, xlsx
+        with tempfile.TemporaryDirectory() as d:
+            cp = os.path.join(d, "certipy.json")
+            self._certipy(cp)
+            out = os.path.join(d, "eng")
+            rc = cli.cmd_bloodhound(SimpleNamespace(
+                paths=[cp], username="alice", password="Passw0rd!",
+                domain="corp.local", owned=None, creds=None, dc_ip="10.0.0.1",
+                output_dir=out, title="T"))
+            self.assertEqual(rc, 0)
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            txt = "\n".join(" ".join(map(str, r)) for r in sheets["AD Findings"])
+            self.assertIn("ESC1", txt)
+            self.assertIn("VulnUser", txt)
+            self.assertIn("alice@corp.local", txt)               # creds pre-filled
+            self.assertIn("10.0.0.1", txt)
 
 
 class AttackPathTest(unittest.TestCase):

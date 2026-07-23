@@ -141,11 +141,22 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
       `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
       version from its `readme.txt` Stable tag.
-- **`bloodhound` — SharpHound import, AD vulnerabilities, and paths to Domain Admin.**
-  Point recce at a SharpHound collection (`recce bloodhound loot.zip -o eng`, or a
-  directory / single `.json`) and it parses the AD object graph offline (stdlib
-  `json`/`zipfile`, no BloodHound/neo4j needed) and turns it into a provable
-  runbook:
+- **`ad` — SharpHound + Certipy (ADCS) import: AD vulns, ESC findings, and paths to
+  Domain Admin.** One simple command, credentials-first:
+  `recce ad loot.zip certipy.json -u alice -p 'Passw0rd!' -d corp.local -o eng`.
+  Pass a SharpHound collection (`.zip` / directory / single `.json`) and/or a
+  `certipy find -json` file - any mix; each input is auto-detected. recce parses
+  the AD object graph offline (stdlib `json`/`zipfile`, no BloodHound/neo4j needed)
+  and turns it into a provable runbook. (`bloodhound` is kept as an alias.)
+  - **Credentials-first & copy-paste ready.** Give recce your account with
+    `-u/-p/-d` (no NT hash needed) and it (a) starts the attack-path search **from
+    your account** by default and (b) **pre-fills every generated command** with
+    your username / password / domain / DC IP, so each line in the sheet runs as-is.
+  - **ADCS / ESC findings (Certipy).** Every ESC Certipy flags (ESC1-ESC11, ESC13,
+    ESC15/EKUwu) becomes a finding with the exact `certipy` command to prove/abuse
+    it, the real template/CA name filled in, and *who* can enrol - e.g. ESC1 ->
+    `certipy req … -template VulnUser -upn administrator@corp.local && certipy auth
+    -pfx administrator.pfx`, ESC8 -> `certipy relay` + coercion.
   - **AD Findings sheet** — every misconfiguration / vulnerability the graph
     reveals, most-severe first, each with the **exact EXISTING-tool command to
     prove or abuse it**: Kerberoastable & AS-REP-roastable accounts (with the
@@ -159,9 +170,10 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     (`--owned USER` to start from a principal you control; otherwise it shows what
     *any authenticated user* can reach), rendered as an edge chain with the exact
     tool + action to walk each hop.
-  - **Kerberos for effect** — pass `--creds 'DOMAIN/user:secret'` (an NT hash if
-    it's 32 hex chars) and recce stages the actions to run: roast, AS-REP, DCSync,
-    and delegation ticket forging, parametrised with your credential/`-hashes`.
+  - **Kerberos for effect** — with your credential supplied, recce stages the
+    actions to run: roast, AS-REP, DCSync, and delegation ticket forging, each
+    parametrised with your account (a 32-hex secret is auto-treated as an NT hash
+    and rendered as `-hashes`).
   - Merges the collected domain facts (functional level, trusts, MachineAccountQuota)
     into the Active Directory sheet even with no network scan. References existing
     published tooling (impacket / certipy / netexec / bloodyAD / Rubeus); generates

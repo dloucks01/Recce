@@ -559,7 +559,66 @@ def kerberos_actions(graph: dict, creds: dict | None) -> list[dict]:
     return actions
 
 
+# --- credential substitution ----------------------------------------------------
+
+def fill_creds(analysis: dict, creds: dict | None) -> dict:
+    """Substitute the operator's real credentials into every generated command so
+    they are copy-paste ready. Password engagements (the common case) get -u/-p/-d
+    and the DC IP filled; placeholders with no value are left intact. Mutates and
+    returns `analysis`."""
+    creds = creds or {}
+    dom = creds.get("domain") or ""
+    user = creds.get("user") or ""
+    secret = creds.get("secret") or ""
+    dc = creds.get("dc_ip") or ""
+    is_hash = creds.get("is_hash")
+    # Longest / composite tokens first so partial tokens don't clobber them.
+    subs: list[tuple[str, str]] = []
+    if dom and user:
+        subs.append(("<user>@<DOMAIN>", f"{user}@{dom}"))
+        if secret and not is_hash:
+            subs.append(("<DOMAIN>/<user>:<pass>", f"{dom}/{user}:{secret}"))
+        subs.append(("<DOMAIN>/<user>", f"{dom}/{user}"))
+    if user:
+        subs.append(("<user>", user))
+        subs.append(("<you>", user))
+    if secret and not is_hash:
+        subs.append(("<pass>", secret))
+    if is_hash and secret:
+        subs.append((":<nt>", f":{secret}"))
+        subs.append(("-hashes :<nt>", f"-hashes :{secret}"))
+    if dom:
+        subs.append(("<DOMAIN>", dom))
+        subs.append(("<dom>", dom))
+    if dc:
+        subs.append(("<dc-ip>", dc))
+        subs.append(("<dc>", dc))
+
+    def apply(text):
+        if not isinstance(text, str):
+            return text
+        for tok, val in subs:
+            text = text.replace(tok, val)
+        return text
+
+    for f in analysis.get("findings", []):
+        f["command"] = apply(f.get("command", ""))
+    for a in analysis.get("kerberos", []):
+        a["command"] = apply(a.get("command", ""))
+    for p in analysis.get("paths", []):
+        for st in p.get("steps", []):
+            st["abuse"] = apply(st.get("abuse", ""))
+    return analysis
+
+
 # --- top-level analysis ---------------------------------------------------------
+
+def empty_analysis() -> dict:
+    """A base analysis dict for when there is no SharpHound graph (e.g. only a
+    Certipy ADCS import). Findings get merged in by the caller."""
+    return {"stats": {"nodes": 0, "edges": 0, "by_type": {}, "findings": 0, "paths": 0},
+            "findings": [], "paths": [], "kerberos": [], "domains": []}
+
 
 def analyze(path: str, owned: set[str] | None = None,
             creds: dict | None = None) -> dict:

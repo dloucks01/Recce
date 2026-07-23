@@ -2365,46 +2365,93 @@ def cmd_import(args: argparse.Namespace) -> int:
 
 
 def cmd_bloodhound(args: argparse.Namespace) -> int:
-    """Import a SharpHound/BloodHound collection (.zip / dir / .json), identify AD
-    misconfigurations + vulnerabilities, map the shortest paths from an owned /
-    low-priv principal to Domain Admin, and - if a credential/hash is given - emit
-    the Kerberos actions to run for effect. Airgapped, stdlib-only."""
+    """Import SharpHound and/or Certipy (ADCS) output, identify AD
+    misconfigurations + vulnerabilities, map the shortest paths from YOUR account
+    (or any authenticated user) to Domain Admin, and stage the follow-on actions.
+
+    Simple credentialed run:  recce ad loot.zip -u alice -p 'Passw0rd' -d corp.local
+    Add ADCS:                 recce ad loot.zip certipy.json -u alice -p ... -d corp.local
+    Airgapped, stdlib-only; every command is pre-filled with your credentials."""
     from . import bloodhound as bh
-    src = args.path
-    if not os.path.exists(src):
-        print(f"[x] Not found: {src}")
-        return 1
-    if not bh.is_sharphound(src):
-        print(f"[!] {src} doesn't look like a SharpHound collection (no typed "
-              "users/computers/groups/domains JSON). Parsing anyway.")
-    owned = set()
-    if args.owned:
-        for chunk in args.owned:
-            owned.update(o.strip() for o in chunk.split(",") if o.strip())
+    from . import adcs
+
+    srcs = args.paths if isinstance(args.paths, list) else [args.paths]
+    for s in srcs:
+        if not os.path.exists(s):
+            print(f"[x] Not found: {s}")
+            return 1
+
+    # Credentials: prefer the simple -u/-p/-d; fall back to --creds 'DOM/user:secret'.
     creds = None
-    if args.creds:
+    if args.username:
+        user, domain = _split_userdomain(args.username, args.domain)
+        secret = args.password or ""
+        is_hash = bool(re.fullmatch(r"[0-9a-fA-F]{32}", secret or ""))
+        creds = {"domain": domain, "user": user, "secret": secret,
+                 "is_hash": is_hash, "dc_ip": args.dc_ip or ""}
+    elif args.creds:
         c = _parse_cred_spec(args.creds)
         creds = {"domain": c.domain, "user": c.username, "secret": c.secret,
                  "is_hash": c.kind == "nthash", "dc_ip": args.dc_ip or ""}
 
-    print(f"[*] Parsing SharpHound collection: {src}")
-    analysis = bh.analyze(src, owned=owned, creds=creds)
+    # Where attack paths start: explicit --owned, else YOUR account (simple default),
+    # else any authenticated user.
+    owned = set()
+    if args.owned:
+        for chunk in args.owned:
+            owned.update(o.strip() for o in chunk.split(",") if o.strip())
+    elif creds and creds["user"]:
+        owned = {creds["user"]}
+        if creds["domain"]:
+            owned.add(f"{creds['user']}@{creds['domain']}")
+
+    # Classify each input: SharpHound graph vs Certipy ADCS JSON.
+    sh_paths = [s for s in srcs if bh.is_sharphound(s)]
+    certipy_paths = [s for s in srcs if adcs.is_certipy(s)]
+    unknown = [s for s in srcs if s not in sh_paths and s not in certipy_paths]
+    for u in unknown:
+        print(f"[!] {u} isn't recognised as SharpHound or Certipy output - skipped.")
+
+    if sh_paths:
+        print(f"[*] Parsing SharpHound: {', '.join(os.path.basename(p) for p in sh_paths)}")
+        analysis = bh.analyze(sh_paths[0], owned=owned, creds=creds)
+        for extra in sh_paths[1:]:                       # merge extra collections' findings
+            more = bh.analyze(extra, owned=owned, creds=creds)
+            analysis["findings"].extend(more["findings"])
+            analysis["domains"].extend(more["domains"])
+    else:
+        analysis = bh.empty_analysis()
+
+    if certipy_paths:
+        print(f"[*] Parsing Certipy ADCS: {', '.join(os.path.basename(p) for p in certipy_paths)}")
+        for cp in certipy_paths:
+            analysis["findings"].extend(adcs.findings(cp))
+
+    # Re-sort merged findings, fill in the operator's credentials, refresh stats.
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    analysis["findings"].sort(key=lambda f: order.get(f["severity"], 5))
+    bh.fill_creds(analysis, creds)
+    analysis["stats"]["findings"] = len(analysis["findings"])
+
     st = analysis["stats"]
-    print(f"[+] Graph: {st['nodes']} node(s), {st['edges']} edge(s) "
-          f"({', '.join(f'{k}={v}' for k, v in sorted(st['by_type'].items()))})")
+    if st.get("nodes"):
+        print(f"[+] Graph: {st['nodes']} node(s), {st['edges']} edge(s) "
+              f"({', '.join(f'{k}={v}' for k, v in sorted(st['by_type'].items()))})")
 
     fs = analysis["findings"]
     if fs:
         by_sev: dict[str, int] = {}
         for f in fs:
             by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print(f"[+] {len(fs)} AD finding(s): "
+        adcs_n = sum(1 for f in fs if f["category"].startswith("adcs-"))
+        print(f"[+] {len(fs)} AD finding(s)"
+              + (f" ({adcs_n} ADCS/ESC)" if adcs_n else "") + ": "
               + ", ".join(f"{by_sev[s]} {s}" for s in
                           ("critical", "high", "medium", "low") if by_sev.get(s)))
-        for f in fs[:8]:
+        for f in fs[:10]:
             print(f"      [{f['severity'].upper():8}] {f['title']} - {f['principal']}")
-        if len(fs) > 8:
-            print(f"      ... and {len(fs) - 8} more (see the AD Findings sheet)")
+        if len(fs) > 10:
+            print(f"      ... and {len(fs) - 10} more (see the AD Findings sheet)")
 
     paths_found = analysis["paths"]
     if paths_found:
@@ -2412,10 +2459,10 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
         for p in paths_found[:5]:
             who = "ANY user" if p.get("any_user") else p["start"]
             print(f"      {who} -> {p['target']}  ({p['length']} hop): {p['chain']}")
-    else:
-        print("[!] No path to a high-value target from the chosen start set"
-              + ("" if owned else " (pass --owned <user> to start from a principal "
-                 "you control)") + ".")
+    elif sh_paths:
+        print("[!] No path to a high-value target from "
+              + (f"{', '.join(sorted(owned))}" if owned else "any authenticated user")
+              + " in this collection.")
     if analysis["kerberos"]:
         print(f"[+] {len(analysis['kerberos'])} Kerberos action(s) staged "
               "(see the AD Attack Paths sheet).")
@@ -3073,17 +3120,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="also map exploits via searchsploit (needs the tool)")
     imp.set_defaults(func=cmd_import)
 
-    # Import a SharpHound/BloodHound collection -> AD findings + paths to DA.
-    bhp = sub.add_parser("bloodhound",
-                         help="import SharpHound/BloodHound data -> AD vulns + paths to DA")
-    bhp.add_argument("path", help="SharpHound output: a .zip, a directory, or a .json")
+    # Import SharpHound and/or Certipy (ADCS) output -> AD findings + paths to DA.
+    bhp = sub.add_parser("ad", aliases=["bloodhound"],
+                         help="import SharpHound + Certipy (ADCS) data -> AD vulns, "
+                              "ESC findings + paths to Domain Admin")
+    bhp.add_argument("paths", nargs="+",
+                     help="SharpHound output (.zip / dir / .json) and/or a Certipy "
+                          "find -json file - pass any mix; each is auto-detected")
+    bhp.add_argument("-u", "--username",
+                     help="your account - attack paths start from it, and every "
+                          "command is pre-filled with it. Domain-qualified forms "
+                          "('CORP\\alice', 'alice@corp.local') work too")
+    bhp.add_argument("-p", "--password", help="password for your account")
+    bhp.add_argument("-d", "--domain", help="AD domain (e.g. corp.local)")
+    bhp.add_argument("--dc-ip", help="DC IP to fill into the staged commands")
     bhp.add_argument("--owned", action="append", metavar="USER[,USER...]",
-                     help="principal(s) you already control - paths start here "
-                          "(repeatable / comma-separated). Default: any authenticated user")
+                     help="override the path start set with these principal(s) "
+                          "(repeatable / comma-separated)")
     bhp.add_argument("--creds", metavar="DOMAIN/user:secret",
-                     help="a credential or NT hash to stage Kerberos actions "
-                          "(secret is treated as an NT hash if it's 32 hex chars)")
-    bhp.add_argument("--dc-ip", help="DC IP to substitute into the staged commands")
+                     help="alternative to -u/-p/-d; an NT hash if it's 32 hex chars")
     bhp.add_argument("-o", "--output-dir", default="engagement")
     bhp.add_argument("--title", default="Recce Engagement")
     bhp.set_defaults(func=cmd_bloodhound)
@@ -3133,8 +3188,8 @@ and, when you want more depth, run any of:
       recce writeups -o eng · recce status -o eng
 
 Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
-SharpHound/BloodHound data?  recce bloodhound loot.zip --owned USER -o eng
-                             (AD vulns + shortest paths to Domain Admin)
+SharpHound / Certipy data?   recce ad loot.zip certipy.json -u USER -p PASS -d DOMAIN
+                             (AD vulns + ESC findings + paths to Domain Admin)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.
