@@ -1369,10 +1369,17 @@ def _build_mssql(wb, analysis: dict) -> None:
     runbooks = analysis.get("runbooks") or []
     if not tgts and not fs:
         return
+    from . import mssql as _mssql
     sh = wb.add_sheet("MSSQL")
     sh.write([("Microsoft SQL Server - offensive enumeration & attack chain", "title")])
     sh.write([("Pre-auth probes are recce's own (SQL Browser + TDS pre-login); "
                "authenticated actions reference nxc / impacket / mssqlpwner.", "sub")])
+    sh.write([""])
+    # How MSSQL is tested - methodology narrative so the reader understands each phase.
+    sh.write([("How MSSQL is tested", "title")])
+    for phase, text in _mssql.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
     sh.write([""])
     # Endpoints.
     sh.write([("Endpoints", "title")])
@@ -1398,6 +1405,20 @@ def _build_mssql(wb, analysis: dict) -> None:
                       f["title"], f["target"], f.get("detail", ""),
                       f.get("command", ""), f.get("remediation", "")])
         sh.write([""])
+        # Detailed narrative per finding - what the issue actually enables.
+        if any(f.get("narrative") for f in fs):
+            sh.write([("Finding details - what each issue enables", "title")])
+            seen_narr = set()
+            for f in fs:
+                narr = f.get("narrative")
+                key = (f["title"], f["target"])
+                if not narr or key in seen_narr:
+                    continue
+                seen_narr.add(key)
+                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
+                           "bold")])
+                sh.write(["", narr])
+            sh.write([""])
     # Runbook + chain, per endpoint.
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
