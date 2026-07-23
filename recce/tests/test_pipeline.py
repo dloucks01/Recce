@@ -3445,14 +3445,22 @@ class MssqlTest(unittest.TestCase):
     def test_proof_screenshot_html_and_gating(self):
         from recce import mssql, cli
         from types import SimpleNamespace
-        html = mssql.proof_html("Confirmed RCE", "10.0.0.50 as svc",
-                                "EXEC xp_cmdshell 'whoami'", "nt service\\mssql <b>x</b>")
-        self.assertIn("Confirmed RCE", html)
+        html = mssql.proof_html(["EXEC xp_cmdshell 'whoami'"], "nt service\\mssql <b>x</b>",
+                                banner="impacket-mssqlclient alice@10.0.0.50")
+        # A faithful terminal render: the real command at a SQL> prompt, verbatim
+        # output, and NO recce branding/badge.
+        self.assertIn("SQL&gt;", html)
+        self.assertIn("EXEC xp_cmdshell", html)
+        self.assertIn("impacket-mssqlclient alice@10.0.0.50", html)  # console banner
         self.assertIn("&lt;b&gt;", html)                         # output is HTML-escaped
-        self.assertIn("PROOF", html)
+        self.assertNotIn("PROOF", html)                          # no manufactured badge
+        self.assertNotIn(">recce<", html)                        # unbranded
+        # Multiple command lines each get a prompt.
+        multi = mssql.proof_html(["CREATE TABLE ##x (...)", "DROP TABLE ##x"], "")
+        self.assertEqual(multi.count("SQL&gt;"), 3)              # 2 commands + trailing prompt
         # _mssql_shot is a no-op unless --screenshots is set.
         self.assertIsNone(cli._mssql_shot(
-            SimpleNamespace(screenshots=False), "10.0.0.50", "n", "t", "s", "c", "o"))
+            SimpleNamespace(screenshots=False), "10.0.0.50", "n", "b", "c", "o"))
 
     def test_datamine_finds_tables_and_sensitive_columns(self):
         from recce import mssql
