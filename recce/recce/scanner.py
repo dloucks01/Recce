@@ -408,6 +408,10 @@ def _masscan_ports(ip: str, out_xml: str,
           "-oX", tmp], timeout=(profile.host_timeout * 60 + 120) or None)
     # Re-emit as an nmap-shaped XML by re-scanning just the open ports with nmap.
     ports = _extract_masscan_ports(tmp)
+    try:                                      # clean up the intermediate masscan XML
+        os.unlink(tmp)
+    except OSError:
+        pass
     if not ports:
         return _empty_xml(out_xml), None
     scan_type = "-sS" if _is_root() else "-sT"

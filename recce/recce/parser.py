@@ -153,7 +153,10 @@ def _weak_config(host_ip: str, port: Port | None, script: Script) -> Vuln | None
         sev, title, cwe = "high", "SMTP open relay", ["CWE-269"]
     elif sid == "nfs-showmount" and "/" in out:
         sev, title, cwe = "low", "NFS exports readable", ["CWE-284"]
-    elif sid.startswith("snmp") and ("public" in low or "private" in low):
+    elif sid.startswith("snmp") and re.search(
+            r"valid credential|(?:public|private)\b[^\n]*\bvalid\b", low):
+        # Require the snmp-brute "public - Valid credentials" signal, not a bare
+        # "public"/"private" substring that could just be a device description.
         sev, title, cwe = "medium", "SNMP community string exposed", ["CWE-1392", "CWE-319"]
     elif sid == "dns-zone-transfer" and "domain" in low and "failed" not in low:
         sev, title, cwe = "medium", "DNS zone transfer allowed", ["CWE-200"]
