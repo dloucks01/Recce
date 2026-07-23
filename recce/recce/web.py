@@ -348,6 +348,27 @@ _PATHS = [
 _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
 
 
+def _prove_put(ip: str, port: Port, auth: dict | None):
+    """Non-destructively prove HTTP PUT write: upload a unique marker file, read it
+    back, then DELETE it. Returns (True, evidence) if it round-trips, (False, note) if
+    PUT is advertised but rejected/unreadable, or None if the request failed."""
+    name = "recce_put_probe.txt"
+    marker = "recce-put-write-proof"
+    put = _fetch(ip, port, "/" + name, method="PUT", body=marker, auth=auth)
+    if not put:
+        return None
+    if put[0] not in (200, 201, 204):
+        return False, f"PUT /{name} returned HTTP {put[0]} (advertised but not accepted)."
+    got = _fetch(ip, port, "/" + name, method="GET", auth=auth)
+    round_trips = bool(got and got[0] == 200 and marker in (got[2] or ""))
+    _fetch(ip, port, "/" + name, method="DELETE", auth=auth)         # best-effort cleanup
+    if round_trips:
+        return True, (f"PUT /{name} -> HTTP {put[0]}; GET /{name} returned the uploaded "
+                      f"marker '{marker}' -> arbitrary file write CONFIRMED "
+                      "(probe file removed via DELETE).")
+    return False, f"PUT /{name} returned {put[0]} but the file was not readable back."
+
+
 # --- JWT weakness detection (from data already fetched - free) ------------------
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*")
 
@@ -701,17 +722,36 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
             findings.append(_mk(ip, port, "web-cookie", "low",
                                 "Session cookie without Secure (over HTTPS)", ["CWE-614"],
                                 f"Set-Cookie: {ck[:120]}", "Set the Secure flag on HTTPS cookies."))
-    # Dangerous HTTP methods.
+    # Dangerous HTTP methods. When PUT is advertised AND active, we don't just
+    # trust the Allow header - we prove it: PUT a marker, GET it back, DELETE it.
     opt = _fetch(ip, port, "/", method="OPTIONS", auth=auth)
     if opt and opt[1].get("allow"):
         allowed = {m.strip().upper() for m in opt[1]["allow"].split(",")}
         bad = sorted(allowed & _DANGEROUS_METHODS)
         if bad:
-            sev = "high" if "PUT" in bad else "medium"
-            findings.append(_mk(ip, port, "web-methods", sev,
-                                f"Dangerous HTTP methods enabled: {', '.join(bad)}",
-                                ["CWE-650"], f"OPTIONS / -> Allow: {opt[1]['allow']}",
-                                "Disable PUT/DELETE/TRACE/CONNECT unless required."))
+            put_proof = _prove_put(ip, port, auth) if ("PUT" in bad and active) else None
+            if put_proof and put_proof[0]:
+                findings.append(_mk(ip, port, "web-methods", "high",
+                    "Arbitrary file write via HTTP PUT (proven)", ["CWE-434", "CWE-650"],
+                    put_proof[1], "Disable WebDAV/PUT write; restrict the allowed methods.",
+                    confidence="confirmed"))
+                others = [m for m in bad if m != "PUT"]
+                if others:
+                    findings.append(_mk(ip, port, "web-methods", "medium",
+                        f"Dangerous HTTP methods advertised: {', '.join(others)}",
+                        ["CWE-650"], f"OPTIONS / -> Allow: {opt[1]['allow']}",
+                        "Disable unless required.", confidence="potential"))
+            else:
+                note = f"OPTIONS / -> Allow: {opt[1]['allow']}"
+                conf = "confirmed" if active else "potential"
+                if put_proof and not put_proof[0]:      # actively tested, PUT rejected
+                    note += f"; {put_proof[1]}"
+                    conf = "potential"
+                sev = "high" if "PUT" in bad else "medium"
+                findings.append(_mk(ip, port, "web-methods", sev,
+                    f"Dangerous HTTP methods enabled: {', '.join(bad)}", ["CWE-650"],
+                    note, "Disable PUT/DELETE/TRACE/CONNECT unless required.",
+                    confidence=conf))
     # CORS: does the server reflect an arbitrary Origin AND allow credentials?
     probe_origin = "https://recce.example"
     cors = _fetch(ip, port, "/", auth={**(auth or {}), "Origin": probe_origin})

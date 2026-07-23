@@ -2512,6 +2512,66 @@ class LocalEnumEnrichmentTest(unittest.TestCase):
         self.assertTrue(any("Writable service binary/registry" in t for t in titles))
 
 
+class WebPutProofTest(unittest.TestCase):
+    """Gap-2: the dangerous-methods finding is PROVEN by a PUT round-trip."""
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        cls.store = {}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_OPTIONS(self):
+                self.send_response(200)
+                self.send_header("Allow", "GET, PUT, DELETE, POST")
+                self.end_headers()
+
+            def do_PUT(self):
+                n = int(self.headers.get("Content-Length", 0))
+                cls.store[self.path] = self.rfile.read(n)
+                self.send_response(201)
+                self.end_headers()
+
+            def do_GET(self):
+                b = cls.store.get(self.path, b"index")
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+            def do_DELETE(self):
+                cls.store.pop(self.path, None)
+                self.send_response(204)
+                self.end_headers()
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def test_put_write_is_proven_and_reverted(self):
+        from recce import web, proofs
+        _profile, vulns = web.scan_endpoint("127.0.0.1",
+                                            Port(portid=self.port, service="http",
+                                                 state="open"), active=True)
+        proven = [v for v in vulns if v.script_id == "web-methods"
+                  and "proven" in v.title.lower()]
+        self.assertTrue(proven, "PUT write should be proven")
+        self.assertEqual(proven[0].confidence, "confirmed")
+        self.assertIn("returned the uploaded marker", proven[0].output)
+        self.assertNotIn("/recce_put_probe.txt", self.store)     # cleaned up
+        # The prove engine reads it as CONFIRMED, not LIKELY.
+        h = Host(ip="127.0.0.1", ports=[Port(portid=self.port, state="open")],
+                 vulns=[proven[0]])
+        self.assertEqual(proofs.verify_host(h)[0]["verdict"], proofs.CONFIRMED)
+
+
 class WebModuleTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
