@@ -331,6 +331,48 @@ _NARRATIVE = {
         "database engine accumulates known weaknesses over time and cannot be brought "
         "to a secure baseline; it should be treated as a standing high-value target and "
         "prioritised for upgrade."),
+    "mixed_mode": (
+        "The instance runs in mixed authentication mode, so SQL Server logins (not just "
+        "Windows/AD accounts) are accepted. That means the built-in 'sa' account exists "
+        "and every SQL login is reachable for online password spraying and, once hashes "
+        "are dumped, offline cracking. SQL logins are frequently weak or shared, so mixed "
+        "mode materially widens the authentication attack surface compared with "
+        "Windows-only auth."),
+    "server_perms": (
+        "This login holds a high-impact server-level permission without being a member "
+        "of the sysadmin role - permissions are additive in SQL Server, so a single "
+        "grant like IMPERSONATE ANY LOGIN (become any login, including sa), ALTER ANY "
+        "LOGIN (reset sa's password), ALTER ANY SERVER ROLE (add yourself to sysadmin), "
+        "or CONTROL SERVER (implicit everything) is a direct path to instance takeover. "
+        "These are easy to miss because the account is not 'a sysadmin' on paper, yet it "
+        "is functionally equivalent to one."),
+    "public_role": (
+        "A permission is granted to the public role, which every database principal and "
+        "every login is a member of and cannot be removed from. Whatever public holds, "
+        "the lowest-privileged account on the server holds too - so an over-granted "
+        "public permission (anything beyond the CONNECT/VIEW baseline, especially at the "
+        "server level) silently gives all authenticated users that capability, turning a "
+        "single misconfiguration into estate-wide exposure or escalation."),
+    "startup_proc": (
+        "A stored procedure is flagged to run automatically, as sysadmin, every time the "
+        "SQL Server service starts. This is a classic persistence mechanism: an attacker "
+        "who reaches sysadmin plants a startup procedure that re-establishes access or "
+        "runs a payload on each restart, surviving credential rotation. It is also a "
+        "supply-chain/tampering risk, so every startup procedure should be accounted for."),
+    "guest_enabled": (
+        "The 'guest' user is enabled (has CONNECT) in one or more databases. Any login "
+        "on the server - including the most low-privileged account, and in mixed mode "
+        "any SQL login you can spray - can then enter that database as guest and read "
+        "whatever guest/public can. Guest is disabled by default in user databases "
+        "precisely because enabling it removes the per-database access boundary."),
+    "object_perms": (
+        "Object-level permissions are granted to the public or guest role, so every "
+        "authenticated login inherits them. Read grants (SELECT) on sensitive tables "
+        "expose that data to the whole server; write/execute grants (INSERT/UPDATE/"
+        "DELETE/EXECUTE/CONTROL) let any login modify records or run procedures - a "
+        "stored procedure granted to public can be an escalation or data-tampering "
+        "primitive. This is how a single over-broad GRANT turns into estate-wide "
+        "exposure without anyone appearing over-privileged individually."),
     "data_at_rest": (
         "With a login recce enumerated the databases, their tables (with row counts) "
         "and the columns whose names indicate sensitive data - passwords, tokens, "
@@ -719,7 +761,28 @@ _ENUM_SECTIONS = {
                     "CAST(ISNULL(ll.uses_self_credential,0) AS varchar(4)) FROM sys.servers s "
                     "JOIN sys.linked_logins ll ON s.server_id=ll.server_id "
                     "WHERE s.is_linked=1 AND ll.remote_name IS NOT NULL AND ll.remote_name<>''",
+    # Effective server-level permissions the current login holds (beyond the
+    # sysadmin role) - CONTROL SERVER, IMPERSONATE ANY LOGIN, ALTER ANY LOGIN, ...
+    "serverperms": "SELECT permission_name+'|'+state_desc FROM sys.fn_my_permissions(NULL,'SERVER')",
+    # Server permissions granted to the public role (every login inherits these).
+    "publicserver": "SELECT pmk.permission_name+'|'+pmk.state_desc FROM sys.server_permissions pmk "
+                    "JOIN sys.server_principals sp ON pmk.grantee_principal_id=sp.principal_id "
+                    "WHERE sp.name='public' AND pmk.state_desc='GRANT'",
+    # Startup stored procedures (auto-run as sysadmin at service start - persistence).
+    "startup": "SELECT name+'|startup' FROM master.sys.procedures "
+               "WHERE OBJECTPROPERTY(object_id,'ExecIsStartup')=1",
 }
+
+# Server permissions that grant privilege escalation / control without the sysadmin
+# role - holding any of these is effectively (or a step from) instance takeover.
+_DANGEROUS_SERVER_PERMS = {
+    "CONTROL SERVER", "ALTER ANY LOGIN", "ALTER ANY SERVER ROLE",
+    "IMPERSONATE ANY LOGIN", "ALTER ANY CREDENTIAL", "CREATE SERVER ROLE",
+    "ALTER ANY LINKED SERVER", "ADMINISTER BULK OPERATIONS", "ALTER SETTINGS",
+    "EXTERNAL ACCESS ASSEMBLY", "UNSAFE ASSEMBLY", "ALTER ANY EVENT SESSION",
+}
+# Baseline public server permissions - anything beyond these is over-granted.
+_BASELINE_PUBLIC_SERVER = {"CONNECT SQL", "VIEW ANY DATABASE"}
 
 
 def mssqlclient_tool() -> str | None:
@@ -1017,10 +1080,69 @@ def chains_from_enum(target: dict, enum: dict, creds: dict | None,
         chain.append("recover stored linked-server credential(s) ("
                      + ", ".join(f"{srv}->{remote}" for srv, remote in fixed[:3]) + ")")
 
+    # Mixed-mode authentication (SQL logins allowed) - 'sa' exists and SQL logins
+    # can be sprayed/brute-forced; the server row's IsIntegratedSecurityOnly is 0.
+    intsec = server[0][3] if server and len(server[0]) > 3 else ""
+    if intsec == "0":
+        fs.append(_finding(
+            "low", "Mixed-mode authentication enabled (SQL logins)", tgt,
+            "The instance accepts SQL Server logins as well as Windows auth "
+            "(IsIntegratedSecurityOnly=0), so 'sa' exists and SQL logins are exposed "
+            "to password spraying / offline cracking.",
+            "nxc", _fill("nxc mssql <ip> -u sa -p <wordline> --local-auth", ctx),
+            "Prefer Windows-only auth; if SQL logins are required, enforce a strong "
+            "password policy and disable/rename sa.", ["CWE-262"], kind="mixed_mode"))
+
+    # Dangerous server-level permissions held by this login (beyond the sysadmin role).
+    my_server = {r[0].upper() for r in enum.get("serverperms", []) if r and r[0]}
+    danger = sorted(my_server & _DANGEROUS_SERVER_PERMS)
+    if danger and not is_sa:
+        chain.append(f"abuse server permission(s) {', '.join(danger[:3])}")
+        fs.append(_finding(
+            "high", "Dangerous server-level permission held (privesc without sysadmin)",
+            tgt, f"This login holds {', '.join(danger)} at the server level - each is a "
+            "direct or one-step path to sysadmin/RCE without being in the sysadmin role.",
+            "impacket-mssqlclient",
+            _fill("impacket-mssqlclient <domain>/<user>:<pass>@<ip>   # abuse: e.g. "
+                  "IMPERSONATE ANY LOGIN -> EXECUTE AS; ALTER ANY LOGIN -> reset sa", ctx),
+            "Revoke the permission; grant least privilege, not server-wide control.",
+            ["CWE-269", "CWE-266"], kind="server_perms"))
+
+    # Server permissions over-granted to the public role (every login inherits them).
+    pub_server = sorted({r[0].upper() for r in enum.get("publicserver", []) if r and r[0]}
+                        - _BASELINE_PUBLIC_SERVER)
+    if pub_server:
+        sev = "high" if (set(pub_server) & _DANGEROUS_SERVER_PERMS) else "medium"
+        fs.append(_finding(
+            sev, "Server permission granted to public (every login inherits it)", tgt,
+            f"The public role is granted {', '.join(pub_server)} at the server level - "
+            "every authenticated login, however low-privileged, holds this.",
+            "impacket-mssqlclient",
+            _fill("SELECT * FROM sys.server_permissions p JOIN sys.server_principals s "
+                  "ON p.grantee_principal_id=s.principal_id WHERE s.name='public';", ctx),
+            "Revoke non-baseline grants from public.", ["CWE-284", "CWE-732"],
+            kind="public_role"))
+
+    # Startup stored procedures - auto-run as sysadmin at every service start.
+    startup = [r[0] for r in enum.get("startup", []) if r and r[0]]
+    if startup:
+        fs.append(_finding(
+            "medium", f"{len(startup)} startup stored procedure(s) present", tgt,
+            "Startup procedures run automatically as sysadmin every time the SQL "
+            "service starts: " + ", ".join(startup[:8]) + ". They are a common "
+            "persistence mechanism (and a supply-chain risk) - review each.",
+            "impacket-mssqlclient",
+            _fill("SELECT name FROM master.sys.procedures WHERE "
+                  "OBJECTPROPERTY(object_id,'ExecIsStartup')=1;", ctx),
+            "Remove unexpected startup procedures; disable 'scan for startup procs' if "
+            "not needed.", ["CWE-506"], kind="startup_proc"))
+
     if not is_sa and not chain:
         chain.append(f"low-priv login as {me} - hunt for a linked-server or db_owner path")
     summary = {
         "login": me, "is_sysadmin": is_sa, "sysadmins": sorted(sysadmins),
+        "mixed_mode": intsec == "0", "server_perms": sorted(my_server),
+        "public_server": pub_server, "startup": startup,
         "logins": [r[0] for r in enum.get("logins", [])],
         "databases": enum.get("databases", []),
         "trustworthy": [r[0] for r in trust], "links": links,
@@ -1407,6 +1529,99 @@ def datamine_findings(target: dict, mined: dict, creds: dict | None):
         "n/a - informational inventory.", ["CWE-200"], kind="data_at_rest")]
 
 
+# --- per-database object permission mining --------------------------------------
+
+def build_permmine_script(dbs: list[str]) -> str:
+    """Per database: is 'guest' enabled (any login can enter), and what does the
+    public/guest role actually hold (object + database-level GRANTs beyond CONNECT)."""
+    lines = []
+    for i, db in enumerate(dbs):
+        esc = db.replace("]", "]]")
+        lines.append(f"USE [{esc}]")
+        lines.append(f"SELECT '@@GST:{i}'")
+        lines.append(
+            "SELECT DB_NAME()+'|guest_enabled' WHERE EXISTS (SELECT 1 FROM "
+            "sys.database_permissions dp JOIN sys.database_principals pr ON "
+            "dp.grantee_principal_id=pr.principal_id WHERE pr.name='guest' AND "
+            "dp.permission_name='CONNECT' AND dp.state_desc='GRANT')")
+        lines.append(f"SELECT '@@GSTE:{i}'")
+        lines.append(f"SELECT '@@PBP:{i}'")
+        lines.append(
+            "SELECT DB_NAME()+'|'+pr.name+'|'+dp.permission_name+'|'+"
+            "ISNULL(OBJECT_SCHEMA_NAME(dp.major_id)+'.'+OBJECT_NAME(dp.major_id),"
+            "'(database)') FROM sys.database_permissions dp JOIN sys.database_principals "
+            "pr ON dp.grantee_principal_id=pr.principal_id WHERE pr.name IN "
+            "('public','guest') AND dp.state_desc='GRANT' AND dp.permission_name<>'CONNECT'")
+        lines.append(f"SELECT '@@PBPE:{i}'")
+    lines.append("exit")
+    return "\n".join(lines) + "\n"
+
+
+def parse_permmine(output: str, dbs: list[str]) -> dict:
+    """{db: {guest: bool, grants: [(principal, permission, object)]}}."""
+    out = {}
+    for i, db in enumerate(dbs):
+        g = _section_rows(output, f"@@GST:{i}", f"@@GSTE:{i}", db, 2)
+        p = _section_rows(output, f"@@PBP:{i}", f"@@PBPE:{i}", db, 4)
+        out[db] = {"guest": bool(g),
+                   "grants": [(r[1], r[2], r[3]) for r in p]}
+    return out
+
+
+def run_permmine(dbs: list[str], runner) -> dict:
+    dbs = [d for d in dbs if d.lower() not in _SYSTEM_DBS]
+    if not dbs:
+        return {}
+    out = runner(build_permmine_script(dbs)) or ""
+    if "@@GST:" not in out:
+        return {}
+    return parse_permmine(out, dbs)
+
+
+def permmine_findings(target: dict, perms: dict, creds: dict | None):
+    """Findings from the object-permission mining: databases where guest is enabled,
+    and objects that public/guest can access (data exposure to every login)."""
+    tgt = f"{target['ip']}:{target.get('port', _DEFAULT_PORT)}"
+    ctx = _ctx(target, creds)
+    fs = []
+    guest_dbs = [db for db, v in perms.items() if v["guest"]]
+    if guest_dbs:
+        fs.append(_finding(
+            "medium", f"'guest' enabled in {len(guest_dbs)} database(s)", tgt,
+            "Any login (incl. low-privileged) can access: " + ", ".join(guest_dbs[:12])
+            + ". The guest user is a foothold into each database's data.",
+            "impacket-mssqlclient",
+            _fill("EXECUTE AS USER='guest'; SELECT * FROM <db>.INFORMATION_SCHEMA.TABLES;",
+                  ctx),
+            "Revoke CONNECT from guest in user databases (guest should be disabled).",
+            ["CWE-284"], kind="guest_enabled"))
+    # Notable public/guest object grants (write/execute or broad read).
+    strong = {"INSERT", "UPDATE", "DELETE", "EXECUTE", "CONTROL", "ALTER",
+              "TAKE OWNERSHIP", "SELECT"}
+    hits = []
+    for db, v in perms.items():
+        for principal, perm, obj in v["grants"]:
+            if perm.upper() in strong:
+                hits.append(f"{db}: {principal} {perm} {obj}")
+    if hits:
+        writeable = [h for h in hits if any(w in h for w in
+                     ("INSERT", "UPDATE", "DELETE", "EXECUTE", "CONTROL", "ALTER"))]
+        sev = "high" if writeable else "medium"
+        fs.append(_finding(
+            sev, "Objects accessible to public/guest (every login)", tgt,
+            f"{len(hits)} object grant(s) to public/guest: " + " ; ".join(hits[:10])
+            + ". Every authenticated login inherits these"
+            + (" including write/execute." if writeable else " (read access)."),
+            "impacket-mssqlclient",
+            _fill("SELECT pr.name, dp.permission_name, OBJECT_NAME(dp.major_id) FROM "
+                  "sys.database_permissions dp JOIN sys.database_principals pr ON "
+                  "dp.grantee_principal_id=pr.principal_id WHERE pr.name IN "
+                  "('public','guest');", ctx),
+            "Revoke object grants from public/guest; grant to specific roles instead.",
+            ["CWE-284", "CWE-732"], kind="object_perms"))
+    return fs
+
+
 # --- proof of impact: reversible write + permission modification ----------------
 
 def build_write_proof_script(token: str) -> str:
@@ -1475,6 +1690,35 @@ def write_proof_finding(target: dict, ev: dict, creds: dict | None):
         "recce mssql -u <user> -p <pass> --prove-write   # reversible proof",
         "Restrict DDL/DML and role-management rights to least privilege.",
         ["CWE-269", "CWE-284"], kind="write_proof")
+
+
+# --- proof screenshots (terminal-style, for the technical walkthrough) ----------
+
+def _html_escape(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def proof_html(title: str, subtitle: str, command: str, output: str) -> str:
+    """A dark terminal-style HTML page showing a command and its captured output -
+    rendered to PNG for the technical-walkthrough evidence."""
+    return (
+        "<html><head><meta charset='utf-8'><style>"
+        "body{background:#0b1021;margin:0;padding:22px;"
+        "font-family:'DejaVu Sans Mono',Menlo,Consolas,monospace;color:#d7e2e0}"
+        ".w{max-width:1180px;margin:0 auto;background:#0f1626;border:1px solid #24304a;"
+        "border-radius:10px;overflow:hidden}"
+        ".t{background:#141d33;padding:10px 16px;border-bottom:1px solid #24304a}"
+        ".t b{color:#59d0b0}.t .s{color:#7d8aa8;font-size:13px}"
+        ".b{padding:16px;white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.5}"
+        ".cmd{color:#7fd1ff}.cmd:before{content:'SQL> ';color:#59d0b0}"
+        ".out{color:#e6edf3;margin-top:10px}"
+        ".tag{color:#0b1021;background:#59d0b0;padding:1px 8px;border-radius:10px;font-size:12px}"
+        "</style></head><body><div class='w'>"
+        f"<div class='t'><b>recce</b> &nbsp; {_html_escape(title)} &nbsp;"
+        f"<span class='tag'>PROOF</span><div class='s'>{_html_escape(subtitle)}</div></div>"
+        f"<div class='b'><div class='cmd'>{_html_escape(command)}</div>"
+        f"<div class='out'>{_html_escape(output)}</div></div>"
+        "</div></body></html>")
 
 
 # --- top-level analysis ---------------------------------------------------------

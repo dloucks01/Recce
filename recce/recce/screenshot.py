@@ -155,6 +155,24 @@ def capture(url: str, timeout: int = _TIMEOUT) -> bytes | None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def capture_html(html: str, timeout: int = _TIMEOUT) -> bytes | None:
+    """Render an HTML fragment to PNG with the headless browser. Used for proof
+    screenshots of executed actions (e.g. a captured MSSQL command output) that have
+    no URL of their own. Returns PNG bytes or None."""
+    if not available():
+        return None
+    d = tempfile.mkdtemp(prefix="recce-html-")
+    page = os.path.join(d, "proof.html")
+    try:
+        with open(page, "w", encoding="utf-8") as fh:
+            fh.write(html)
+        return capture("file://" + page, timeout=timeout)
+    except OSError:
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def capture_for_host(host, max_shots: int = 2) -> list[tuple[str, bytes]]:
     """Screenshot a host's web ports. Returns [(url, png_bytes)]."""
     if not available():

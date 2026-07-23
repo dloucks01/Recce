@@ -159,6 +159,21 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     abuse TRUSTWORTHY payroll -> hop DW01"* plus the exact command per hop. The
     live enumeration (login, sysadmins, TRUSTWORTHY DBs, linked servers,
     impersonatable logins, config, hashes) is shown on the MSSQL sheet.
+  - **Server-hardening & permission checks (automatic).** The live enum now also
+    flags **mixed-mode authentication** (SQL logins / sprayable `sa`), **dangerous
+    server-level permissions** held by the login without the sysadmin role
+    (`IMPERSONATE ANY LOGIN`, `ALTER ANY LOGIN`, `CONTROL SERVER`, … - each a privesc
+    path), **server permissions over-granted to the public role**, and **startup
+    stored procedures** (auto-run as sysadmin = persistence).
+  - **Per-database object-permission mining (`--perms`).** For every database:
+    whether **`guest` is enabled** (any login gets in) and exactly which objects the
+    **public/guest** role can access - read grants on sensitive tables, and
+    write/execute grants (INSERT/UPDATE/DELETE/EXECUTE/CONTROL) that any login
+    inherits. A `DB_NAME()` guard prevents mis-attribution across a failed `USE`.
+  - **Proof screenshots for the technical walkthrough (`--screenshots`).** Executed
+    proofs - RCE output, the reversible write-proof, and located sensitive data - are
+    rendered as terminal-style PNGs into `engagement/screenshots/` via the headless
+    browser, ready to drop into the write-ups.
   - **Database data-mining (`--data`).** Enumerates every database, every table
     (with row counts) and the columns/tables whose names indicate **sensitive data**
     - passwords, tokens, PII (SSN/DOB/email/phone) and financial fields

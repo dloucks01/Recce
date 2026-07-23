@@ -2553,6 +2553,26 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mssql_shot(args, ip, name, title, subtitle, command, output):
+    """Render a terminal-style proof screenshot of an executed MSSQL action into
+    engagement/screenshots/. Returns the saved path or None."""
+    if not getattr(args, "screenshots", False):
+        return None
+    from . import mssql, screenshot
+    if not screenshot.available():
+        return None
+    png = screenshot.capture_html(mssql.proof_html(title, subtitle, command, output))
+    if not png:
+        return None
+    shot_dir = os.path.join(args.output_dir, "screenshots")
+    os.makedirs(shot_dir, exist_ok=True)
+    path = os.path.join(shot_dir, f"mssql_{ip.replace(':', '_')}_{name}.png")
+    with open(path, "wb") as fh:
+        fh.write(png)
+    print(f"      [+] {ip}: proof screenshot -> {path}")
+    return path
+
+
 def cmd_mssql(args: argparse.Namespace) -> int:
     """MSSQL offensive enumeration: credential-free pre-auth probes (SQL Browser +
     TDS pre-login), then - with credentials - the nxc access/privilege matrix and
@@ -2700,6 +2720,28 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                     print(f"      [+] {t['ip']}: data-mined "
                           f"{sum(len(v['tables']) for v in mined.values())} table(s) "
                           f"across {len(mined)} db(s), {sens} with sensitive columns")
+                    sensitive = "\n".join(f"{db}: {', '.join(v['interesting'][:8])}"
+                                          for db, v in mined.items() if v["interesting"])
+                    if sensitive:
+                        _mssql_shot(args, t["ip"], "datamine", "Sensitive data located",
+                                    f"{t['ip']}:{t['port']}",
+                                    "SELECT sensitive columns across all databases",
+                                    sensitive)
+
+            # Per-database object-permission mining (guest / public / object grants).
+            if args.perms:
+                dbnames = [r[0] for r in enum.get("databases", [])]
+                perms = mssql.run_permmine(dbnames, runner)
+                if perms:
+                    pf = mssql.permmine_findings(t, perms, creds)
+                    analysis["findings"] = pf + analysis["findings"]
+                    for rb in analysis["runbooks"]:
+                        if rb["ip"] == t["ip"]:
+                            rb["permmine"] = perms
+                    guest = [db for db, v in perms.items() if v["guest"]]
+                    grants = sum(len(v["grants"]) for v in perms.values())
+                    print(f"      [+] {t['ip']}: permission-mined - {len(guest)} db(s) "
+                          f"with guest enabled, {grants} public/guest object grant(s)")
 
             # Prove write + permission-modify impact, reversibly.
             if args.prove_write:
@@ -2711,6 +2753,13 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                     extra = " + role membership" if ev.get("perm") == "1" else ""
                     print(f"      [+] {t['ip']}: PROVED write impact (field modify"
                           f"{extra}) - reverted")
+                    _mssql_shot(args, t["ip"], "write_proof",
+                                "Proved write + permission-modify (reversible)",
+                                f"{t['ip']}:{t['port']}  as {creds['user']}",
+                                "CREATE/INSERT/UPDATE (reverted) + role toggle (reverted)",
+                                f"before -> {ev.get('update', '')}"
+                                + ("\ndbcreator membership toggled: 1 (reverted)"
+                                   if ev.get("perm") == "1" else ""))
                 else:
                     print(f"      [!] {t['ip']} write proof: {werr}")
 
@@ -2726,6 +2775,10 @@ def cmd_mssql(args: argparse.Namespace) -> int:
                 else:
                     snippet = " | ".join((out or "(no output)").splitlines()[:4])
                     print(f"      [+] {t['ip']} RCE via {args.method}: {snippet}")
+                    _mssql_shot(args, t["ip"], f"rce_{args.method}",
+                                f"Confirmed RCE via {args.method}",
+                                f"{t['ip']}:{t['port']}", f"EXEC ... {args.exec_cmd}",
+                                out or "(no output)")
                     analysis["findings"].insert(0, mssql._finding(
                         "critical", f"Confirmed OS command execution via {args.method}",
                         f"{t['ip']}:{t['port']}",
@@ -3462,6 +3515,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ms.add_argument("--data", action="store_true",
                     help="mine the databases: enumerate every table (+ row counts) and "
                          "find columns/tables with sensitive names across all databases")
+    ms.add_argument("--perms", action="store_true",
+                    help="per-database object-permission mining: guest-enabled databases "
+                         "and objects public/guest can access")
+    ms.add_argument("--screenshots", action="store_true",
+                    help="capture terminal-style PROOF screenshots of executed actions "
+                         "(RCE output, write-proof, data mining) for the walkthrough")
     ms.add_argument("--prove-write", action="store_true",
                     help="prove write + permission-modify impact REVERSIBLY (create a "
                          "table, modify a field, toggle a role; everything is reverted)")
