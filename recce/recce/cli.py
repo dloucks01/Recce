@@ -3414,6 +3414,11 @@ def cmd_ldap(args: argparse.Namespace) -> int:
             flags.append("ANON-READ")
         elif t.get("anon_bind"):
             flags.append("anon-bind")
+        if t.get("auth_ok"):
+            flags.append(f"AUTH: {t.get('auth_users', 0)} users / "
+                         f"{t.get('kerberoastable', 0)} kerb / {t.get('asrep', 0)} asrep")
+        elif t.get("auth_error"):
+            flags.append(f"auth failed ({t['auth_error']})")
         dom = f"  {t.get('domain', '')}" if t.get("domain") else ""
         dc = f" ({t.get('dc_dns')})" if t.get("dc_dns") else ""
         state = "  ".join(flags) or "probed"
@@ -3432,14 +3437,24 @@ def cmd_ldap(args: argparse.Namespace) -> int:
                 _ldap_shot(args, t["ip"], f"ldapsearch -x -H ldap://{t['ip']}:{t['port']} "
                            "-s base -b '' '(objectClass=*)'", out)
 
-    _fold_service_findings(store, hosts, analysis, "ldap",
-                           _ldap.findings_to_vulns, "LDAP")
+    # analyze() attached authenticated-enum Account objects onto the DC hosts in place.
+    by_ip = _fold_service_findings(store, hosts, analysis, "ldap",
+                                   _ldap.findings_to_vulns, "LDAP")
+    # Persist any DC that gained LDAP accounts but produced no LDAP vuln row (e.g. an
+    # LDAPS host with authenticated enum but no anonymous/cleartext finding).
+    host_by_ip = {h.ip: h for h in hosts}
+    for t in tgts:
+        if t.get("auth_ok") and t["ip"] not in by_ip and t["ip"] in host_by_ip:
+            store.upsert_host(host_by_ip[t["ip"]], merge=False)
     if active:                       # bound/read the LDAP port -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
+    total_accts = sum(t.get("auth_users", 0) for t in tgts)
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
-    print("    -> LDAP sheet written; findings folded into the main totals.")
+    extra = (f" ({total_accts} account(s) enumerated -> Users & Accounts / AD Quick Wins)"
+             if total_accts else "")
+    print(f"    -> LDAP sheet written{extra}; findings folded into the main totals.")
     return 0
 
 

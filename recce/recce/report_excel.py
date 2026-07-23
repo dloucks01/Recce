@@ -1022,8 +1022,10 @@ def _build_guide(wb, meta: dict) -> None:
                        "(exec-into-pods), kube-apiserver (anonymous LIST / Secrets) and "
                        "etcd (all cluster secrets). Run `recce k8s`."),
         ("LDAP", "LDAP / AD directory (stdlib BER client): anonymous bind, RootDSE "
-                 "(domain/forest/DC/functional level), and anonymous directory-read "
-                 "detection - plus cleartext-389 / relay surface. Run `recce ldap`."),
+                 "(domain/forest/DC/functional level), anonymous directory-read "
+                 "detection, cleartext-389 / relay surface - and, with -u/-p/-d, a "
+                 "paged authenticated enum (users/SPNs/delegation -> AD Quick Wins). "
+                 "Run `recce ldap`."),
         # --- Active Directory cluster (kept contiguous) ---
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
@@ -1268,9 +1270,11 @@ def _build_runbook(wb, meta: dict) -> None:
         "(all cluster secrets in the clear).")
     cmd("ldap -o eng   [-u alice -p 'Passw0rd!' -d corp.local]",
         "LDAP: stdlib BER client anonymously binds, reads the RootDSE (domain / forest "
-        "/ DC / functional level) and tests for anonymous directory read (users, SPNs, "
-        "machine-account quota); flags cleartext 389 as a credential-sniff / relay "
-        "surface. Read-only.")
+        "/ DC / functional level) and tests for anonymous directory read; flags cleartext "
+        "389 as a credential-sniff / relay surface. WITH creds it also PAGES an "
+        "authenticated enum (users / computers / domain) in-house and derives "
+        "kerberoastable / AS-REP / delegation / privileged accounts straight into Users "
+        "& Accounts + AD Quick Wins. Read-only.")
 
     section("6. Act on the findings - turn CONFIRMED findings into a plan",
             "Once findings are proven (Verification tab), stage the exploitation and "
@@ -2040,8 +2044,10 @@ def _build_ldap(wb, analysis: dict) -> None:
     sh = wb.add_sheet("LDAP")
     sh.write([("LDAP / Active Directory - offensive directory enumeration", "title")])
     sh.write([("recce speaks LDAP directly (stdlib BER/ASN.1): an anonymous bind, a "
-               "RootDSE read, and an anonymous naming-context read. Read-only - it "
-               "never writes to the directory.", "sub")])
+               "RootDSE read, an anonymous naming-context read, and - with creds - a "
+               "paged authenticated enumeration (users/computers/domain -> Users & "
+               "Accounts + AD Quick Wins). Read-only - it never writes to the directory.",
+               "sub")])
     sh.write([""])
     sh.write([("How LDAP is tested", "title")])
     for phase, text in _ldap.TESTING_NARRATIVE:
@@ -2051,7 +2057,7 @@ def _build_ldap(wb, analysis: dict) -> None:
     sh.write([("Directory endpoints", "title")])
     sh.write([(h, "bold") for h in
               ("IP:Port", "Anon read", "Domain", "DC (dnsHostName)",
-               "Functional level", "Naming context")])
+               "Functional level", "Enumerated (auth)")])
     for t in tgts:
         if t.get("anon_read"):
             anon = ("ANON READ", "sev_high")
@@ -2060,8 +2066,15 @@ def _build_ldap(wb, analysis: dict) -> None:
         else:
             anon = "no"
         lvl = f"Server {t['dc_level']}" if t.get("dc_level") else ""
+        if t.get("auth_ok"):
+            enum = (f"{t.get('auth_users', 0)} users, {t.get('kerberoastable', 0)} kerb, "
+                    f"{t.get('asrep', 0)} AS-REP, {t.get('unconstrained_deleg', 0)} uncon-deleg")
+        elif t.get("auth_error"):
+            enum = f"auth failed: {t['auth_error']}"
+        else:
+            enum = "(anonymous only - pass -u/-p to enumerate)"
         sh.write([f"{t['ip']}:{t['port']}", anon, t.get("domain", ""),
-                  t.get("dc_dns", ""), lvl, t.get("naming_context", "")])
+                  t.get("dc_dns", ""), lvl, enum])
     sh.write([""])
     _write_findings_table(sh, fs)
     for rb in runbooks:

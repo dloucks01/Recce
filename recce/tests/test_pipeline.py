@@ -4101,6 +4101,180 @@ class LdapTest(unittest.TestCase):
         verdicts = [r["verdict"] for r in proofs.verify_host(h)]
         self.assertIn(proofs.CONFIRMED, verdicts)
 
+    @staticmethod
+    def _serve_scripts(scripts):
+        """A TCP server that replays scripts[i] (a list of response byte-strings) on the
+        i-th connection - so a probe connection and an enum connection get different
+        replies. Returns (server, port); caller shuts it down."""
+        import socketserver
+        import threading
+        from recce import ldap as L
+        state = {"n": 0}
+        lock = threading.Lock()
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                with lock:
+                    idx = state["n"]
+                    state["n"] += 1
+                script = scripts[idx] if idx < len(scripts) else []
+                for r in script:
+                    if L._read_message(self.request, 5.0) is None:
+                        return
+                    self.request.sendall(r)
+
+        srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, srv.server_address[1]
+
+    def test_authenticated_enum_pages_and_derives_accounts(self):
+        from recce import ldap as L
+        from recce.models import Host
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+
+        def attr(n, vals):
+            return tlv(0x30, L._octet(n) + tlv(0x31, b"".join(L._octet(v) for v in vals)))
+
+        def entry(mid, dn, pairs):
+            return tlv(0x30, L._int(mid) + tlv(0x64, L._octet(dn)
+                       + tlv(0x30, b"".join(attr(n, v) for n, v in pairs))))
+
+        def done(mid, cookie=b""):
+            if cookie is None:
+                ctl = b""
+            else:
+                pv = tlv(0x30, L._int(0) + L._octet(cookie))
+                ctl = tlv(0xA0, tlv(0x30, L._octet(L._PAGED_OID) + L._octet(pv)))
+            return tlv(0x30, L._int(mid) + tlv(0x65, L._enum(0) + L._octet("")
+                       + L._octet("")) + ctl)
+
+        def bind_ok(mid=1):
+            return tlv(0x30, L._int(mid) + tlv(0x61, L._enum(0) + L._octet("")
+                       + L._octet("")))
+        # bind, users page1 (cookie 'c1'), users page2 (empty), computers, domain
+        enum_script = [
+            bind_ok(1),
+            entry(10, "CN=alice", [("sAMAccountName", ["alice"]),
+                                   ("servicePrincipalName", ["HTTP/web"]),
+                                   ("userAccountControl", ["512"])]) + done(10, b"c1"),
+            entry(11, "CN=bob", [("sAMAccountName", ["bob"]),
+                                 ("userAccountControl", ["4194816"]),
+                                 ("description", ["svc pw=Summer2025"])]) + done(11, b""),
+            done(1000, b""),
+            entry(9000, "DC=corp,DC=local", [("ms-DS-MachineAccountQuota", ["10"]),
+                                             ("lockoutThreshold", ["0"])]) + done(9000, None),
+        ]
+        srv, port = self._serve_scripts([enum_script])
+        try:
+            en = L.enum_authenticated("127.0.0.1", port, "DC=corp,DC=local",
+                                      {"user": "alice", "secret": "x", "domain": "corp.local"})
+            self.assertIsNone(en["error"])
+            self.assertEqual(len(en["users"]), 2)          # paging walked both pages
+            h = Host(ip="127.0.0.1")
+            summary, fs = L.apply_enum(h, "corp.local", "127.0.0.1", 389, en)
+            self.assertEqual(summary["kerberoastable"], 1)
+            self.assertEqual(summary["asrep"], 1)
+            # Accounts carry the exact attrs ad.quick_wins consumes.
+            alice = next(a for a in h.accounts if a.name == "alice")
+            self.assertEqual(alice.attrs["spn"], "HTTP/web")
+            bob = next(a for a in h.accounts if a.name == "bob")
+            self.assertEqual(bob.attrs["asrep_roastable"], "yes")
+            titles = " ".join(f["title"] for f in fs)
+            self.assertIn("Machine account quota", titles)
+            self.assertIn("lockout", titles.lower())
+            self.assertIn("Passwords in LDAP description", titles)
+        finally:
+            srv.shutdown()
+
+    def test_authenticated_accounts_feed_ad_quick_wins(self):
+        from recce import ldap as L, ad
+        from recce.models import Host
+        h = Host(ip="10.0.10.10", hostnames=["dc01"])
+        en = {"users": [
+            {"sAMAccountName": ["svc_sql"], "servicePrincipalName": ["MSSQL/db"],
+             "userAccountControl": ["512"]},
+            {"sAMAccountName": ["noPreAuth"], "userAccountControl": ["4194816"]}],
+            "computers": [], "domain": {}, "error": None, "bind_dn": "a@b"}
+        L.apply_enum(h, "corp.local", "10.0.10.10", 389, en)
+        # ad.py's existing derived lists must light up from the LDAP-produced accounts.
+        self.assertIn("svc_sql", [a.name for a in ad.kerberoastable([h])])
+        self.assertIn("noPreAuth", [a.name for a in ad.asrep_roastable([h])])
+
+    def test_cmd_ldap_authenticated_e2e_persists_accounts(self):
+        from recce import cli, xlsx, ldap as L
+        from recce.store import Store
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+
+        def attr(n, vals):
+            return tlv(0x30, L._octet(n) + tlv(0x31, b"".join(L._octet(v) for v in vals)))
+
+        def entry(mid, dn, pairs):
+            return tlv(0x30, L._int(mid) + tlv(0x64, L._octet(dn)
+                       + tlv(0x30, b"".join(attr(n, v) for n, v in pairs))))
+
+        def sdone(mid, cookie=None):
+            ctl = b""
+            if cookie is not None:
+                pv = tlv(0x30, L._int(0) + L._octet(cookie))
+                ctl = tlv(0xA0, tlv(0x30, L._octet(L._PAGED_OID) + L._octet(pv)))
+            return tlv(0x30, L._int(mid) + tlv(0x65, L._enum(0) + L._octet("")
+                       + L._octet("")) + ctl)
+
+        def bind_ok(mid=1):
+            return tlv(0x30, L._int(mid) + tlv(0x61, L._enum(0) + L._octet("")
+                       + L._octet("")))
+        # Connection 1 = the anonymous probe; connection 2 = the authenticated enum.
+        probe_script = [
+            bind_ok(1),
+            entry(2, "", [("defaultNamingContext", ["DC=corp,DC=local"]),
+                          ("dnsHostName", ["dc01.corp.local"]),
+                          ("domainControllerFunctionality", ["7"])]) + sdone(2),
+            entry(3, "DC=corp,DC=local", [("objectClass", ["domain"])]) + sdone(3),
+        ]
+        enum_script = [
+            bind_ok(1),
+            entry(10, "CN=svc", [("sAMAccountName", ["svc_web"]),
+                                 ("servicePrincipalName", ["HTTP/web"]),
+                                 ("userAccountControl", ["512"])]) + sdone(10, b""),
+            sdone(1000, b""),
+            entry(9000, "DC=corp,DC=local", [("lockoutThreshold", ["5"])]) + sdone(9000),
+        ]
+        srv, port = self._serve_scripts([probe_script, enum_script])
+        orig = L.is_ldap
+        L.is_ldap = lambda p: p.state == "open" and (p.portid == port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=port, state="open",
+                                                service="ldap")]))
+                st.close()
+                rc = cli.main(["ldap", "-u", "alice", "-p", "x", "-d", "corp.local",
+                               "-o", out])
+                self.assertEqual(rc, 0)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                # The authenticated account persisted with its kerberoast SPN.
+                ldap_accts = [a for a in h.accounts if a.source == "ldap"]
+                self.assertIn("svc_web", [a.name for a in ldap_accts])
+                self.assertEqual(next(a for a in ldap_accts
+                                      if a.name == "svc_web").attrs["spn"], "HTTP/web")
+                # ...and it reached the AD Quick Wins sheet as a Kerberoastable row.
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                qw = "\n".join(" ".join(map(str, r)) for r in sheets["AD Quick Wins"])
+                self.assertIn("svc_web", qw)
+        finally:
+            L.is_ldap = orig
+            srv.shutdown()
+
     def test_cmd_ldap_end_to_end(self):
         from recce import cli, xlsx, ldap as L
         from recce.store import Store
