@@ -4239,6 +4239,12 @@ SharpHound / Certipy data?   recce ad loot.zip certipy.json -u USER -p PASS -d D
                              (AD vulns + ESC findings + paths to Domain Admin)
 MSSQL servers in scope?      recce mssql -u USER -p PASS -d DOMAIN -o eng
                              (pre-auth probes + access/priv matrix + attack chain)
+SMB / file shares?           recce smb -o eng   (signing/SMBv1 posture + share enum;
+                             add -u/-p and --prove-write for a reversible write proof)
+FTP servers?                 recce ftp -o eng   (anonymous/AUTH-TLS + known backdoors;
+                             --prove-write for a reversible writable-dir proof)
+Docker API (2375/2376)?      recce docker -o eng   (CONFIRM unauth API = root RCE)
+Kubernetes cluster?          recce k8s -o eng   (kubelet / kube-apiserver / etcd)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.
