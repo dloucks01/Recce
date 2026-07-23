@@ -4,6 +4,22 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Added
+- **`ldap` — deep LDAP / Active Directory directory enumeration (stdlib only).** A
+  hand-rolled BER/ASN.1 LDAP client on a raw socket (no python-ldap / ldap3), so it
+  runs on a stock airgapped Kali. Credential-free and read-only, against a Directory
+  port (389/636/3268/3269) it: attempts an **anonymous simple bind**; reads the
+  **RootDSE** (naming contexts, domain/forest DNS names, the DC's dnsHostName, the
+  domain/forest **functional level**, supported SASL); tries to **read the naming
+  context anonymously** (a real misconfig — the default AD posture denies it); and
+  flags **cleartext LDAP** on 389 as a credential-sniff / NTLM-relay surface. LDAPS
+  (636/3269) is wrapped in TLS first. Findings fold into the severity totals, the
+  Vulnerabilities sheet, the write-ups, a dedicated **LDAP** workbook tab, the prove
+  engine (anonymous-bind / anonymous-read / cleartext each adjudicated CONFIRMED —
+  recce performed the bind itself), the exploit plan (ldapsearch enumeration,
+  ntlmrelayx relay), the `status` service-module coverage, and the Checklist
+  auto-tick. Optional `-u/-p/-d` only pre-fills the credentialed follow-on commands.
+
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a
   3-tuple after the callers were updated to unpack 4 values, so a bad CIDR / empty

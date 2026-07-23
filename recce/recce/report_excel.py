@@ -99,7 +99,7 @@ TAB_COLORS = {
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
     "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND, "MSSQL": _TAB_FIND,
     "SMB": _TAB_FIND, "FTP": _TAB_FIND, "Docker": _TAB_FIND,
-    "Kubernetes": _TAB_FIND, "Raw NSE": _TAB_RAW,
+    "Kubernetes": _TAB_FIND, "LDAP": _TAB_FIND, "Raw NSE": _TAB_RAW,
 }
 
 
@@ -958,7 +958,7 @@ def _build_guide(wb, meta: dict) -> None:
         "2. The step columns are colour-coded in the header so you can see which fill "
         "themselves: GREEN headers = AUTO (the tool ticks them) - Enumerated, "
         "Vuln-scan, Web, DB, Priv-esc turn green as recce finishes each phase (running "
-        "smb/ftp/docker/k8s/mssql also auto-ticks the ports they assess). AMBER "
+        "smb/ftp/docker/k8s/mssql/ldap also auto-ticks the ports they assess). AMBER "
         "headers = MANUAL sign-offs you tick yourself - AD, Access, Creds, Lateral - "
         "the kill-chain steps only you can confirm.",
         "3. Steps that don't apply to a host show '—' instead of a box (e.g. no AD "
@@ -1021,6 +1021,9 @@ def _build_guide(wb, meta: dict) -> None:
         ("Kubernetes", "Kubernetes attack surface: unauthenticated reads of the kubelet "
                        "(exec-into-pods), kube-apiserver (anonymous LIST / Secrets) and "
                        "etcd (all cluster secrets). Run `recce k8s`."),
+        ("LDAP", "LDAP / AD directory (stdlib BER client): anonymous bind, RootDSE "
+                 "(domain/forest/DC/functional level), and anonymous directory-read "
+                 "detection - plus cleartext-389 / relay surface. Run `recce ldap`."),
         # --- Active Directory cluster (kept contiguous) ---
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
@@ -1078,6 +1081,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("kubernetes / k8s", "Kubernetes: unauthenticated reads of the kubelet, "
                              "kube-apiserver and etcd (exec-into-pods / anonymous "
                              "Secrets / all cluster secrets)."),
+        ("ldap", "LDAP: anonymous bind + RootDSE (domain/forest/DC/functional level) "
+                 "and anonymous directory-read detection; flags cleartext 389."),
         ("ad <sharphound> <certipy> -u U -p P -d DOM",
          "Import SharpHound + Certipy (ADCS): AD vulns, ESC findings, and the "
          "shortest paths from your account to Domain Admin - commands pre-filled."),
@@ -1243,7 +1248,7 @@ def _build_runbook(wb, meta: dict) -> None:
         "Capture terminal-style PROOF screenshots of executed actions (RCE output, "
         "write-proof, data mining) into engagement/screenshots/ for the walkthroughs.")
 
-    section("5d. Additional services - SMB / FTP / Docker / Kubernetes",
+    section("5d. Additional services - SMB / FTP / Docker / Kubernetes / LDAP",
             "Deep, per-service offensive enumeration. Each probes with recce's own "
             "stdlib code (no creds needed to start), folds findings into the main "
             "totals, and fills its own tab. Run the ones your enum turned up.")
@@ -1261,6 +1266,11 @@ def _build_runbook(wb, meta: dict) -> None:
         "Kubernetes: unauthenticated reads of the kubelet (exec-into-pods), "
         "kube-apiserver (anonymous LIST / Secrets = cluster compromise) and etcd "
         "(all cluster secrets in the clear).")
+    cmd("ldap -o eng   [-u alice -p 'Passw0rd!' -d corp.local]",
+        "LDAP: stdlib BER client anonymously binds, reads the RootDSE (domain / forest "
+        "/ DC / functional level) and tests for anonymous directory read (users, SPNs, "
+        "machine-account quota); flags cleartext 389 as a credential-sniff / relay "
+        "surface. Read-only.")
 
     section("6. Act on the findings - turn CONFIRMED findings into a plan",
             "Once findings are proven (Verification tab), stage the exploitation and "
@@ -2017,6 +2027,56 @@ def _build_kubernetes(wb, analysis: dict) -> None:
     sh.set_col(2, 120)
 
 
+def _build_ldap(wb, analysis: dict) -> None:
+    """LDAP / AD directory sheet: per-DC RootDSE (domain/forest/DC/functional level),
+    anonymous bind + anonymous-read posture, findings, runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import ldap as _ldap
+    sh = wb.add_sheet("LDAP")
+    sh.write([("LDAP / Active Directory - offensive directory enumeration", "title")])
+    sh.write([("recce speaks LDAP directly (stdlib BER/ASN.1): an anonymous bind, a "
+               "RootDSE read, and an anonymous naming-context read. Read-only - it "
+               "never writes to the directory.", "sub")])
+    sh.write([""])
+    sh.write([("How LDAP is tested", "title")])
+    for phase, text in _ldap.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Directory endpoints", "title")])
+    sh.write([(h, "bold") for h in
+              ("IP:Port", "Anon read", "Domain", "DC (dnsHostName)",
+               "Functional level", "Naming context")])
+    for t in tgts:
+        if t.get("anon_read"):
+            anon = ("ANON READ", "sev_high")
+        elif t.get("anon_bind"):
+            anon = ("anon bind", "sev_medium")
+        else:
+            anon = "no"
+        lvl = f"Server {t['dc_level']}" if t.get("dc_level") else ""
+        sh.write([f"{t['ip']}:{t['port']}", anon, t.get("domain", ""),
+                  t.get("dc_dns", ""), lvl, t.get("naming_context", "")])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
 # --- public entry points --------------------------------------------------------
 
 def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
@@ -2059,7 +2119,7 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
       * Checklist <-> Services  - host <-> its open ports (the working pair).
       * Services <-> Vulnerabilities <-> Verification - port -> finding -> is-it-real.
       * Vulnerabilities -> Services by Product - "who else runs this?" pivot.
-      * Databases + MSSQL/SMB/FTP/Docker/Kubernetes - the per-service deep-dive band.
+      * Databases + MSSQL/SMB/FTP/Docker/Kubernetes/LDAP - the per-service deep-dive band.
       * Active Directory <-> AD Quick Wins <-> AD Findings/Paths <-> Users & Accounts.
     """
     pre = [_spec_checklist(hosts), _spec_services(hosts), _spec_web(hosts),
@@ -2107,7 +2167,8 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     nav = [s.title for s in pre if _spec_here(s)]
     # Service deep-dive band (Databases is the last of `pre`, immediately before).
     for key, title in (("mssql", "MSSQL"), ("smb", "SMB"), ("ftp", "FTP"),
-                       ("docker", "Docker"), ("kubernetes", "Kubernetes")):
+                       ("docker", "Docker"), ("kubernetes", "Kubernetes"),
+                       ("ldap", "LDAP")):
         if _mod(key):
             nav.append(title)
     # AD cluster, kept contiguous.
@@ -2175,6 +2236,7 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     _build_ftp(wb, meta.get("ftp") or {})
     _build_docker(wb, meta.get("docker") or {})
     _build_kubernetes(wb, meta.get("kubernetes") or {})
+    _build_ldap(wb, meta.get("ldap") or {})
     # AD cluster, kept contiguous: inventory -> quick wins -> import findings/paths
     # -> users & accounts.
     _build_active_directory(wb, hosts, domains)
