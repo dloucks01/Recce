@@ -3388,6 +3388,36 @@ class MssqlTest(unittest.TestCase):
         self.assertFalse([f for f in fs3 if "TRUSTWORTHY" in f["title"]
                           or "CONFIRMED" in f["title"]])
 
+    def test_credential_and_linked_login_secret_extraction(self):
+        from recce import mssql
+        from recce.report_docx import _vuln_type
+        enum = mssql.parse_enum(
+            "@@B:server\nSQL01|CORP\\alice|0|1|15.0.2000.5\n@@E:server\n"
+            "@@B:logins\nsa|1\n@@E:logins\n@@B:databases\nmaster|0|sa\n@@E:databases\n"
+            "@@B:links\nDW01|SQL Server|dw01\n@@E:links\n@@B:impersonate\n@@E:impersonate\n"
+            "@@B:config\n@@E:config\n@@B:hashes\n@@E:hashes\n"
+            "@@B:credentials\nAppCred|CORP\\svc_backup\n@@E:credentials\n"
+            "@@B:proxies\nDeployProxy|CORP\\svc_deploy\n@@E:proxies\n"
+            "@@B:linkedlogins\nDW01|sa|0\nRPT01|reader|1\n@@E:linkedlogins\n")
+        t = {"ip": "10.0.0.50", "port": 1433}
+        fs, chain, summary = mssql.chains_from_enum(
+            t, enum, {"user": "alice", "secret": "P@ss", "domain": "corp.local"})
+        cred = next(f for f in fs if "stored SQL credential" in f["title"])
+        self.assertIn("CORP\\svc_backup", cred["detail"])              # the stored account
+        self.assertIn("DeployProxy", cred["detail"])                   # agent proxy shown
+        self.assertIn("Get-SQLCredential", cred["command"])            # extraction command
+        # Fixed linked login mapping to sa -> critical + decrypt command.
+        link = next(f for f in fs if "stored fixed login" in f["title"])
+        self.assertEqual(link["severity"], "critical")                # maps to sa
+        self.assertIn("Get-SQLServerLinkedServerLogin", link["command"])
+        self.assertIn("DW01->sa", " ".join(chain))
+        # Self-mapping (uses_self_credential=1) is NOT flagged as a stored secret.
+        self.assertEqual(summary["linkedlogins"], ["DW01->sa [fixed]", "RPT01->reader"])
+        # CWEs classify (keeps the coverage test green + gives writeups a type).
+        for f in (cred, link):
+            vt, _ = _vuln_type(f["cwes"])
+            self.assertTrue(vt, f["cwes"])
+
     def test_exec_script_builders_per_method(self):
         from recce import mssql
         xp = mssql.build_exec_script("whoami", "xp")

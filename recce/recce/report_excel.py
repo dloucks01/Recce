@@ -1425,6 +1425,12 @@ def _build_mssql(wb, analysis: dict) -> None:
             if live.get("hashes"):
                 sh.write(["", f"Recovered {len(live['hashes'])} SQL login hash(es): "
                           + ", ".join(live["hashes"][:12])])
+            if live.get("credentials"):
+                sh.write(["", "Stored credentials: " + ", ".join(live["credentials"][:12])])
+            if live.get("proxies"):
+                sh.write(["", "Agent proxies: " + ", ".join(live["proxies"][:12])])
+            if live.get("linkedlogins"):
+                sh.write(["", "Linked logins: " + ", ".join(live["linkedlogins"][:12])])
         graph = rb.get("linkgraph")
         if graph:
             sa = sum(1 for n in graph if n.get("sysadmin"))
