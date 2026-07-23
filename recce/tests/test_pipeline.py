@@ -4007,6 +4007,141 @@ class DockerTest(unittest.TestCase):
             self.assertEqual(cli.main(["docker", "-o", out, "--no-probe"]), 0)
 
 
+class LdapTest(unittest.TestCase):
+    """Deep LDAP module: the stdlib BER client, the probe against a mock DC, findings,
+    prove verdicts, and the full `recce ldap` command."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import threading
+        from recce import ldap as L
+
+        def tlv(tag, val):
+            return bytes([tag]) + L._ber_len(len(val)) + val
+
+        def attr(n, vals):
+            return tlv(0x30, L._octet(n)
+                       + tlv(0x31, b"".join(L._octet(v) for v in vals)))
+
+        def msg(mid, op):
+            return tlv(0x30, L._int(mid) + op)
+
+        bind_ok = msg(1, tlv(0x61, L._enum(0) + L._octet("") + L._octet("")))
+        rootdse = msg(2, tlv(0x64, L._octet("") + tlv(0x30,
+            attr("defaultNamingContext", ["DC=corp,DC=local"])
+            + attr("dnsHostName", ["dc01.corp.local"])
+            + attr("domainControllerFunctionality", ["7"])
+            + attr("forestFunctionality", ["7"])
+            + attr("domainFunctionality", ["7"])
+            + attr("isGlobalCatalogReady", ["TRUE"])
+            + attr("supportedSASLMechanisms", ["GSSAPI", "GSS-SPNEGO"]))))
+        done2 = msg(2, tlv(0x65, L._enum(0) + L._octet("") + L._octet("")))
+        ncobj = msg(3, tlv(0x64, L._octet("DC=corp,DC=local") + tlv(0x30,
+            attr("objectClass", ["top", "domain"])
+            + attr("ms-DS-MachineAccountQuota", ["10"]))))
+        done3 = msg(3, tlv(0x65, L._enum(0) + L._octet("") + L._octet("")))
+        # Per-connection reply script: one response per request the client sends.
+        cls._script = [bind_ok, rootdse + done2, ncobj + done3]
+
+        script = cls._script
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                for resp in script:
+                    req = L._read_message(self.request, 5.0)
+                    if req is None:
+                        return
+                    self.request.sendall(resp)
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_ber_encode_decode_roundtrip(self):
+        from recce import ldap as L
+        self.assertEqual(L.build_bind_request(1, "", "")[0], 0x30)
+        self.assertEqual(L.build_search_request(2, "", 0, ["dnsHostName"])[0], 0x30)
+        # A synthetic searchResEntry parses into {attr: [values]}.
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+        entry = tlv(0x30, L._int(2) + tlv(0x64, L._octet("") + tlv(0x30,
+            tlv(0x30, L._octet("dnsHostName") + tlv(0x31, L._octet("dc01.corp.local"))))))
+        _obj, attrs = L.parse_search_entry(entry)
+        self.assertEqual(attrs["dnsHostName"], ["dc01.corp.local"])
+        self.assertEqual(L._dn_to_domain("DC=corp,DC=local"), "corp.local")
+
+    def test_probe_reads_rootdse_and_detects_anon(self):
+        from recce import ldap as L
+        pr = L.probe("127.0.0.1", self.port)
+        self.assertIsNotNone(pr)
+        self.assertTrue(pr["anon_bind"])
+        self.assertTrue(pr["anon_read"])
+        self.assertEqual(pr["domain"], "corp.local")
+        self.assertEqual(pr["dc_dns"], "dc01.corp.local")
+        self.assertEqual(pr["dc_level"], "2016")       # functional level 7 -> Server 2016
+        self.assertTrue(pr["is_gc"])
+
+    def test_findings_and_prove_confirm(self):
+        from recce import ldap as L, proofs
+        pr = L.probe("127.0.0.1", self.port)
+        h = Host(ip="10.0.10.10", ports=[Port(portid=389, service="ldap", state="open")])
+        fs = L.findings([h], {("10.0.10.10", 389): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("Anonymous LDAP directory read", titles)
+        self.assertIn("Anonymous LDAP bind allowed", titles)
+        self.assertIn("cleartext", titles.lower())
+        h.vulns = L.findings_to_vulns(fs)["10.0.10.10"]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)
+
+    def test_cmd_ldap_end_to_end(self):
+        from recce import cli, xlsx, ldap as L
+        from recce.store import Store
+        orig = L.is_ldap
+        L.is_ldap = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="ldap")]))
+                st.close()
+                self.assertEqual(cli.main(["ldap", "-o", out]), 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("LDAP", sheets)
+                vtxt = "\n".join(" ".join(map(str, r))
+                                 for r in sheets["Vulnerabilities"])
+                self.assertIn("Anonymous LDAP", vtxt)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                self.assertTrue([v for v in h.vulns if v.source == "ldap"])
+                # The port recce assessed is auto-ticked vuln-scanned on the Checklist.
+                self.assertTrue(h.ports[0].vuln_scanned)
+        finally:
+            L.is_ldap = orig
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.7", ports=[Port(portid=22, service="ssh")]))
+            st.close()
+            self.assertEqual(cli.main(["ldap", "-o", out, "--no-probe"]), 0)
+
+
 class FtpTest(unittest.TestCase):
     def _host(self):
         return Host(ip="10.0.0.80", subnet="10.0.0.0/24", hostnames=["FTP01"],

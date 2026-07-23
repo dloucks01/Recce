@@ -313,6 +313,12 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["kubernetes"] = json.loads(k8s_blob)
         except ValueError:
             pass
+    ldap_blob = store.get_meta("ldap")
+    if ldap_blob:
+        try:
+            meta["ldap"] = json.loads(ldap_blob)
+        except ValueError:
+            pass
     credentials = store.all_credentials()   # one table scan, shared by both reports
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
@@ -3372,6 +3378,87 @@ def cmd_kubernetes(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ldap(args: argparse.Namespace) -> int:
+    """Deep LDAP / AD directory enumeration: a stdlib BER/ASN.1 client anonymously
+    binds, reads the RootDSE (domain/forest/DC/functional level), and tests whether
+    the directory is anonymously readable. Read-only - it never writes to the
+    directory. Credentialed follow-on commands are staged, not run."""
+    from . import ldap as _ldap
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose LDAP.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    creds = None
+    if args.username:
+        user, domain = _split_userdomain(args.username, args.domain)
+        creds = {"user": user, "secret": args.password or "", "domain": domain}
+
+    active = not args.no_probe
+    analysis = _ldap.analyze(hosts, creds=creds, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No LDAP endpoints in the datastore (no port 389/636/3268/3269). "
+              "Run `enum` against the domain controllers first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} LDAP endpoint(s):")
+    for t in tgts:
+        flags = []
+        if t.get("anon_read"):
+            flags.append("ANON-READ")
+        elif t.get("anon_bind"):
+            flags.append("anon-bind")
+        dom = f"  {t.get('domain', '')}" if t.get("domain") else ""
+        dc = f" ({t.get('dc_dns')})" if t.get("dc_dns") else ""
+        state = "  ".join(flags) or "probed"
+        print(f"      {t['ip']}:{t['port']}  {state}{dom}{dc}")
+
+    if getattr(args, "screenshots", False):
+        for t in tgts:
+            pr = analysis["probes"].get(f"{t['ip']}:{t['port']}")
+            if pr and pr.get("rootdse_ok"):
+                out = "\n".join(filter(None, [
+                    f"domain: {pr.get('domain', '')}",
+                    f"forest: {pr.get('forest', '')}",
+                    f"dnsHostName: {pr.get('dc_dns', '')}",
+                    f"functional level: Server {pr.get('dc_level', '')}",
+                    f"anonymous read: {'YES' if pr.get('anon_read') else 'no'}"]))
+                _ldap_shot(args, t["ip"], f"ldapsearch -x -H ldap://{t['ip']}:{t['port']} "
+                           "-s base -b '' '(objectClass=*)'", out)
+
+    _fold_service_findings(store, hosts, analysis, "ldap",
+                           _ldap.findings_to_vulns, "LDAP")
+    if active:                       # bound/read the LDAP port -> auto-tick vuln-scan
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> LDAP sheet written; findings folded into the main totals.")
+    return 0
+
+
+def _ldap_shot(args, ip, command, output):
+    from . import ldap as _ldap, screenshot
+    if not screenshot.available():
+        return None
+    png = screenshot.capture_html(_ldap.proof_html(command, output))
+    if not png:
+        return None
+    shot_dir = os.path.join(args.output_dir, "screenshots")
+    os.makedirs(shot_dir, exist_ok=True)
+    path = os.path.join(shot_dir, f"ldap_{ip.replace(':', '_')}.png")
+    with open(path, "wb") as fh:
+        fh.write(png)
+    print(f"      [+] {ip}: proof screenshot -> {path}")
+    return path
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3451,11 +3538,12 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     an applicable open port have actually had the module run. 'Run' = the host appears
     in the module's stored analysis targets, or it carries a finding from that source.
     Ordered highest-impact first so `status` surfaces the critical exposures."""
-    from . import mssql, smb, ftp, docker, kubernetes as k8s
+    from . import mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap
     mods = [
         ("Docker", "docker", docker.is_docker, "recce docker"),
         ("Kubernetes", "kubernetes", k8s.is_k8s, "recce k8s"),
         ("MSSQL", "mssql", mssql.is_mssql, "recce mssql -u USER -p PASS -d DOM"),
+        ("LDAP", "ldap", _ldap.is_ldap, "recce ldap"),
         ("SMB", "smb", smb.is_smb, "recce smb"),
         ("FTP", "ftp", ftp.is_ftp, "recce ftp"),
     ]
@@ -4271,6 +4359,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     kp.add_argument("--title", default="Recce Engagement")
     kp.set_defaults(func=cmd_kubernetes)
 
+    # LDAP / AD directory enumeration.
+    lp = sub.add_parser("ldap",
+                        help="LDAP: anonymously bind + read the RootDSE (domain/forest/"
+                             "DC/functional level) and test for anonymous directory read")
+    lp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "LDAP hosts in the datastore)")
+    lp.add_argument("--screenshots", action="store_true",
+                    help="save a terminal-style RootDSE proof screenshot per DC")
+    lp.add_argument("--no-probe", action="store_true",
+                    help="skip the live bind/read; just write the commands")
+    _add_creds(lp)   # only used to pre-fill the credentialed follow-on commands
+    lp.add_argument("-o", "--output-dir", default="engagement")
+    lp.add_argument("--title", default="Recce Engagement")
+    lp.set_defaults(func=cmd_ldap)
+
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
     r.add_argument("--title", default="Recce Engagement")
@@ -4326,6 +4430,7 @@ FTP servers?                 recce ftp -o eng   (anonymous/AUTH-TLS + known back
                              --prove-write for a reversible writable-dir proof)
 Docker API (2375/2376)?      recce docker -o eng   (CONFIRM unauth API = root RCE)
 Kubernetes cluster?          recce k8s -o eng   (kubelet / kube-apiserver / etcd)
+LDAP / AD directory?         recce ldap -o eng   (anon bind + RootDSE + anon read)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.

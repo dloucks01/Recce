@@ -243,6 +243,34 @@ def _v_docker_api(host, port, vuln):
         "read was rejected - in which case recce would not have raised this."]
 
 
+def _v_ldap(host, port, vuln):
+    # recce performed the anonymous bind / anonymous read / cleartext bind itself, so
+    # each is directly observed -> CONFIRMED, with the matching escalation.
+    b = _blob(vuln)
+    if "directory read" in b:
+        return CONFIRMED, [
+            "recce bound to LDAP anonymously and the naming context returned attributes "
+            "- an unauthenticated client can read directory objects (directly observed).",
+            "Enumerate the disclosed directory: ldapsearch -x -H ldap://<ip> -b <base> "
+            "'(objectClass=user)' sAMAccountName servicePrincipalName description  "
+            "(SPNs = kerberoast targets; descriptions frequently hold passwords).",
+            "FP only if the read was actually denied - recce would not have raised this."]
+    if "cleartext" in b:
+        return CONFIRMED, [
+            "recce completed a simple bind on cleartext 389 - a real credentialed bind "
+            "here crosses the wire unencrypted, and the missing transport protection is "
+            "an NTLM->LDAP relay surface (directly observed).",
+            "Sniff a real bind (tcpdump 'tcp port 389'), or relay coerced auth: "
+            "ntlmrelayx.py -t ldap://<ip> --escalate-user <user>  (within ROE).",
+            "Require LDAPS/StartTLS + LDAP signing and channel binding."]
+    return CONFIRMED, [
+        "recce performed an anonymous simple bind (empty credentials) and the server "
+        "returned success - it hands out an anonymous LDAP session (directly observed).",
+        "Pivot to reading the directory: ldapsearch -x -H ldap://<ip> -b <base> "
+        "'(objectClass=*)'; pair with nxc ldap <ip> -u '' -p '' --users.",
+        "FP only if the bind was actually refused - recce would not have raised this."]
+
+
 def _v_ftp_backdoor(host, port, vuln):
     # A banner-matched trojaned/backdoored FTP build. The banner is strong evidence
     # but backdoor presence is only truly proven by triggering it, so LIKELY with the
@@ -588,6 +616,30 @@ _RECIPES: list[dict] = [
                "/host sh  (root shell on the host - ROE); recce only READ the API to prove it.",
      "fp": "The port enforces mutual-TLS (2376 --tlsverify) and rejected the read.",
      "fn": _v_docker_api},
+    {"id": "ldap-anon-read",
+     "match": r"anonymous ldap directory read|anonymous.*directory read",
+     "name": "Anonymous LDAP directory read (unauthenticated disclosure)",
+     "pre": ["LDAP reachable", "Anonymous bind accepted", "Naming context readable anonymously"],
+     "finish": "ldapsearch -x -H ldap://<ip> -b <base> '(objectClass=user)' "
+               "sAMAccountName servicePrincipalName description  (recce already read it).",
+     "fp": "The anonymous read was actually denied (recce would not have raised this).",
+     "fn": _v_ldap},
+    {"id": "ldap-cleartext",
+     "match": r"ldap over cleartext|cleartext.{0,6}ldap|ldap.{0,12}no tls",
+     "name": "Cleartext LDAP (no TLS on 389) - sniff / relay surface",
+     "pre": ["LDAP simple bind accepted on cleartext 389", "No LDAPS/StartTLS enforced"],
+     "finish": "relay coerced NTLM auth to LDAP: ntlmrelayx.py -t ldap://<ip> "
+               "--escalate-user <user>; or sniff a real bind (tcpdump 'tcp port 389').",
+     "fp": "The server actually enforces LDAPS/StartTLS + signing (bind would be refused).",
+     "fn": _v_ldap},
+    {"id": "ldap-anon-bind",
+     "match": r"anonymous ldap bind",
+     "name": "Anonymous LDAP bind allowed",
+     "pre": ["LDAP reachable", "Simple bind with empty credentials accepted"],
+     "finish": "ldapsearch -x -H ldap://<ip> -b '' -s base '(objectClass=*)', then try "
+               "-b the naming context; nxc ldap <ip> -u '' -p '' --users.",
+     "fp": "The anonymous bind was actually refused (recce would not have raised this).",
+     "fn": _v_ldap},
     {"id": "ftp-backdoor",
      "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
      "name": "Backdoored / RCE FTP build",
