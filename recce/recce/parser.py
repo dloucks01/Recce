@@ -247,6 +247,7 @@ def parse_nmap_xml(path: str) -> list[Host]:
     for hnode in root.findall("host"):
         status = hnode.find("status")
         state = status.get("state", "unknown") if status is not None else "unknown"
+        up_reason = status.get("reason", "") if status is not None else ""
         if state == "down":
             continue
 
@@ -263,7 +264,8 @@ def parse_nmap_xml(path: str) -> list[Host]:
         if not ip:
             continue
 
-        host = Host(ip=ip, state=state, mac=mac, vendor=vendor, last_scanned=start)
+        host = Host(ip=ip, state=state, up_reason=up_reason, mac=mac, vendor=vendor,
+                    last_scanned=start)
 
         hn_node = hnode.find("hostnames")
         if hn_node is not None:
@@ -426,7 +428,10 @@ def parse_gnmap(path: str) -> list[Host]:
         ip, hostname = m.group(1), m.group(2)
         host = hosts.get(ip)
         if host is None:
-            host = Host(ip=ip, state="up")
+            # A host explicitly listed in an imported scan report is treated as up:
+            # the grepable format carries no status reason, and hiding a host the
+            # operator's own report enumerated would be the worst kind of miss.
+            host = Host(ip=ip, state="up", up_reason="report-listed")
             hosts[ip] = host
         if hostname and hostname not in host.hostnames:
             host.hostnames.append(hostname)
@@ -484,7 +489,8 @@ def parse_normal(path: str) -> list[Host]:
         m = _NORMAL_HOST.search(line)
         if m:
             hostname, ip = (m.group(1) or ""), (m.group(2) or m.group(3))
-            cur = Host(ip=ip, state="up")
+            # Explicitly listed in an imported report => up (see parse_grepable).
+            cur = Host(ip=ip, state="up", up_reason="report-listed")
             if hostname:
                 cur.hostnames.append(hostname)
             hosts.append(cur)

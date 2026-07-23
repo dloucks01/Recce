@@ -17,6 +17,21 @@ from .models import Credential, Domain, Host
 class StoreError(RuntimeError):
     """The datastore file is corrupt/unreadable (e.g. a partial transfer)."""
 
+
+# Ranked weakest->strongest so a merge never downgrades a host's proof-of-life:
+# a real reply outranks the -Pn assume-up ("user-set") which outranks nothing.
+_UP_REASON_RANK = {"": 0, "unknown": 0, "no-response": 0, "unknown-response": 0,
+                   "user-set": 1}
+
+
+def _best_up_reason(old: str, new: str) -> str:
+    """Return whichever reason is the stronger proof the host is up. Any concrete
+    reply (echo-reply, syn-ack, arp-response, report-listed, ...) ranks above the
+    blanket -Pn 'user-set' and above a blank, and never gets overwritten by them."""
+    def rank(r: str) -> int:
+        return _UP_REASON_RANK.get(r, 2)   # anything not listed is a real reply
+    return new if rank(new) > rank(old) else old
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS hosts (
     ip       TEXT PRIMARY KEY,
@@ -131,6 +146,10 @@ class Store:
             merged.os_name, merged.os_accuracy, merged.os_family = (
                 new.os_name, new.os_accuracy, new.os_family)
         merged.state = new.state or old.state
+        # Keep the strongest proof-of-life reason: a real reply (echo-reply/syn-ack/
+        # arp-response/report-listed) always outranks the -Pn "user-set" assume-up
+        # and a blank, so a later -Pn re-scan can never downgrade a confirmed host.
+        merged.up_reason = _best_up_reason(old.up_reason, new.up_reason)
         merged.distance = new.distance or old.distance
         merged.enumerated = old.enumerated or new.enumerated
         # Ports are unioned across scans, so the host is complete if ANY sweep

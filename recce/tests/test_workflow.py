@@ -56,17 +56,28 @@ def sample_hosts():
     return hosts
 
 
+def header_index(rows, *must_have):
+    """Row index of the real column-header row (the first row that holds every
+    token in must_have). A legend/note line can precede the header, so we locate
+    it instead of assuming row 0."""
+    for i, r in enumerate(rows):
+        if all(tok in r for tok in must_have):
+            return i
+    return 0
+
+
 def rows_by_ip(sheets, title):
     """Return (header, {ip: [row-as-dict, ...]}) for a sheet with an IP column.
 
     Skips collapsible group-header band rows (they carry a label in the IP column
     but no Key), so callers only see real data rows keyed by a bare IP."""
     rows = sheets[title]
-    hdr = rows[0]
+    hidx = header_index(rows, "IP")
+    hdr = rows[hidx]
     ipc = hdr.index("IP")
     kidx = hdr.index("Key") if "Key" in hdr else None
     out: dict = {}
-    for r in rows[1:]:
+    for r in rows[hidx + 1:]:
         if kidx is not None and (len(r) <= kidx or not r[kidx]):
             continue                       # group-header band row - not data
         if len(r) > ipc and r[ipc]:
@@ -505,9 +516,10 @@ class WorkbookStructureTest(unittest.TestCase):
                      "Users & Accounts", "Priv-Esc"):
             self.assertIn(name, sheets)
         self.assertNotIn("Exploits", sheets)   # no exploit data -> sheet omitted
-        # Tracked sheets carry a Key column so read-back can find every row.
+        # Tracked sheets carry a Key column so read-back can find every row (the
+        # Checklist header sits below its legend line, so locate it, don't assume row 0).
         for name in ("Checklist", "Services", "Vulnerabilities"):
-            self.assertIn("Key", sheets[name][0])
+            self.assertIn("Key", sheets[name][header_index(sheets[name], "Key")])
 
     def test_openpyxl_can_open_the_workbook(self):
         try:
@@ -531,7 +543,9 @@ class WorkbookStructureTest(unittest.TestCase):
             out = os.path.join(d, "wb.xlsx")
             build_workbook(sample_hosts(), out)
             wb = load_workbook(out)
-        self.assertEqual(wb["Checklist"].freeze_panes, "D2")   # header + 3 id cols
+        # Checklist header is on row 2 (a legend line precedes it), so the freeze
+        # splits below row 2; 3 identity cols frozen => D3.
+        self.assertEqual(wb["Checklist"].freeze_panes, "D3")   # header + 3 id cols
         self.assertEqual(wb["Services"].freeze_panes, "C2")
         self.assertFalse(wb["Checklist"].sheet_view.showGridLines)
         vs = wb["Vulnerabilities"]
@@ -664,11 +678,14 @@ class WorkbookStructureTest(unittest.TestCase):
                 import re as _re
                 wb = load_workbook(path)
                 ck = wb["Checklist"]
-                ipc = [c.value for c in ck[1]].index("IP") + 1
+                # The header sits below a legend line - find the row carrying "IP".
+                hrow = next(r for r in range(1, ck.max_row + 1)
+                            if "IP" in [c.value for c in ck[r]])
+                ipc = [c.value for c in ck[hrow]].index("IP") + 1
                 # The IP column also carries the collapsible subnet-band labels; keep
                 # only the rows whose IP cell is a bare IPv4 (the real host rows).
                 ip_row = {}
-                for r in range(2, ck.max_row + 1):
+                for r in range(hrow + 1, ck.max_row + 1):
                     v = ck.cell(row=r, column=ipc).value
                     if isinstance(v, str) and _re.fullmatch(r"\d+\.\d+\.\d+\.\d+", v):
                         ip_row[v] = r
@@ -697,14 +714,17 @@ class WorkbookStructureTest(unittest.TestCase):
             out = os.path.join(d, "wb.xlsx")
             build_workbook(sample_hosts(), out)
             ws = load_workbook(out)["Checklist"]
-        hdr = [c.value for c in ws[1]]
+        # Header is on row 2 (a legend line precedes it) - locate the row with "IP".
+        hrow = next(r for r in range(1, ws.max_row + 1)
+                    if "IP" in [c.value for c in ws[r]])
+        hdr = [c.value for c in ws[hrow]]
         auto = {"Enumerated", "Vuln-scan", "Web", "DB", "Priv-esc"}
         manual = {"AD", "Access", "Creds", "Lateral"}
         for h in auto:
-            c = ws.cell(row=1, column=hdr.index(h) + 1)
+            c = ws.cell(row=hrow, column=hdr.index(h) + 1)
             self.assertEqual(c.fill.fgColor.rgb, "FF2E7D32", f"{h} should be auto-green")
         for h in manual:
-            c = ws.cell(row=1, column=hdr.index(h) + 1)
+            c = ws.cell(row=hrow, column=hdr.index(h) + 1)
             self.assertEqual(c.fill.fgColor.rgb, "FFC55A11", f"{h} should be manual-amber")
         # Sanity: the split matches the tracking module's source of truth.
         self.assertEqual(manual, {h for h, s in tr.STEP_COLUMNS.items()

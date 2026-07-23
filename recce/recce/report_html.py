@@ -94,8 +94,9 @@ def _exec_summary(hosts, domains, creds):
     crit = sum(1 for f in findings if f.severity in ("critical", "high"))
     dcs = ad.domain_controllers(hosts)
     doms = domains or ad.derive_domains(hosts)
+    up = sum(1 for h in hosts if h.is_up)          # only confirmed-up hosts
     tiles = [
-        _tile(len(hosts), "Live hosts"),
+        _tile(up, "Hosts up"),
         _tile(open_ports, "Open ports"),
         _tile(len(findings), "Findings"),
         _tile(crit, "High / Critical", alert=crit > 0),

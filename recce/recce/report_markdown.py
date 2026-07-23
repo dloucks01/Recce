@@ -21,14 +21,21 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
     lines: list[str] = [f"# {title}", ""]
     total_open = sum(len(h.open_ports) for h in hosts)
     total_vulns = sum(len(h.vulns) for h in hosts)
+    # Report only hosts we can prove are up; count the rest separately so a scanned-
+    # but-silent IP is never quietly counted as live nor written off as down.
+    up = sum(1 for h in hosts if h.is_up)
+    unconfirmed = len(hosts) - up
     lines += [
         "## Summary", "",
-        f"- **Live hosts:** {len(hosts)}",
+        f"- **Hosts confirmed up:** {up}",
         f"- **Open service ports:** {total_open}",
         f"- **Vuln findings:** {total_vulns}",
         f"- **Subnets:** {len({h.subnet for h in hosts if h.subnet})}",
-        "",
     ]
+    if unconfirmed:
+        lines.append(f"- **Scanned, not confirmed up:** {unconfirmed} "
+                     "(no open port or reply - treat as UNKNOWN, not down)")
+    lines.append("")
 
     # Active Directory section.
     domains = domains or ad.derive_domains(hosts)
