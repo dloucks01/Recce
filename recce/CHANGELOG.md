@@ -55,7 +55,10 @@ totals, the prove engine, the reports, and its own workbook tab._
   "Start Here" tab index follow the same order. The Overview also gains a **"Confirmed
   by recce (prove engine)"** total (the count of findings recce actively proved),
   and the CVE-curated tile is relabelled "Findings with a curated exploit" for
-  accuracy.
+  accuracy. The "Start Here" guide and "Runbook" tabs are now fully self-consistent
+  with the commands: every tab that's described maps to a listed command, including
+  the previously-missing `web`, `exploitplan`, `attackpath` and `creds` (Runbook gains
+  a "2b. Web" step and a "6. Act on the findings" phase; Report becomes phase 7).
 - **PoCs are stronger, unambiguous proofs with an explicit ROE hand-off.** Each
   generated PoC now states a clear **`PROVEN:`** verdict and marks the single
   **`ACTION (ROE)`** line where the operator substitutes their authorized action:

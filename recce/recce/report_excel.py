@@ -880,6 +880,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("doctor", "Check this box can run everything (env + tools + self-scan)."),
         ("enum <targets>", "Phase 1: discover hosts, scan ports, ID services (fast)."),
         ("vulns [targets]", "Phase 2: vuln-scan open ports (safe; --aggressive for more)."),
+        ("web [targets]", "Deep, non-intrusive scan of every HTTP/HTTPS endpoint "
+                          "(exposed files, PUT/JWT proofs, CORS, GraphQL). Fills Web."),
         ("db [targets]", "Database enumeration + vuln scan."),
         ("privesc [targets]", "Priv-esc playbook (+ --scan for remote checks)."),
         ("credenum -u U -p P -d DOM", "Authenticated enum (netexec/impacket/ssh) "
@@ -901,9 +903,18 @@ def _build_guide(wb, meta: dict) -> None:
         ("ad <sharphound> <certipy> -u U -p P -d DOM",
          "Import SharpHound + Certipy (ADCS): AD vulns, ESC findings, and the "
          "shortest paths from your account to Domain Admin - commands pre-filled."),
+        ("exploitplan --lhost <ip>",
+         "Every CONFIRMED finding -> exact tool + command + msf .rc artifacts. "
+         "Fills Exploitation."),
+        ("attackpath", "Chain the confirmed findings into a staged path (foothold -> "
+                       "priv-esc -> creds -> lateral -> domain). Fills Attack Path."),
+        ("creds --add 'DOM\\u:p' / --plan",
+         "Stack captured credentials + build the netexec/impacket spray plan. "
+         "Fills Credentials."),
         ("writeups", "Generate a Word (.docx) write-up per finding - finish each "
                      "in Word (screenshots auto-added for web when a browser is present)."),
-        ("status / report", "Show progress / rebuild this workbook from the datastore."),
+        ("status / report", "Show progress + deep-dive coverage / rebuild this "
+                            "workbook from the datastore."),
     ]:
         sh.write([cmd, desc])
     sh.write([""])
@@ -973,6 +984,13 @@ def _build_runbook(wb, meta: dict) -> None:
                           "more coverage). Opposite end from --fast.")
     cmd("  [targets]", "Optional: limit to specific hosts/ports (default = everything "
                        "enum found).")
+
+    section("2b. Web - deep, non-intrusive scan of every HTTP/HTTPS endpoint",
+            "Runs stdlib checks (exposed .git/.env, dangerous methods PROVEN via a "
+            "reversible PUT, JWT alg:none forge-and-replay, CORS, GraphQL, secrets) and "
+            "writes the exact Kali deep-scan commands. Fills the Web tab.")
+    cmd("web -o eng", "Scan every web endpoint (any port). Add creds with -u/-p to scan "
+                      "authenticated.")
 
     section("3. Databases (optional) - deep DB enumeration")
     cmd("db -o eng", "Enumerate + vuln-scan discovered database services. Fills Databases.")
@@ -1066,12 +1084,31 @@ def _build_runbook(wb, meta: dict) -> None:
         "kube-apiserver (anonymous LIST / Secrets = cluster compromise) and etcd "
         "(all cluster secrets in the clear).")
 
-    section("6. Report - turn findings into deliverables")
+    section("6. Act on the findings - turn CONFIRMED findings into a plan",
+            "Once findings are proven (Verification tab), stage the exploitation and "
+            "pivot. These read the datastore and fill the Exploitation / Attack Path / "
+            "Credentials tabs - no re-scan.")
+    cmd("exploitplan -o eng --lhost <ip>",
+        "Every CONFIRMED finding -> exact existing tool + command (your values filled "
+        "in) + how to validate; also writes ready-to-run msf .rc + per-host plans to "
+        "exploit-plan/. Fills the Exploitation tab.")
+    cmd("attackpath -o eng",
+        "Chain the confirmed findings into a staged path (foothold -> priv-esc -> "
+        "creds -> lateral -> domain). Fills the Attack Path tab.")
+    cmd("creds --add 'CORP\\alice:Passw0rd!' -o eng  /  creds --plan -o eng",
+        "Stack captured credentials, then build the netexec/impacket spray plan. Fills "
+        "the Credentials tab.")
+    cmd("deploy -u U -p P -o eng",
+        "Mass local-enum + priv-esc: run the read-only on-target scripts across every "
+        "host you have creds for (SSH/WinRM/SMB), folded straight into Priv-Esc.")
+
+    section("7. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
                            "auto-added when a browser is present). Finish each in Word.")
     cmd("report -o eng", "Rebuild this workbook + reports from the datastore "
                          "(preserves your ticks and notes).")
-    cmd("status -o eng", "Print live review-coverage without rebuilding anything.")
+    cmd("status -o eng", "Print live review-coverage + per-service deep-dive coverage "
+                         "and the suggested next command.")
 
     section("On-target - run these ON a compromised host (read-only)",
             "Copy the script from recce/local/ to the target, self-test, then run "
