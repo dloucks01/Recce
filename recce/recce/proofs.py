@@ -399,9 +399,11 @@ _RECIPES: list[dict] = [
      "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
      "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
      "fn": _v_asrep},
-    {"id": "web-exposure", "match": r"exposed (git|\.git|svn|\.env|\.svn)|\.env file|"
-                                    r"mod_status exposed|actuator exposed|actuator /env|phpinfo|"
-                                    r"web\.config readable|directory listing enabled|swagger",
+    {"id": "web-exposure", "match": r"exposed (git|\.git|svn|\.env|\.svn|\.ds_store|aws)|\.env file|"
+                                    r"mod_status exposed|mod_info exposed|actuator|phpinfo|"
+                                    r"web\.config readable|directory listing enabled|swagger|"
+                                    r"\.ds_store|crossdomain|prometheus /metrics|\.htpasswd|"
+                                    r"graphql introspection|cors reflects|user enumeration via rest",
      "name": "Web exposure (VCS / config / status endpoint)",
      "pre": ["The resource is reachable and returns the sensitive content"],
      "finish": "curl -sk <url>/<path> to re-read it; for a .git repo: git-dumper <url>/.git ./loot "

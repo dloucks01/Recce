@@ -68,6 +68,16 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     `--header 'Authorization: Bearer …'` run the whole scan as a logged-in user.
   - **Per-endpoint screenshots**: `recce web --screenshots` captures each endpoint
     with the headless browser into `engagement/screenshots/`.
+  - **Web is now a coverage category.** Every HTTP/HTTPS endpoint counts toward a
+    new **Web** line on the Overview / `status` coverage roll-up (ticked per
+    endpoint from the Web tab's Status column), so Start-Here progress reflects the
+    web surface, not just ports/vulns.
+  - **More high-value exposures**: exposed **`.DS_Store`**, permissive
+    **`crossdomain.xml`** (wildcard), **Prometheus `/metrics`**, **`.htpasswd`**
+    (password hashes), Apache **`/server-info`**, exposed **`.aws/credentials`**,
+    **WordPress REST user enumeration**, **GraphQL introspection** (POST probe),
+    and **CORS that reflects an arbitrary Origin with credentials** — each flagged
+    only on a positive signal and wired into prove + PoC.
 - **`exploitplan` now emits benign PoC build recipes — the payload source, the
   build command, and the delivery — not just "drop a binary here."** For each
   confirmed finding it writes the standard, documented artifact to

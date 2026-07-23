@@ -2511,9 +2511,20 @@ class WebModuleTest(unittest.TestCase):
             def do_OPTIONS(self):
                 self._send(200, extra={"Allow": "GET, POST, PUT, OPTIONS"})
 
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(length) if length else b""
+                if self.path == "/graphql" and b"__schema" in body:
+                    return self._send(200, b'{"data":{"__schema":{"queryType":{"name":"Query"}}}}')
+                return self._send(404, b"nope")
+
             def do_GET(self):
                 if self.path == "/reflect":
                     return self._send(200, (self.headers.get("X-Test", "none")).encode())
+                if self.path == "/metrics":
+                    return self._send(200, b"# HELP go_gc_duration_seconds ...\n# TYPE x gauge\n")
+                if self.path == "/crossdomain.xml":
+                    return self._send(200, b'<cross-domain-policy><allow-access-from domain="*"/></cross-domain-policy>')
                 if self.path == "/.git/HEAD":
                     return self._send(200, b"ref: refs/heads/main\n")
                 if self.path == "/.env":
@@ -2559,6 +2570,14 @@ class WebModuleTest(unittest.TestCase):
         git = next(v for v in findings if v.script_id == "web-git")
         self.assertEqual(git.severity, "high")
         self.assertIn("/.git/HEAD", git.output)
+
+    def test_high_value_exposures(self):
+        from recce import web
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        sids = {v.script_id for v in findings}
+        self.assertIn("web-metrics", sids)        # Prometheus /metrics
+        self.assertIn("web-crossdomain", sids)    # permissive crossdomain.xml
+        self.assertIn("web-graphql", sids)        # GraphQL introspection (POST)
 
     def test_passive_mode_skips_path_probes(self):
         from recce import web

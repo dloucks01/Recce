@@ -47,10 +47,10 @@ def _mk(ip: str, port: Port, sid: str, sev: str, title: str, cwes, output: str,
 
 
 def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int = 16384,
-           auth: dict | None = None):
+           auth: dict | None = None, body: str | None = None):
     """One request. Returns (status, headers_lower, body_text) or None on failure.
     `auth` supplies extra request headers (Cookie / Authorization / custom) so the
-    scan can run as an authenticated user."""
+    scan can run as an authenticated user; `body` sends a request body (POST)."""
     use_tls = probes._is_tls(port)
     conn = None
     try:
@@ -62,7 +62,9 @@ def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int 
         req_headers = {"User-Agent": _UA, "Connection": "close", "Accept": "*/*"}
         if auth:
             req_headers.update(auth)
-        conn.request(method, path, headers=req_headers)
+        if body is not None:
+            req_headers.setdefault("Content-Type", "application/json")
+        conn.request(method, path, body=body, headers=req_headers)
         resp = conn.getresponse()
         headers = {k.lower(): v for k, v in resp.getheaders()}
         body = b""
@@ -165,6 +167,30 @@ _PATHS = [
     ("robots.txt", "info", "web-robots", "robots.txt discloses paths",
      ["CWE-200"], "Review Disallow entries (they hint at sensitive paths).",
      lambda s, b: s == 200 and "disallow" in b.lower()),
+    # --- high-value exposures --------------------------------------------------
+    (".DS_Store", "low", "web-dsstore", "Exposed .DS_Store (directory structure disclosure)",
+     ["CWE-548"], "Remove .DS_Store from the web root; deny dotfiles.",
+     lambda s, b: s == 200 and "Bud1" in b[:16]),
+    ("crossdomain.xml", "medium", "web-crossdomain",
+     "Permissive crossdomain.xml (wildcard allow-access-from)",
+     ["CWE-942"], "Remove the wildcard; restrict allow-access-from to trusted domains.",
+     lambda s, b: s == 200 and "cross-domain-policy" in b
+     and bool(re.search(r'allow-access-from[^>]*domain="\*"', b))),
+    ("metrics", "medium", "web-metrics", "Prometheus /metrics endpoint exposed",
+     ["CWE-200"], "Restrict /metrics to the scraper - it leaks internal metrics/paths.",
+     lambda s, b: s == 200 and ("# HELP" in b or "# TYPE" in b)),
+    (".htpasswd", "high", "web-htpasswd", "Exposed .htpasswd (password hashes)",
+     ["CWE-538"], "Deny access to .ht* files in the web server config.",
+     lambda s, b: s == 200 and bool(re.search(r":\$(apr1|2[aby]|1|5|6)\$|:\{SHA\}", b))),
+    ("server-info", "medium", "web-serverinfo", "Apache mod_info exposed (/server-info)",
+     ["CWE-200"], "Restrict <Location /server-info> to localhost/admins.",
+     lambda s, b: s == 200 and "Apache Server Information" in b),
+    (".aws/credentials", "high", "web-aws", "Exposed AWS credentials file",
+     ["CWE-538"], "Remove cloud creds from the web root and rotate them.",
+     lambda s, b: s == 200 and "aws_access_key_id" in b.lower()),
+    ("wp-json/wp/v2/users", "low", "web-wpusers", "WordPress user enumeration via REST API",
+     ["CWE-200"], "Restrict the users REST endpoint / disable REST user listing.",
+     lambda s, b: s == 200 and '"slug"' in b and b.lstrip().startswith("[")),
 ]
 
 _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
@@ -224,6 +250,29 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                                 f"Dangerous HTTP methods enabled: {', '.join(bad)}",
                                 ["CWE-650"], f"OPTIONS / -> Allow: {opt[1]['allow']}",
                                 "Disable PUT/DELETE/TRACE/CONNECT unless required."))
+    # CORS: does the server reflect an arbitrary Origin AND allow credentials?
+    probe_origin = "https://recce.example"
+    cors = _fetch(ip, port, "/", auth={**(auth or {}), "Origin": probe_origin})
+    if cors:
+        ch = cors[1]
+        acao = ch.get("access-control-allow-origin", "")
+        acac = ch.get("access-control-allow-credentials", "").lower()
+        if acao == probe_origin and acac == "true":
+            findings.append(_mk(ip, port, "web-cors", "high",
+                                "CORS reflects arbitrary Origin with credentials", ["CWE-942"],
+                                f"Origin: {probe_origin} -> Access-Control-Allow-Origin: {acao}, "
+                                "Allow-Credentials: true (any site can read authenticated responses).",
+                                "Echo only an allow-list of trusted origins; never reflect + credentials."))
+    # GraphQL introspection enabled?
+    gql = '{"query":"query{__schema{queryType{name}}}"}'
+    for gp in ("graphql", "api/graphql", "v1/graphql", "query"):
+        r = _fetch(ip, port, "/" + gp, method="POST", body=gql, auth=auth)
+        if r and r[0] == 200 and ("__schema" in r[2] or '"queryType"' in r[2]):
+            findings.append(_mk(ip, port, "web-graphql", "medium",
+                                "GraphQL introspection enabled", ["CWE-200"],
+                                f"POST {profile['url']}/{gp} (__schema query) returned the schema.",
+                                "Disable GraphQL introspection in production."))
+            break
     # High-signal exposure paths.
     seen_sid: set[str] = set()
     for path, sev, sid, title, cwes, fix, confirm in _PATHS:

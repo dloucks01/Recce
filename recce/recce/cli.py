@@ -2328,7 +2328,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     hosts = store.all_hosts()
     cov = tr.compute_coverage(hosts, tracking)
     labels = {"hosts": "Hosts", "services": "Services", "vulns": "Vulnerabilities",
-              "exploits": "Exploits", "quick_wins": "AD Quick Wins",
+              "web": "Web", "exploits": "Exploits", "quick_wins": "AD Quick Wins",
               "accounts": "Users & Accounts"}
 
     def bar(pct):
