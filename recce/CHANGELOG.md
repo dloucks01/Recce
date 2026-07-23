@@ -159,6 +159,15 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     abuse TRUSTWORTHY payroll -> hop DW01"* plus the exact command per hop. The
     live enumeration (login, sysadmins, TRUSTWORTHY DBs, linked servers,
     impersonatable logins, config, hashes) is shown on the MSSQL sheet.
+  - **Command execution for effect - `--exec CMD --method {xp,ole,agent,clr}`.**
+    Runs an OS command on each reachable instance and **captures the output**:
+    **xp_cmdshell** (native), **OLE Automation** (`sp_OACreate WScript.Shell` -> file
+    -> `OPENROWSET` read-back), and a **SQL Agent** CmdExec job (create -> run ->
+    read -> auto-delete) - the alternatives for when xp_cmdshell is disabled or
+    watched. A success is folded into the main totals as a *critical* "Confirmed OS
+    command execution via <method>" finding with the captured output. **CLR** is a
+    deliberate hand-off to `mssqlpwner custom-asm` / PowerUpSQL (recce does not
+    generate or load an assembly).
   - **Auto-verified TRUSTWORTHY chains.** For each TRUSTWORTHY database owned by a
     sysadmin, recce runs a second pass to check whether your login is actually
     **db_owner** there (guarded by `DB_NAME()` so a failed `USE` can't give a false

@@ -3388,6 +3388,68 @@ class MssqlTest(unittest.TestCase):
         self.assertFalse([f for f in fs3 if "TRUSTWORTHY" in f["title"]
                           or "CONFIRMED" in f["title"]])
 
+    def test_exec_script_builders_per_method(self):
+        from recce import mssql
+        xp = mssql.build_exec_script("whoami", "xp")
+        self.assertIn("EXEC xp_cmdshell 'whoami'", xp)
+        self.assertIn("sp_configure 'xp_cmdshell',1", xp)
+        ole = mssql.build_exec_script("whoami", "ole")
+        self.assertIn("sp_OACreate 'WScript.Shell'", ole)
+        self.assertIn("OPENROWSET(BULK", ole)              # reads output back
+        agent = mssql.build_exec_script("whoami", "agent")
+        self.assertIn("sp_add_job", agent)
+        self.assertIn("@subsystem='CmdExec'", agent)
+        self.assertIn("sp_delete_job", agent)              # cleans up after itself
+        self.assertIsNone(mssql.build_exec_script("x", "clr"))
+        # A single quote in the command is doubled for the T-SQL literal.
+        self.assertIn("echo ''hi''", mssql.build_exec_script("echo 'hi'", "ole"))
+
+    def test_parse_exec_strips_chrome(self):
+        from recce import mssql
+        out = mssql.parse_exec("SQL>\n@@X:out\n--------\noutput\ncorp\\alice\nNULL\n@@XE:out\n")
+        self.assertEqual(out, "corp\\alice")
+
+    def test_exec_command_clr_is_a_handoff_not_executed(self):
+        from recce import mssql
+        o, e, ref = mssql.exec_command("10.0.0.50",
+                                       {"user": "alice", "secret": "P@ss", "domain": "corp.local"},
+                                       "whoami", method="clr")
+        self.assertIsNone(o)
+        self.assertIsNone(e)
+        self.assertIn("mssqlpwner", ref)                   # delegates, never loads a DLL
+        self.assertIn("custom-asm", ref)
+
+    def test_exec_rce_flows_into_totals(self):
+        from unittest import mock
+        from recce import cli, mssql, xlsx
+        from recce.store import Store
+        enum = mssql.parse_enum(
+            "@@B:server\nSQL01|sa|1|0|15.0.2000.5\n@@E:server\n@@B:logins\nsa|1\n@@E:logins\n"
+            "@@B:databases\nmaster|0|sa\n@@E:databases\n@@B:links\n@@E:links\n"
+            "@@B:impersonate\n@@E:impersonate\n@@B:config\nxp_cmdshell|1\n@@E:config\n"
+            "@@B:hashes\n@@E:hashes\n")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(self._host())
+            st.close()
+            with mock.patch.object(mssql, "mssqlclient_tool", return_value="x"), \
+                    mock.patch.object(mssql, "nxc_tool", return_value=None), \
+                    mock.patch.object(mssql, "run_mssqlclient", return_value=(enum, None)), \
+                    mock.patch.object(mssql, "link_runner",
+                                      side_effect=lambda *a, **k: (lambda s: "")), \
+                    mock.patch.object(mssql, "exec_command",
+                                      return_value=("nt service\\mssqlserver", None, None)):
+                rc = cli.main(["mssql", "-o", out, "--no-probe", "--no-links",
+                               "-u", "alice", "-p", "P@ss", "-d", "corp.local",
+                               "--exec", "whoami", "--method", "agent"])
+            self.assertEqual(rc, 0)
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            v = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+            self.assertIn("Confirmed OS command execution via agent", v)
+            self.assertIn("nt service\\mssqlserver", v)    # captured output
+
     def test_relay_targets_and_finding(self):
         from recce import mssql
         hosts = [
