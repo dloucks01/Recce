@@ -738,7 +738,15 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
                 order: list[str] | None = None,
                 statuses: dict | None = None) -> None:
     statuses = statuses or {}
-    sheet.write([(h, "header") for h, _, _ in spec.cols])
+    # Colour step-checkbox headers so a reader can tell at a glance which boxes the
+    # tool auto-ticks (green) from the ones that are a manual operator sign-off
+    # (amber). Only the Checklist has 'check' columns, so other sheets are unchanged.
+    def _hdr_style(header, role):
+        if role == "check":
+            step = tr.STEP_COLUMNS.get(header)
+            return "header_manual" if step in tr.MANUAL_STEPS else "header_auto"
+        return "header"
+    sheet.write([(h, _hdr_style(h, role)) for h, role, _w in spec.cols])
 
     rows_by_key = {r["key"]: r for r in spec.rows}
     ordered_keys = _ordered_keys(spec.rows, order)
@@ -897,9 +905,12 @@ def _build_guide(wb, meta: dict) -> None:
         "subnet is a collapsible group: click the [-] in the left margin to fold a "
         "whole /24 to one summary band, expand the one you're working. Hosts with "
         "high/critical findings sort to the top of each subnet.",
-        "2. Auto steps (Enumerated / Vuln-scan / Web / DB) turn green when the tool "
-        "finishes them. Manual sign-offs (AD, and the kill-chain Access / Priv-esc "
-        "/ Creds / Lateral) start unchecked - you tick them as you go.",
+        "2. The step columns are colour-coded in the header so you can see which fill "
+        "themselves: GREEN headers = AUTO (the tool ticks them) - Enumerated, "
+        "Vuln-scan, Web, DB, Priv-esc turn green as recce finishes each phase (running "
+        "smb/ftp/docker/k8s/mssql also auto-ticks the ports they assess). AMBER "
+        "headers = MANUAL sign-offs you tick yourself - AD, Access, Creds, Lateral - "
+        "the kill-chain steps only you can confirm.",
         "3. Steps that don't apply to a host show '—' instead of a box (e.g. no AD "
         "box off a non-DC). SMB/remote/mail/SNMP are tracked on the SERVICES tab.",
         "4. You can tick/untick any box by hand - your choice sticks (untick to "
@@ -923,8 +934,10 @@ def _build_guide(wb, meta: dict) -> None:
         ("Overview", "Totals, review progress, and live-hosts-per-subnet coverage."),
         ("Checklist", "THE working tab: one row per IP under a collapsible per-subnet "
                       "band (fold a /24 to one summary line), a checkbox for each phase "
-                      "+ host detail + Reviewed + Notes. # Vulns is coloured by worst "
-                      "severity; risky hosts sort to the top of each subnet."),
+                      "+ host detail + Reviewed + Notes. Step headers are colour-coded - "
+                      "GREEN = auto (the tool ticks it), AMBER = your manual sign-off. "
+                      "# Vulns is coloured by worst severity; risky hosts sort to the "
+                      "top of each subnet."),
         ("Services", "The other working tab: every open port folded under a collapsible "
                      "per-host band, each with a Status (not started / in progress / "
                      "done) and Notes - track each port you work."),

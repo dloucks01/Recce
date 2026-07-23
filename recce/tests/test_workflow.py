@@ -687,6 +687,29 @@ class WorkbookStructureTest(unittest.TestCase):
             build_workbook(sample_hosts(), out, order_map=read_key_order(out))
             _check(out)
 
+    def test_step_headers_colour_auto_vs_manual(self):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        from recce import tracking as tr
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(sample_hosts(), out)
+            ws = load_workbook(out)["Checklist"]
+        hdr = [c.value for c in ws[1]]
+        auto = {"Enumerated", "Vuln-scan", "Web", "DB", "Priv-esc"}
+        manual = {"AD", "Access", "Creds", "Lateral"}
+        for h in auto:
+            c = ws.cell(row=1, column=hdr.index(h) + 1)
+            self.assertEqual(c.fill.fgColor.rgb, "FF2E7D32", f"{h} should be auto-green")
+        for h in manual:
+            c = ws.cell(row=1, column=hdr.index(h) + 1)
+            self.assertEqual(c.fill.fgColor.rgb, "FFC55A11", f"{h} should be manual-amber")
+        # Sanity: the split matches the tracking module's source of truth.
+        self.assertEqual(manual, {h for h, s in tr.STEP_COLUMNS.items()
+                                  if s in tr.MANUAL_STEPS})
+
     def test_grouped_sheet_has_collapsible_host_bands(self):
         try:
             from openpyxl import load_workbook

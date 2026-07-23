@@ -46,6 +46,11 @@ totals, the prove engine, the reports, and its own workbook tab._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Changed
+- **Checklist step headers are colour-coded auto vs manual.** Green headers = steps
+  the tool ticks for you (Enumerated, Vuln-scan, Web, DB, Priv-esc); amber headers =
+  manual sign-offs only you can confirm (AD, Access, Creds, Lateral). So it's obvious
+  at a glance which boxes fill themselves and which are yours. (Also corrects the
+  guide, which had listed Priv-esc as manual.)
 - **Deep-service capabilities now auto-tick the Checklist as you run them.** Running
   `smb` / `ftp` / `docker` / `kubernetes` marks each port it actually assessed as
   vuln-scanned, and `mssql` also flags the host db-scanned — so the Checklist
