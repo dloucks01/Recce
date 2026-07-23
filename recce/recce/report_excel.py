@@ -1636,6 +1636,35 @@ def _build_ad_paths(wb, analysis: dict) -> None:
     sh.set_col(2, 120)
 
 
+def _write_findings_table(sh, fs) -> None:
+    """The per-service 'Findings' table + 'Finding details' narrative block, shared by
+    all five deep-service sheets (they wrote this identical block five times)."""
+    if not fs:
+        return
+    sh.write([("Findings", "title")])
+    sh.write([(h, "bold") for h in
+              ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
+               "Remediation")])
+    for f in fs:
+        sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
+                  f["title"], f["target"], f.get("detail", ""),
+                  f.get("command", ""), f.get("remediation", "")])
+    sh.write([""])
+    if any(f.get("narrative") for f in fs):
+        sh.write([("Finding details - what each issue enables", "title")])
+        seen_narr = set()
+        for f in fs:
+            narr = f.get("narrative")
+            key = (f["title"], f["target"])
+            if not narr or key in seen_narr:
+                continue
+            seen_narr.add(key)
+            sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
+                       "bold")])
+            sh.write(["", narr])
+        sh.write([""])
+
+
 def _build_mssql(wb, analysis: dict) -> None:
     """MSSQL offensive sheet: endpoints (version/encryption/access/priv), findings,
     and the credential-free + credentialed runbook with the attack chain."""
@@ -1670,31 +1699,7 @@ def _build_mssql(wb, analysis: dict) -> None:
                   acc, (priv, style) if style else priv,
                   ", ".join(i.get("instance", "") for i in t.get("instances") or [])])
     sh.write([""])
-    # Findings.
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        # Detailed narrative per finding - what the issue actually enables.
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     # Runbook + chain, per endpoint.
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
@@ -1812,30 +1817,7 @@ def _build_smb(wb, analysis: dict) -> None:
                   t.get("dialect", ""),
                   (signing, sstyle) if sstyle else signing, v1cell])
     sh.write([""])
-    # Findings.
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     # Runbook + live results, per endpoint.
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
@@ -1897,29 +1879,7 @@ def _build_ftp(wb, analysis: dict) -> None:
         sh.write([f"{t['ip']}:{t['port']}", t.get("banner", ""),
                   anoncell, tlscell, t.get("syst", "")])
     sh.write([""])
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
         live = rb.get("live")
@@ -1968,29 +1928,7 @@ def _build_docker(wb, analysis: dict) -> None:
                   "" if t.get("containers") is None else str(t.get("containers")),
                   "" if t.get("images") is None else str(t.get("images"))])
     sh.write([""])
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
         cur = None
@@ -2044,29 +1982,7 @@ def _build_kubernetes(wb, analysis: dict) -> None:
             detail = t.get("etcd_version", "")
         sh.write([f"{t['ip']}:{t['port']}", role, expcell, detail])
     sh.write([""])
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']} ({rb.get('role', '')})", "boldred")])
         cur = None
