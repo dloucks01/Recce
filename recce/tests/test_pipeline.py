@@ -1692,6 +1692,22 @@ class AuditRegressionTest(unittest.TestCase):
                     source="nse", state="finding")
         self.assertEqual(proofs._v_nullsession(h, None, anon)[0], proofs.CONFIRMED)
 
+    def test_shared_findings_to_vulns_keeps_source_prefix_port(self):
+        # The 5 service modules now delegate to svccommon; the source label, the
+        # script_id prefix (k8s differs from its 'kubernetes' source) and the default
+        # port must survive.
+        from recce import smb, kubernetes, docker
+        f = {"target": "1.2.3.4", "title": "X", "severity": "high",
+             "detail": "d", "cwes": ["CWE-306"]}
+        vs = smb.findings_to_vulns([dict(f)])["1.2.3.4"][0]
+        self.assertEqual((vs.source, vs.port), ("smb", 445))
+        self.assertTrue(vs.script_id.startswith("smb:"))
+        kv = kubernetes.findings_to_vulns([dict(f)])["1.2.3.4"][0]
+        self.assertEqual(kv.source, "kubernetes")
+        self.assertTrue(kv.script_id.startswith("k8s:"))    # prefix != source
+        dv = docker.findings_to_vulns([{**f, "target": "1.2.3.4:2375"}])["1.2.3.4"][0]
+        self.assertEqual((dv.source, dv.port), ("docker", 2375))
+
     def test_eol_recipe_does_not_swallow_rce_findings(self):
         from recce import proofs
         from recce.models import Vuln

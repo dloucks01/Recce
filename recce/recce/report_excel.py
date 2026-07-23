@@ -358,15 +358,14 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         ("Remediation", "data", 44), ("Details", "data", 50),
         ("Notes", "notes", 26), ("Key", "key", 4),
     ]
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    worst = {h.ip: min((order.get((v.severity or "").lower(), 9) for v in h.vulns),
+    worst = {h.ip: min((_SEV_RANK.get((v.severity or "").lower(), 9) for v in h.vulns),
                        default=9) for h in hosts}
     rows = []
     ordered = [(h, v) for h in hosts for v in h.vulns]
     # host worst-severity, then IP (keeps a host's findings contiguous for the band),
     # then this finding's severity.
     ordered.sort(key=lambda hv: (worst[hv[0].ip], _ip_sort_key(hv[0].ip),
-                                 order.get((hv[1].severity or "").lower(), 9)))
+                                 _SEV_RANK.get((hv[1].severity or "").lower(), 9)))
     for h, v in ordered:
         # Full output, shown in a wrapped column so it reads down inside its cell
         # (never truncated). Rows fold under the per-host band, so verbose findings
@@ -812,8 +811,10 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
                                            tracking)
             else:
                 hostname = rows_by_key[grp_rows[0]]["data"].get("Hostname", "")
-                label = f"{key}   ·   {hostname}   ·   {len(grp_rows)} {noun}".replace(
-                    "·      ·", "·")
+                # Join only the present parts, so an empty hostname doesn't leave a
+                # dangling "·" (previously patched with a fragile 6-space replace()).
+                parts = [key, hostname, f"{len(grp_rows)} {noun}"]
+                label = "   ·   ".join(p for p in parts if p)
             hdr_cells = []
             for ci, (_h, _role, _w) in enumerate(spec.cols, start=1):
                 hdr_cells.append((label if ci == ip_col else "", "group"))
@@ -1575,9 +1576,6 @@ def _build_active_directory(wb, hosts: list[Host], domains: list[Domain]) -> Non
     sh.set_col(1, 26)
     sh.set_col(2, 70)
 
-
-_SEV_STYLE = {"critical": "sev_critical", "high": "sev_high", "medium": "sev_medium",
-              "low": "sev_low", "info": "sev_info"}
 
 
 def _build_ad_findings(wb, analysis: dict) -> None:
