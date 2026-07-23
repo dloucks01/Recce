@@ -38,6 +38,17 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     path if a host can't route back to `--lhost` (autodetected if omitted). SSH is
     unchanged (its stdin-pipe already runs in memory at any size).
 
+### Changed
+- **PoCs are stronger, unambiguous proofs with an explicit ROE hand-off.** Each
+  generated PoC now states a clear **`PROVEN:`** verdict and marks the single
+  **`ACTION (ROE)`** line where the operator substitutes their authorized action:
+  the **JWT** PoC forges the `alg:none` token *and replays it*, printing
+  accepted-vs-denied so a CONFIRMED is unarguable; **SSTI** declares PROVEN on the
+  `7*7→49` evaluation and fingerprints the engine; **PUT** shows the stored file
+  then removes it; **git/heapdump/GraphQL/downloads** print a PROVEN line with a
+  count of what was recovered. (The word "benign" was dropped from the wording;
+  the "no AV/EDR evasion" boundary stays.)
+
 ### Added
 - **Per-web-finding PoC generation.** `exploitplan` now writes a tailored, benign,
   runnable proof for *each* web finding into `exploit-plan/poc/`, with the target

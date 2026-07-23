@@ -2766,6 +2766,14 @@ class PocRecipeTest(unittest.TestCase):
         cors = next(pocs[f][0] for f in pocs if "cors" in f)
         self.assertIn("credentials:'include'", cors)
         self.assertIn("https://10.0.0.5", cors)             # target URL embedded
+        # Every PoC states an unambiguous PROVEN verdict + the ROE hand-off marker.
+        for fname, (content, _note) in pocs.items():
+            self.assertIn("ROE:", content, fname)
+            self.assertIn("PROVEN", content, fname)
+        # The JWT PoC actually replays the forged token (accepted-vs-denied).
+        jwt_src = pocs[jwt_f][0]
+        self.assertIn("forged  status", jwt_src)
+        self.assertIn("urllib.request", jwt_src)
         import shutil
         import subprocess
         if shutil.which("sh"):
