@@ -829,6 +829,13 @@ def _build_guide(wb, meta: dict) -> None:
         ("Databases", "DB inventory: engine, version, auth, databases, users."),
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
+        ("AD Findings", "Misconfigurations/vulns from a SharpHound + Certipy import "
+                        "(Kerberoast, DCSync, delegation, RBCD, shadow-creds, ADCS "
+                        "ESC1-15) - each with the exact certipy/impacket command to "
+                        "prove it. Run `recce ad`."),
+        ("AD Attack Paths", "Shortest path from YOUR account (or any authenticated "
+                            "user) to Domain Admin / the domain / a DC, plus the "
+                            "Kerberos actions to run. Run `recce ad -u USER -p PASS`."),
         ("Users & Accounts", "AD/SMB users, groups, computers, shares."),
         ("Priv-Esc", "Per-host escalation findings from the local sweep "
                      "(recce deploy/ingest) + remote signals. Un-swept hosts show a "
@@ -854,6 +861,9 @@ def _build_guide(wb, meta: dict) -> None:
         ("privesc [targets]", "Priv-esc playbook (+ --scan for remote checks)."),
         ("credenum -u U -p P -d DOM", "Authenticated enum (netexec/impacket/ssh) "
                                       "- shares, roasting, local admin, hashes."),
+        ("ad <sharphound> <certipy> -u U -p P -d DOM",
+         "Import SharpHound + Certipy (ADCS): AD vulns, ESC findings, and the "
+         "shortest paths from your account to Domain Admin - commands pre-filled."),
         ("writeups", "Generate a Word (.docx) write-up per finding - finish each "
                      "in Word (screenshots auto-added for web when a browser is present)."),
         ("status / report", "Show progress / rebuild this workbook from the datastore."),
@@ -948,6 +958,19 @@ def _build_runbook(wb, meta: dict) -> None:
         "(secretsdump). Each result is labelled by which account produced it.")
     cmd("  --ldap-enum / --ldap-anon / --ldap-ssl / --dc-ip IP",
         "Credentialed LDAP of the DC / anonymous bind / LDAPS / target a specific DC.")
+
+    section("5b. Active Directory - import SharpHound + Certipy (offline analysis)",
+            "Collect on the target with SharpHound and `certipy find -json`, bring the "
+            "files back, then let recce map the vulns and the paths to Domain Admin.")
+    cmd("ad loot.zip *_Certipy.json -u alice -p 'Passw0rd!' -d corp.local --dc-ip IP -o eng",
+        "Parse SharpHound (.zip/dir/.json) and/or Certipy JSON - any mix, auto-detected. "
+        "Fills AD Findings + AD Attack Paths, folds into the main severity totals + "
+        "writeups. Every command is pre-filled with your credentials. No hash needed.")
+    cmd("  --owned USER[,USER...]",
+        "Override the path start set (default: your -u account, else any authenticated user).")
+    cmd("  --replace-ad",
+        "Clear the previously-imported AD/ESC findings first, so remediated items drop "
+        "off on re-import (default: accumulate across imports).")
 
     section("6. Report - turn findings into deliverables")
     cmd("writeups -o eng", "One Word (.docx) write-up per finding (web screenshots "
