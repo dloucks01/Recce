@@ -110,6 +110,29 @@ def _ip_sort_key(ip: str):
         return (999, ip)
 
 
+def _col_sqref(letter: str, rows: list[int]) -> str:
+    """Compress a row list for one column into contiguous ranges:
+    [4,5,7,8,9] -> 'A4:A5 A7:A9'. A per-cell list ('A4 A5 A7 A8 A9') is valid but at
+    900 hosts x 9 step columns (and ~9000 Services rows), emitted twice (validation +
+    conditional format), it bloats the sheet XML and risks Excel's sqref length limit;
+    one token per run keeps it tiny. Excel treats the two forms identically."""
+    rows = sorted(set(rows))
+    if not rows:
+        return ""
+    parts = []
+    start = prev = rows[0]
+    for r in rows[1:]:
+        if r == prev + 1:
+            prev = r
+            continue
+        parts.append(f"{letter}{start}" if start == prev
+                     else f"{letter}{start}:{letter}{prev}")
+        start = prev = r
+    parts.append(f"{letter}{start}" if start == prev
+                 else f"{letter}{start}:{letter}{prev}")
+    return " ".join(parts)
+
+
 # --- stylers (return {header: style_name} for special cells) ---------------------
 
 def _subnet_sort_key(subnet: str):
@@ -890,8 +913,7 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
         # the collapsible group-header rows never sprout a stray dropdown arrow.
         if not grouped:
             return None
-        letter = xlsx.col_letter(col)
-        return " ".join(f"{letter}{r}" for r in data_rows) or None
+        return _col_sqref(xlsx.col_letter(col), data_rows) or None
 
     # Checkbox / check columns get the ☑/☐ dropdown + green-when-checked. For
     # per-step "check" columns, restrict it to the cells that actually hold a box
@@ -901,8 +923,7 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             active = active_check_rows.get(i, [])
             if not active:
                 continue
-            letter = xlsx.col_letter(i)
-            sqref = " ".join(f"{letter}{r}" for r in active)
+            sqref = _col_sqref(xlsx.col_letter(i), active)
             sheet.dropdown(i, 2, last, sqref=sqref)
             sheet.green_when_true(i, 2, last, sqref=sqref)
         elif role == "status":

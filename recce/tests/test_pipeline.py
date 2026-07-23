@@ -1692,6 +1692,32 @@ class AuditRegressionTest(unittest.TestCase):
                     source="nse", state="finding")
         self.assertEqual(proofs._v_nullsession(h, None, anon)[0], proofs.CONFIRMED)
 
+    def test_checklist_sqref_is_range_compressed(self):
+        from recce.report_excel import _col_sqref, build_workbook
+        # Unit: contiguous rows collapse to one range token; gaps split runs.
+        self.assertEqual(_col_sqref("A", [4, 5, 6, 8, 9]), "A4:A6 A8:A9")
+        self.assertEqual(_col_sqref("J", [4]), "J4")
+        self.assertEqual(_col_sqref("J", []), "")
+        # End-to-end: a subnet of contiguous hosts must emit a RANGE, not a per-cell
+        # list, in the Checklist step-column validations (keeps the XML tiny at scale).
+        import zipfile
+        import re as _re
+        hosts = [Host(ip=f"10.0.0.{i}", subnet="10.0.0.0/24", state="up",
+                      enumerated=True,
+                      ports=[Port(portid=445, service="smb", state="open",
+                                  vuln_scanned=True)]) for i in range(1, 6)]
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, out)
+            with zipfile.ZipFile(out) as z:
+                blobs = [z.read(n).decode() for n in z.namelist()
+                         if "worksheets/sheet" in n]
+        # Some sheet's validation sqref is a contiguous range spanning >1 row.
+        sqrefs = [s for x in blobs
+                  for s in _re.findall(r'<dataValidation[^>]*sqref="([^"]+)"', x)]
+        self.assertTrue(any(_re.fullmatch(r"[A-Z]+\d+:[A-Z]+\d+", s) for s in sqrefs),
+                        f"expected a compressed range sqref, got {sqrefs}")
+
     def test_fold_service_findings_refreshes_only_its_own_source(self):
         # The shared deep-service fold helper must replace THIS source's prior vulns
         # (a re-run doesn't duplicate) while leaving other sources untouched.
