@@ -285,6 +285,12 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["mssql"] = json.loads(mssql_blob)
         except ValueError:
             pass
+    smb_blob = store.get_meta("smb")
+    if smb_blob:
+        try:
+            meta["smb"] = json.loads(smb_blob)
+        except ValueError:
+            pass
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
@@ -2944,6 +2950,167 @@ def cmd_mssql(args: argparse.Namespace) -> int:
     return 0
 
 
+def _smb_shot(args, ip, name, command, output):
+    """Render a terminal-output proof screenshot of a live SMB action into
+    engagement/screenshots/. Returns the saved path or None."""
+    if not getattr(args, "screenshots", False):
+        return None
+    from . import smb, screenshot
+    if not screenshot.available():
+        return None
+    png = screenshot.capture_html(smb.proof_html(command, output))
+    if not png:
+        return None
+    shot_dir = os.path.join(args.output_dir, "screenshots")
+    os.makedirs(shot_dir, exist_ok=True)
+    path = os.path.join(shot_dir, f"smb_{ip.replace(':', '_')}_{name}.png")
+    with open(path, "wb") as fh:
+        fh.write(png)
+    print(f"      [+] {ip}: proof screenshot -> {path}")
+    return path
+
+
+def cmd_smb(args: argparse.Namespace) -> int:
+    """SMB offensive enumeration: credential-free stdlib negotiate probes (dialect /
+    signing / SMBv1), then anonymous & credentialed share enumeration, a reversible
+    writable-share proof, and the full runbook - folded into the main totals."""
+    from . import smb
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts run SMB.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    creds = None
+    if args.username:
+        user, domain = _split_userdomain(args.username, args.domain)
+        creds = {"user": user, "secret": args.password or "", "domain": domain,
+                 "dc_ip": args.dc_ip or ""}
+
+    active = not args.no_probe
+    analysis = smb.analyze(hosts, creds=creds, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No SMB endpoints in the datastore (no port 445/139). Run `enum` "
+              "against the SMB hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} SMB endpoint(s):")
+    for t in tgts:
+        bits = [t.get("dialect") or ""]
+        if t.get("signing_required") is False:
+            bits.append("signing NOT REQUIRED")
+        if t.get("smbv1"):
+            bits.append("SMBv1 ENABLED")
+        print(f"      {t['ip']}:{t['port']}  " + "  ".join(b for b in bits if b))
+
+    # Record the directly-observed signing posture on each host so the prove engine
+    # (_v_smb_signing) can adjudicate a relay finding as CONFIRMED, not a guess.
+    host_by_ip = {h.ip: h for h in hosts}
+    for t in tgts:
+        req = t.get("signing_required")
+        if req is None:
+            continue
+        host = host_by_ip.get(t["ip"])
+        if host is not None:
+            host.smb_signing = "required" if req else "not required"
+
+    # Live layer: anonymous (null/guest) share enumeration + reversible write proof.
+    rb_by_ip = {rb["ip"]: rb for rb in analysis["runbooks"]}
+    ran_live = False
+    if not args.no_run:
+        for t in tgts:
+            ip, port = t["ip"], t["port"]
+            # Try a null session first, then guest.
+            session = smb.enum_session(ip, "", "", port=port)
+            if session.get("error") and "not installed" in (session["error"] or ""):
+                print("      [i] nxc/netexec not installed - writing the commands to "
+                      "run instead (see the SMB sheet).")
+                break
+            if not (session.get("shares") or session.get("users")):
+                session = smb.enum_session(ip, "guest", "", port=port)
+            ran_live = True
+            shares = session.get("shares") or []
+            live = {"shares": shares, "writable": [],
+                    "session": (f"anonymous session: {len(shares)} share(s), "
+                                f"{len(session.get('users') or [])} user(s)")}
+            analysis["findings"].extend(smb.null_session_findings(ip, port, session))
+            if session.get("output"):
+                _smb_shot(args, ip, "enum",
+                          f"nxc smb {ip} -u '' -p '' --shares --users --pass-pol",
+                          session["output"])
+            # Prove writable shares (reversible) when requested.
+            if args.prove_write:
+                for s in shares:
+                    perms = (s.get("perms") or "").upper()
+                    name = s.get("name", "")
+                    if "WRITE" not in perms or name.upper() in ("IPC$", "PRINT$"):
+                        continue
+                    proof = smb.prove_writable(ip, name, creds, port=port)
+                    if proof.get("writable"):
+                        live["writable"].append({"share": name,
+                                                 "evidence": proof.get("evidence", "")})
+                        f = smb.write_proof_finding(ip, port, name, proof, creds)
+                        if f:
+                            analysis["findings"].insert(0, f)
+                        _smb_shot(args, ip, f"write_{name}",
+                                  proof.get("command", ""), proof.get("evidence", ""))
+            rb_by_ip[ip]["live"] = live
+
+    # De-duplicate (offline + live can overlap) by (title, target).
+    seen: set = set()
+    uniq = []
+    for f in analysis["findings"]:
+        k = (f["title"], f["target"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(f)
+    analysis["findings"] = uniq
+
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
+    analysis["stats"]["findings"] = len(analysis["findings"])
+    by_ip = smb.findings_to_vulns(analysis["findings"])
+    for ip, vulns in by_ip.items():
+        host = host_by_ip.get(ip) or store.get_host(ip)
+        if host is None:
+            continue
+        have = {v.key for v in host.vulns if v.source != "smb"}
+        host.vulns = [v for v in host.vulns if v.source != "smb"]      # refresh SMB set
+        for v in vulns:
+            if v.key not in have:
+                have.add(v.key)
+                host.vulns.append(v)
+        store.upsert_host(host, merge=False)
+    # Persist the signing posture we observed (upsert any host we touched but that
+    # produced no vulns, so host.smb_signing still lands).
+    for t in tgts:
+        if t["ip"] not in by_ip:
+            host = host_by_ip.get(t["ip"])
+            if host is not None and t.get("signing_required") is not None:
+                store.upsert_host(host, merge=False)
+
+    store.set_meta("smb", json.dumps(analysis))
+    if analysis["findings"]:
+        by_sev: dict = {}
+        for f in analysis["findings"]:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        print("[+] {} SMB finding(s): ".format(len(analysis["findings"]))
+              + ", ".join(f"{by_sev[s]} {s}" for s in
+                          ("critical", "high", "medium", "low") if by_sev.get(s)))
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    hint = "live enum" if ran_live else "commands-only"
+    print(f"    -> SMB sheet written ({hint}); findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3652,6 +3819,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ms.add_argument("-o", "--output-dir", default="engagement")
     ms.add_argument("--title", default="Recce Engagement")
     ms.set_defaults(func=cmd_mssql)
+
+    # SMB offensive enumeration + attack surface.
+    sm = sub.add_parser("smb",
+                        help="SMB: stdlib pre-auth posture (dialect/signing/SMBv1) + "
+                             "anonymous/credentialed share enum + writable-share proof")
+    sm.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "SMB hosts in the datastore)")
+    sm.add_argument("-u", "--username",
+                    help="your account - runs the authenticated enum and pre-fills every "
+                         "command ('CORP\\alice' / 'alice@corp.local' work too)")
+    sm.add_argument("-p", "--password", help="password for your account")
+    sm.add_argument("-d", "--domain", help="AD domain (e.g. corp.local)")
+    sm.add_argument("--dc-ip", help="DC IP to fill into the generated commands")
+    sm.add_argument("--prove-write", action="store_true",
+                    help="prove a writable share REVERSIBLY (drop a marker file, list "
+                         "it, delete it) - nothing is left behind")
+    sm.add_argument("--screenshots", action="store_true",
+                    help="capture terminal-style PROOF screenshots of executed actions "
+                         "(share enum, write-proof) for the walkthrough")
+    sm.add_argument("--no-run", action="store_true",
+                    help="don't execute nxc/smbclient; just write the commands (airgapped-safe)")
+    sm.add_argument("--no-probe", action="store_true",
+                    help="skip the live SMB2/SMBv1 negotiate probes")
+    sm.add_argument("-o", "--output-dir", default="engagement")
+    sm.add_argument("--title", default="Recce Engagement")
+    sm.set_defaults(func=cmd_smb)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")

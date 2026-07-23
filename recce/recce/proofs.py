@@ -132,6 +132,20 @@ def _v_ms17(host, port, vuln):
                     "nmap --script smb-vuln-ms17-010 -p445 <ip>  (VULNERABLE = real, NOT VULNERABLE = FP)."]
 
 
+def _v_smbv1(host, port, vuln):
+    # recce's own SMBv1 NEGOTIATE was answered -> the legacy protocol is on. That
+    # fact is directly observed (CONFIRMED); remote exploitability (MS17-010) is a
+    # separate, patch-dependent question the finish command settles.
+    return CONFIRMED, [
+        "recce's SMBv1 NEGOTIATE was answered with a selected dialect - the deprecated "
+        "SMBv1 protocol is enabled on this host (directly observed, not a banner guess).",
+        "SMBv1-on is the MS17-010 / EternalBlue attack surface and permits NTLMv1 "
+        "downgrade. Confirm remote exploitability non-intrusively: "
+        "nmap --script smb-vuln-ms17-010 -p445 <ip> (a VULNERABLE result = pre-auth "
+        "SYSTEM RCE now; NOT-VULNERABLE = legacy protocol on but patched - still a "
+        "hardening failure to disable SMBv1)."]
+
+
 def _v_smbghost(host, port, vuln):
     osn = f"{host.os_name} {host.os_family}".lower()
     # CVE-2020-0796 affects Windows 10 / Server builds 1903 & 1909 only.
@@ -424,6 +438,15 @@ _RECIPES: list[dict] = [
                "victim - lab/ROE. Quick confirm: nxc smb <ip> --gen-relay-list relays.txt.",
      "fp": "Signing REQUIRED (DCs require it by default) -> relay blocked.",
      "fn": _v_smb_signing},
+    {"id": "smbv1-enabled",
+     "match": r"smbv1 \(legacy|legacy protocol\) enabled|smbv1.{0,24}enabled|"
+              r"enabled.{0,24}smbv1",
+     "name": "SMBv1 (legacy protocol) enabled",
+     "pre": ["SMB (445) reachable", "The host answers an SMBv1 NEGOTIATE"],
+     "finish": "nmap --script smb-vuln-ms17-010 -p445 <ip> (non-intrusive) to separate "
+               "'legacy protocol on' from 'remotely exploitable now'.",
+     "fp": "The host does NOT answer SMBv1 (recce would not have raised this).",
+     "fn": _v_smbv1},
     {"id": "ms17-010", "match": r"ms17-010|eternalblue|cve-2017-0143|cve-2017-0144",
      "name": "MS17-010 EternalBlue (SMBv1 RCE)",
      "pre": ["SMBv1 (445) reachable", "Host missing MS17-010"],

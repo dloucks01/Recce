@@ -58,7 +58,8 @@ _CWE_TYPE = [
     (("CWE-287", "CWE-306", "CWE-288", "CWE-1188", "CWE-521", "CWE-307", "CWE-798",
       "CWE-290", "CWE-640", "CWE-863", "CWE-262"),
      "Authentication / Access Control Weakness", "Confidentiality, Integrity"),
-    (("CWE-269", "CWE-250", "CWE-264", "CWE-426", "CWE-427", "CWE-428", "CWE-732", "CWE-266"),
+    (("CWE-269", "CWE-250", "CWE-264", "CWE-426", "CWE-427", "CWE-428", "CWE-732",
+      "CWE-266", "CWE-276"),
      "Privilege Escalation", "Confidentiality, Integrity"),
     (("CWE-319",), "Cleartext Transmission of Sensitive Data", "Confidentiality"),
     (("CWE-327", "CWE-326", "CWE-295", "CWE-297", "CWE-298", "CWE-330", "CWE-347"),
@@ -70,7 +71,7 @@ _CWE_TYPE = [
       "CWE-614", "CWE-942", "CWE-799"), "Security Misconfiguration", "Integrity"),
     (("CWE-364",), "Race Condition", "Integrity, Availability"),
     (("CWE-406", "CWE-400"), "Resource Exhaustion / Denial of Service", "Availability"),
-    (("CWE-1104", "CWE-1392"), "Unmaintained / Default Components", _CIA),
+    (("CWE-1104", "CWE-1392", "CWE-477"), "Unmaintained / Default Components", _CIA),
     (("CWE-506",), "Embedded Malicious Code / Backdoor", _CIA),
     (("CWE-20",), "Improper Input Validation", "Integrity"),  # generic - keep last
 ]
@@ -91,6 +92,8 @@ _CWE_NAME = {
     "CWE-257": "Storing Passwords in a Recoverable Format",
     "CWE-260": "Password in Configuration File",
     "CWE-264": "Permissions, Privileges, and Access Controls",
+    "CWE-276": "Incorrect Default Permissions",
+    "CWE-477": "Use of Obsolete Function / Protocol",
     "CWE-426": "Untrusted Search Path",
     "CWE-427": "Uncontrolled Search Path Element",
     "CWE-428": "Unquoted Search Path or Element",
@@ -162,6 +165,7 @@ _SOURCE_TOOL = {
     "bloodhound": "BloodHound / SharpHound (AD graph analysis)",
     "adcs": "Certipy (AD CS / ESC enumeration)",
     "mssql": "MSSQL enum (recce probes + nxc / impacket-mssqlclient)",
+    "smb": "SMB enum (recce stdlib negotiate probe + nxc / smbclient)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.

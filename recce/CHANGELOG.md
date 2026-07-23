@@ -50,6 +50,24 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
   the "no AV/EDR evasion" boundary stays.)
 
 ### Added
+- **`recce smb` — SMB / file sharing gets its own deep offensive module + tab.**
+  Modelled on `recce mssql`, in two layers. **Credential-free (airgapped, stdlib):**
+  recce crafts an SMB2 NEGOTIATE and reads the highest dialect and the *signing
+  posture* (required vs merely enabled → the NTLM-relay surface), then an SMBv1
+  NEGOTIATE to see whether the legacy protocol is still answered (the MS17-010 /
+  EternalBlue surface) — both directly observed, not inferred from a banner, exactly
+  like the MSSQL TDS pre-login probe. **With tools / credentials:** null & guest
+  session share enumeration via `nxc smb` (reusing the shared parser), and a
+  reversible **writable-share proof** (`--prove-write`: drop a marker file via
+  `smbclient`, list it, delete it — nothing left behind). Every finding folds into
+  the main severity totals, the Vulnerabilities sheet, the write-ups, and a new
+  **SMB** workbook tab, each carrying the exact prove/abuse command and a detailed
+  narrative of what it enables (relay → act-as-victim, writable share → SCF/LNK
+  NetNTLM capture, null session → spray-list recon). The prove engine adjudicates
+  the observed states directly: signing-not-required and SMBv1-enabled are
+  **CONFIRMED** from the negotiate, signing-required is a **FALSE POSITIVE** for any
+  relay finding. `--screenshots` saves terminal-output proof images. Airgapped-safe;
+  the live layer degrades cleanly when nxc/smbclient are absent.
 - **Findings are proven by execution, not just adjudicated (audit gaps closed).**
   Several checks that used to stop at "advertised / version-matched" now actively
   prove impact and downgrade themselves when the proof fails:

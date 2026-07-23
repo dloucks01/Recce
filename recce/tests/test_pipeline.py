@@ -3285,6 +3285,127 @@ class CredentialsTest(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, "creds", "users.txt")))
 
 
+class SmbTest(unittest.TestCase):
+    def _host(self):
+        return Host(ip="10.0.0.60", subnet="10.0.0.0/24", hostnames=["FS01"],
+                    os_family="Windows", enumerated=True,
+                    ports=[Port(portid=445, service="microsoft-ds",
+                                product="Windows Server 2019", state="open"),
+                           Port(portid=80, service="http", state="open")])
+
+    def test_smb2_negotiate_roundtrips(self):
+        import struct
+        from recce import smb
+        req = smb._build_smb2_negotiate()
+        self.assertEqual(req[4:8], b"\xfeSMB")
+        self.assertEqual(struct.unpack(">I", req[:4])[0], len(req) - 4)
+        # Synthetic SMB2 negotiate response: 3.1.1, signing NOT required.
+        hdr = smb._smb2_header(0x0000, flags=0x00000001)
+        body = (struct.pack("<H", 65) + struct.pack("<H", 0x01)   # signing enabled only
+                + struct.pack("<H", 0x0311) + struct.pack("<H", 0) + b"\x11" * 16
+                + struct.pack("<I", 7) + struct.pack("<I", 0x800000) * 3)
+        resp = struct.pack(">I", len(hdr + body)) + hdr + body
+        p = smb.parse_smb2_negotiate(resp)
+        self.assertEqual(p["dialect_name"], "SMB 3.1.1")
+        self.assertFalse(p["signing_required"])
+        self.assertTrue(p["signing_enabled"])
+
+    def test_smb1_negotiate_detection(self):
+        import struct
+        from recce import smb
+        req = smb._build_smb1_negotiate()
+        self.assertEqual(req[4:8], b"\xffSMB")
+        # SMBv1 answer with a selected dialect index -> enabled.
+        hdr = (b"\xffSMB" + b"\x72" + b"\x00\x00\x00\x00" + b"\x98" + b"\x01\x28"
+               + b"\x00\x00" + b"\x00" * 8 + b"\x00\x00" + b"\x00\x00" + b"\x2f\x4b"
+               + b"\x00\x08" + b"\xc5\x5e")
+        body = struct.pack("<B", 17) + struct.pack("<H", 5) + b"\x00" * 30
+        resp = struct.pack(">I", len(hdr + body)) + hdr + body
+        self.assertTrue(smb.parse_smb1_negotiate(resp)["smbv1"])
+        # A server answering SMB2 to the SMB1 negotiate -> SMBv1 off.
+        self.assertFalse(smb.parse_smb1_negotiate(
+            struct.pack(">I", 8) + b"\xfeSMB" + b"\x00" * 4)["smbv1"])
+
+    def test_findings_from_probe(self):
+        from recce import smb
+        pr = {("10.0.0.60", 445): {"smbv1": True, "signing_required": False,
+                                   "dialect_name": "SMB 3.1.1"}}
+        fs = smb.findings([self._host()], pr)
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("SMBv1", titles)
+        self.assertIn("signing not required", titles.lower())
+        self.assertTrue(all(f.get("narrative") for f in fs))       # narratives attached
+
+    def test_findings_to_vulns_have_classified_cwes(self):
+        from recce import smb
+        from recce.report_docx import _vuln_type
+        pr = {("10.0.0.60", 445): {"smbv1": True, "signing_required": False,
+                                   "dialect_name": "SMB 3.1.1"}}
+        by_ip = smb.findings_to_vulns(smb.findings([self._host()], pr))
+        self.assertIn("10.0.0.60", by_ip)
+        for v in by_ip["10.0.0.60"]:
+            vt, _ = _vuln_type(v.cwes)
+            self.assertTrue(vt, v.cwes)                             # every CWE classifies
+
+    def test_prove_engine_adjudicates_smb(self):
+        from recce import smb, proofs
+        pr = {("10.0.0.60", 445): {"smbv1": True, "signing_required": False,
+                                   "dialect_name": "SMB 3.1.1"}}
+        h = self._host()
+        h.vulns = smb.findings_to_vulns(smb.findings([h], pr))["10.0.0.60"]
+        h.smb_signing = "not required"
+        verdicts = {r["vuln"]: r["verdict"] for r in proofs.verify_host(h)}
+        smbv1 = next(v for k, v in verdicts.items() if "SMBv1" in k)
+        signing = next(v for k, v in verdicts.items() if "signing" in k.lower())
+        self.assertEqual(smbv1, proofs.CONFIRMED)
+        self.assertEqual(signing, proofs.CONFIRMED)
+
+    def test_null_session_findings(self):
+        from recce import smb
+        session = {"ran": True, "error": None,
+                   "shares": [{"name": "backups", "perms": "READ"},
+                              {"name": "IPC$", "perms": "READ"}],
+                   "users": [{"domain": "CORP", "name": "alice"}]}
+        fs = smb.null_session_findings("10.0.0.60", 445, session)
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("null / anonymous session", titles)
+        self.assertIn("readable without credentials", titles)       # backups (not IPC$)
+
+    def test_cmd_smb_end_to_end(self):
+        from recce import cli, xlsx
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            h = self._host()
+            h.ports[0].scripts = [Script(id="smb-vuln-ms17-010",
+                                         output="VULNERABLE: MS17-010")]
+            st.upsert_host(h)
+            st.close()
+            # --no-probe (no live socket in CI); feed a synthetic probe via meta? No -
+            # instead assert the sheet renders and the runbook is creds-filled.
+            rc = cli.main(["smb", "-o", out, "--no-run", "--no-probe",
+                           "-u", "alice", "-p", "P@ss", "-d", "corp.local"])
+            self.assertEqual(rc, 0)
+            sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+            self.assertIn("SMB", sheets)
+            mtxt = "\n".join(" ".join(map(str, r)) for r in sheets["SMB"])
+            self.assertIn("10.0.0.60:445", mtxt)
+            self.assertIn("corp.local", mtxt)                       # runbook creds-filled
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.7", ports=[Port(portid=25, service="smtp")]))
+            st.close()
+            self.assertEqual(cli.main(["smb", "-o", out, "--no-probe", "--no-run"]), 0)
+
+
 class MssqlTest(unittest.TestCase):
     def _host(self):
         from recce.models import Vuln
