@@ -2525,6 +2525,21 @@ class WebModuleTest(unittest.TestCase):
                     return self._send(200, b"# HELP go_gc_duration_seconds ...\n# TYPE x gauge\n")
                 if self.path == "/crossdomain.xml":
                     return self._send(200, b'<cross-domain-policy><allow-access-from domain="*"/></cross-domain-policy>')
+                if self.path == "/actuator":
+                    return self._send(200, b'{"_links":{"env":{"href":"/actuator/env"}}}')
+                if self.path == "/actuator/env":
+                    return self._send(200, b'{"propertySources":[{"properties":{"db.password":{"value":"S3cr3tPass"}}}]}')
+                if self.path == "/actuator/heapdump":
+                    return self._send(200, b"JAVA PROFILE 1.0.2\x00" + b"\x00" * 32,
+                                      extra={"Content-Type": "application/octet-stream"})
+                if self.path == "/.git/config":
+                    return self._send(200, b"[core]\n\trepositoryformatversion = 0\n")
+                if self.path == "/backup.sql":
+                    return self._send(200, b"-- MySQL dump\nCREATE TABLE users (id int);\n")
+                if self.path == "/private":
+                    if "Authorization" not in self.headers:
+                        return self._send(401, b"auth", extra={"WWW-Authenticate": 'Basic realm="x"'})
+                    return self._send(200, b"secret area")
                 if self.path == "/.git/HEAD":
                     return self._send(200, b"ref: refs/heads/main\n")
                 if self.path == "/.env":
@@ -2578,6 +2593,37 @@ class WebModuleTest(unittest.TestCase):
         self.assertIn("web-metrics", sids)        # Prometheus /metrics
         self.assertIn("web-crossdomain", sids)    # permissive crossdomain.xml
         self.assertIn("web-graphql", sids)        # GraphQL introspection (POST)
+
+    def test_deep_actuator_backup_gitconfig_and_secret_extraction(self):
+        from recce import web
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        by = {v.script_id: v for v in findings}
+        self.assertIn("web-actuator", by)               # actuator index
+        self.assertIn("web-actuator-env", by)           # /env
+        self.assertIn("web-actuator-heapdump", by)      # downloadable heapdump
+        self.assertIn("web-gitconfig", by)              # .git/config
+        self.assertIn("web-backup", by)                 # backup.sql
+        # /env leaked secret is surfaced REDACTED (not the raw value).
+        self.assertIn("db.password=", by["web-actuator-env"].output)
+        self.assertNotIn("S3cr3tPass", by["web-actuator-env"].output)
+
+    def test_default_creds_probe_opt_in(self):
+        from recce import web
+        # Without creds=True, the Basic-auth endpoint isn't brute-tried.
+        _, f0 = web.scan_endpoint("127.0.0.1", self._port(), active=True, creds=False)
+        self.assertNotIn("web-default-creds", {v.script_id for v in f0})
+        # The bounded default list finds admin:admin on /private... but our server
+        # only 200s WITH any Authorization header, so admin:admin (first try) works.
+        found = web._basic_auth_defaults("127.0.0.1", self._port(),
+                                         web.url_for("127.0.0.1", self._port()), ["/private"])
+        self.assertTrue(any(v.script_id == "web-default-creds" for v in found))
+
+    def test_product_version_fingerprint(self):
+        from recce import web
+        self.assertEqual(web.product_version({"x-jenkins": "2.401.1"}, ""), ("Jenkins", "2.401.1"))
+        prod, ver = web.product_version({}, '<meta name="generator" content="WordPress 6.4.2">')
+        self.assertEqual(prod, "WordPress")
+        self.assertEqual(ver, "6.4.2")
 
     def test_passive_mode_skips_path_probes(self):
         from recce import web

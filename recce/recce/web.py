@@ -125,12 +125,167 @@ def fingerprint(headers: dict, body: str) -> dict:
     return {"tech": tech, "title": title}
 
 
+def product_version(headers: dict, body: str) -> tuple[str, str]:
+    """Best-effort (product, version) for CVE mapping, from headers/body. Used to
+    enrich a port's product when nmap left it blank."""
+    if headers.get("x-jenkins"):
+        return "Jenkins", headers["x-jenkins"]
+    if headers.get("x-confluence-request-time") or "Atlassian Confluence" in body:
+        m = re.search(r"Confluence[^0-9]*([\d.]+)", body)
+        return "Atlassian Confluence", (m.group(1) if m else "")
+    if "gitlab" in (headers.get("x-gitlab-meta", "") + body[:2000]).lower():
+        return "GitLab", ""
+    m = _GENERATOR.search(body)
+    if m:
+        g = re.match(r"([A-Za-z][A-Za-z ]+?)\s*([\d][\d.]*)?\s*$", m.group(1).strip())
+        if g:
+            return g.group(1).strip(), (g.group(2) or "")
+    m = re.search(r"([A-Za-z][\w.-]+)/([\d][\d.]+)", headers.get("server", ""))
+    if m:
+        return m.group(1), m.group(2)
+    return "", ""
+
+
+# --- secret extraction (redacted) ----------------------------------------------
+
+_SECRET_RE = re.compile(
+    r'([A-Za-z0-9_.\-]*(?:pass(?:word)?|secret|token|api[_-]?key|access[_-]?key|'
+    r'private[_-]?key|db[_-]?pass|aws[_-]?\w+|client[_-]?secret)[A-Za-z0-9_.\-]*)'
+    # flat  key=val / key: val   OR   Spring actuator nested  key:{"value":"val"}
+    r'["\']?\s*[:=]\s*(?:\{?\s*["\']?value["\']?\s*:\s*)?["\']?([^\s"\',}{]{4,})', re.I)
+
+
+def _leaked_secrets(body: str, limit: int = 8) -> list[str]:
+    """Redacted 'key=ab…yz' pairs pulled from an exposed config/env body, so the
+    finding shows WHAT leaked without dumping the raw secret."""
+    out: list[str] = []
+    for m in _SECRET_RE.finditer(body):
+        key, val = m.group(1), m.group(2)
+        red = f"{val[:2]}…{val[-2:]}" if len(val) > 6 else "…"
+        pair = f"{key}={red}"
+        if pair not in out:
+            out.append(pair)
+        if len(out) >= limit:
+            break
+    return out
+
+
+# --- Spring Boot Actuator deep-dive --------------------------------------------
+# Only probed when the base /actuator responds, so it costs nothing elsewhere.
+_ACTUATOR_SUB = [
+    ("actuator/env", "high", "web-actuator-env", "Actuator /env exposed (config + secrets)", True),
+    ("actuator/configprops", "high", "web-actuator-configprops",
+     "Actuator /configprops exposed (config + secrets)", True),
+    ("actuator/heapdump", "high", "web-actuator-heapdump",
+     "Actuator heapdump downloadable (full memory - secrets/tokens)", False),
+    ("actuator/mappings", "medium", "web-actuator-mappings", "Actuator /mappings exposed (route map)", False),
+    ("actuator/threaddump", "medium", "web-actuator-threaddump", "Actuator /threaddump exposed", False),
+    ("actuator/gateway/routes", "high", "web-actuator-gateway",
+     "Spring Cloud Gateway actuator exposed (SpEL RCE surface, CVE-2022-22947)", False),
+]
+
+
+def _scan_actuator(ip: str, port: Port, base_url: str, auth) -> list[Vuln]:
+    root = _fetch(ip, port, "/actuator", auth=auth)
+    if not (root and root[0] == 200 and ('"_links"' in root[2] or '"health"' in root[2])):
+        return []
+    out = [_mk(ip, port, "web-actuator", "high", "Spring Boot Actuator exposed (/actuator)",
+               ["CWE-200"], f"GET {base_url}/actuator -> HTTP 200 (actuator index).",
+               "Secure/limit the actuator endpoints (management.endpoints.web.exposure).")]
+    for path, sev, sid, title, extract in _ACTUATOR_SUB:
+        r = _fetch(ip, port, "/" + path, auth=auth)
+        if not r or r[0] != 200:
+            continue
+        st, hd, bd = r
+        if "heapdump" in path:
+            ct = hd.get("content-type", "")
+            if "octet-stream" not in ct and "HPROF" not in bd[:16] and "JAVA PROFILE" not in bd[:32]:
+                continue
+        detail = f"GET {base_url}/{path} -> HTTP {st}."
+        if extract:
+            secrets = _leaked_secrets(bd)
+            if secrets:
+                detail += "  leaked: " + "; ".join(secrets)
+        out.append(_mk(ip, port, sid, sev, title, ["CWE-200"], detail,
+                       "Disable or authenticate the actuator endpoints."))
+    return out
+
+
+# --- backup / source-file exposure ---------------------------------------------
+_BACKUPS = [
+    ("backup.zip", "zip"), ("site.zip", "zip"), ("www.zip", "zip"), ("backup.tar.gz", "gz"),
+    ("backup.sql", "sql"), ("db.sql", "sql"), ("database.sql", "sql"), ("dump.sql", "sql"),
+    (".env.bak", "secret"), (".env.save", "secret"), ("wp-config.php.bak", "php"),
+    ("config.php.bak", "php"), ("web.config.bak", "xml"), ("index.php.bak", "php"),
+]
+
+
+def _confirm_backup(kind: str, body: str) -> bool:
+    if kind == "zip":
+        return body[:2] == "PK"
+    if kind == "gz":
+        return body[:2] == "\x1f\x8b"
+    if kind == "sql":
+        return bool(re.search(r"INSERT INTO|CREATE TABLE|MySQL dump|PostgreSQL database dump", body, re.I))
+    if kind == "php":
+        return "<?php" in body or bool(_leaked_secrets(body))
+    if kind == "xml":
+        return "<configuration" in body.lower()
+    return bool(_leaked_secrets(body))
+
+
+def _scan_backups(ip: str, port: Port, base_url: str, auth) -> list[Vuln]:
+    out: list[Vuln] = []
+    for name, kind in _BACKUPS:
+        r = _fetch(ip, port, "/" + name, auth=auth)
+        if r and r[0] == 200 and _confirm_backup(kind, r[2]):
+            detail = f"GET {base_url}/{name} -> HTTP 200 ({kind})."
+            if kind in ("secret", "php"):
+                sec = _leaked_secrets(r[2])
+                if sec:
+                    detail += "  leaked: " + "; ".join(sec)
+            out.append(_mk(ip, port, "web-backup", "high",
+                           f"Exposed backup/source file: {name}", ["CWE-538"], detail,
+                           "Remove backups/source from the web root; deny access."))
+    return out
+
+
+# --- opt-in default-credential probe (bounded, lockout-aware) -------------------
+_BASIC_DEFAULTS = [("admin", "admin"), ("admin", "password"), ("tomcat", "tomcat"),
+                   ("root", "root"), ("admin", "")]
+
+
+def _basic_auth_defaults(ip: str, port: Port, base_url: str, paths: list[str]) -> list[Vuln]:
+    """Try a TINY documented default list against endpoints that ask for HTTP Basic
+    auth. Capped at 5 attempts per endpoint - stays well under lockout thresholds."""
+    import base64
+    out: list[Vuln] = []
+    for path in paths:
+        r = _fetch(ip, port, path)
+        if not r or r[0] != 401 or "basic" not in r[1].get("www-authenticate", "").lower():
+            continue
+        for user, pw in _BASIC_DEFAULTS:
+            token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+            a = _fetch(ip, port, path, auth={"Authorization": f"Basic {token}"})
+            if a and a[0] in (200, 301, 302):
+                out.append(_mk(ip, port, "web-default-creds", "high",
+                               f"Default HTTP Basic credentials: {user}:{pw or '<blank>'}",
+                               ["CWE-1392", "CWE-287"],
+                               f"{base_url}{path} accepted {user}:{pw or '<blank>'} (HTTP {a[0]}).",
+                               "Change the default credentials; restrict the endpoint."))
+                break
+    return out
+
+
 # --- high-signal exposure paths (GET, confirmed only on positive content) -------
 # (path, severity, script_id, title, cwes, remediation, confirm(status, body))
 _PATHS = [
     (".git/HEAD", "high", "web-git", "Exposed Git repository (.git) - source/secret disclosure",
      ["CWE-538"], "Deny access to .git and remove it from the web root.",
      lambda s, b: s == 200 and b.strip().startswith("ref:")),
+    (".git/config", "high", "web-gitconfig", "Exposed .git/config (remote URL - may embed credentials)",
+     ["CWE-538"], "Deny access to .git and remove it from the web root.",
+     lambda s, b: s == 200 and "[core]" in b),
     (".env", "high", "web-dotenv", "Exposed .env file (app secrets / DB credentials)",
      ["CWE-538", "CWE-215"], "Move .env outside the web root; deny access.",
      lambda s, b: s == 200 and re.search(r"APP_KEY|DB_(PASSWORD|HOST|USER)|SECRET|API_?KEY", b, re.I)),
@@ -140,12 +295,6 @@ _PATHS = [
     ("server-status", "medium", "web-serverstatus", "Apache mod_status exposed (/server-status)",
      ["CWE-200"], "Restrict <Location /server-status> to localhost/admins.",
      lambda s, b: s == 200 and "Apache Server Status" in b),
-    ("actuator", "high", "web-actuator", "Spring Boot Actuator exposed (/actuator)",
-     ["CWE-200"], "Secure/limit the actuator endpoints (management.endpoints).",
-     lambda s, b: s == 200 and ('"_links"' in b or '"health"' in b)),
-    ("actuator/env", "high", "web-actuator-env", "Spring Actuator /env exposed (config + secrets)",
-     ["CWE-200"], "Disable or authenticate the actuator env endpoint.",
-     lambda s, b: s == 200 and ("propertySources" in b or "systemProperties" in b)),
     ("phpinfo.php", "medium", "web-phpinfo", "phpinfo() page exposed",
      ["CWE-200"], "Remove phpinfo() pages from production.",
      lambda s, b: s == 200 and "phpinfo()" in b.lower()),
@@ -197,18 +346,28 @@ _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
 
 
 def scan_endpoint(ip: str, port: Port, active: bool = True,
-                  auth: dict | None = None) -> tuple[dict, list[Vuln]]:
+                  auth: dict | None = None, creds: bool = False) -> tuple[dict, list[Vuln]]:
     """Deep, non-intrusive scan of one web endpoint. Returns (profile, [Vuln]).
-    `auth` (Cookie/Authorization headers) runs the scan as an authenticated user."""
+    `auth` (Cookie/Authorization headers) runs the scan as an authenticated user;
+    `creds` opts into a tiny, lockout-aware default-credential probe."""
     findings: list[Vuln] = []
+    base = url_for(ip, port)
     # Root fetch: fingerprint + directory listing + cookie flags.
     root = _fetch(ip, port, "/", auth=auth)
     status = root[0] if root else None
     headers = root[1] if root else {}
     body = root[2] if root else ""
     fp = fingerprint(headers, body) if root else {"tech": [], "title": ""}
+    # Enrich the port's product/version from the web fingerprint when nmap left it
+    # blank, so it flows into the CVE mapping + Services-by-Product pivot.
+    if root and not port.product:
+        prod, ver = product_version(headers, body)
+        if prod:
+            port.product = prod
+            port.version = port.version or ver
+            port.detect_source = port.detect_source or "web"
     profile = {"ip": ip, "port": port.portid, "scheme": scheme_for(port),
-               "url": url_for(ip, port), "status": status,
+               "url": base, "status": status,
                "server": headers.get("server", ""), "tech": fp["tech"],
                "title": fp["title"]}
     # Security headers + TLS (reuse the existing stdlib probes).
@@ -285,17 +444,28 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                 if sid in seen_sid:
                     continue
                 seen_sid.add(sid)
-                findings.append(_mk(ip, port, sid, sev, title, cwes,
-                                    f"GET {profile['url']}/{path} -> HTTP {st} "
-                                    f"(content matched the {title.split('(')[0].strip()} signature).",
-                                    fix))
+                detail = (f"GET {base}/{path} -> HTTP {st} "
+                          f"(content matched the {title.split('(')[0].strip()} signature).")
+                # For secret-bearing files, show WHAT leaked (redacted).
+                if sid in ("web-dotenv", "web-aws", "web-htpasswd"):
+                    sec = _leaked_secrets(bd)
+                    if sec:
+                        detail += "  leaked: " + "; ".join(sec)
+                findings.append(_mk(ip, port, sid, sev, title, cwes, detail, fix))
         except Exception:  # noqa: BLE001 - a bad body never breaks the sweep
             continue
+    # Deep dives (each self-gates so they cost nothing when absent).
+    findings.extend(_scan_actuator(ip, port, base, auth))
+    findings.extend(_scan_backups(ip, port, base, auth))
+    if creds:
+        findings.extend(_basic_auth_defaults(ip, port, base,
+                                             ["/", "/manager/html", "/admin", "/console"]))
     profile["findings"] = len(findings)
     return profile, findings
 
 
-def scan_host(host: Host, active: bool = True, auth: dict | None = None) -> list[dict]:
+def scan_host(host: Host, active: bool = True, auth: dict | None = None,
+              creds: bool = False) -> list[dict]:
     """Scan every web endpoint on a host, appending deduped Vulns. Returns the web
     endpoint profiles (for the Web sheet)."""
     existing = {v.key for v in host.vulns}
@@ -303,7 +473,7 @@ def scan_host(host: Host, active: bool = True, auth: dict | None = None) -> list
     for port in host.open_ports:
         if not is_web(port):
             continue
-        profile, findings = scan_endpoint(host.ip, port, active=active, auth=auth)
+        profile, findings = scan_endpoint(host.ip, port, active=active, auth=auth, creds=creds)
         for v in findings:
             if v.key in existing:
                 continue

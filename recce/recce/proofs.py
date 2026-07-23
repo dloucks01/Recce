@@ -399,8 +399,9 @@ _RECIPES: list[dict] = [
      "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
      "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
      "fn": _v_asrep},
-    {"id": "web-exposure", "match": r"exposed (git|\.git|svn|\.env|\.svn|\.ds_store|aws)|\.env file|"
-                                    r"mod_status exposed|mod_info exposed|actuator|phpinfo|"
+    {"id": "web-exposure", "match": r"exposed (git|\.git|svn|\.env|\.svn|\.ds_store|aws|backup)|"
+                                    r"\.env file|\.git/config|mod_status exposed|mod_info exposed|"
+                                    r"actuator|heapdump|gateway actuator|backup/source file|phpinfo|"
                                     r"web\.config readable|directory listing enabled|swagger|"
                                     r"\.ds_store|crossdomain|prometheus /metrics|\.htpasswd|"
                                     r"graphql introspection|cors reflects|user enumeration via rest",
@@ -418,8 +419,8 @@ _RECIPES: list[dict] = [
                "(a stored file = real). Remove it afterwards.",
      "fp": "PUT is advertised but returns 403/405 when actually invoked.",
      "fn": _v_web_methods},
-    {"id": "default-creds", "match": r"default (credential|password|login)|weak credential|"
-                                     r"default (user|account)",
+    {"id": "default-creds", "match": r"default .{0,24}(credential|password|login|creds)|"
+                                     r"weak credential|default (user|account)",
      "name": "Default / weak credentials",
      "pre": ["A service reachable with a known default or weak credential"],
      "finish": "nxc <proto> <ip> -u <default-user> -p <default-pass> (respect account-lockout), or the "

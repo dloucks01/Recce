@@ -78,6 +78,26 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     **WordPress REST user enumeration**, **GraphQL introspection** (POST probe),
     and **CORS that reflects an arbitrary Origin with credentials** — each flagged
     only on a positive signal and wired into prove + PoC.
+  - **Deepened further:**
+    - **Full Spring Boot Actuator dive** (self-gated on `/actuator`): `/env`,
+      `/configprops`, **downloadable `/heapdump`** (full memory → secrets),
+      `/mappings`, `/threaddump`, and **`/gateway/routes`** (Spring Cloud Gateway
+      SpEL RCE surface, CVE-2022-22947).
+    - **Secret extraction, redacted** — exposed `.env` / `.aws/credentials` /
+      `.htpasswd` / actuator `/env` / `/configprops` now show *which* secrets
+      leaked as `key=ab…yz` (never the raw value).
+    - **Backup / source-file exposure** — `backup.sql`, `db.sql`, `*.zip`,
+      `.env.bak`, `wp-config.php.bak`, … confirmed by content signature (SQL dump /
+      zip magic / PHP / leaked secrets).
+    - **`.git/config`** (remote URL, sometimes embedded creds), in addition to
+      `.git/HEAD`.
+    - **Product+version fingerprinting** (Jenkins/Confluence/GitLab/WordPress/…)
+      enriches the port's product when nmap missed it — and the web scan now runs
+      **before** the CVE mapping in `vulns`, so those recovered versions get
+      matched to known CVEs.
+    - **Opt-in default-credential probe** (`recce web --creds`): a tiny documented
+      list against HTTP Basic-auth endpoints, capped at ≤5 tries/endpoint
+      (lockout-aware).
 - **`exploitplan` now emits benign PoC build recipes — the payload source, the
   build command, and the delivery — not just "drop a binary here."** For each
   confirmed finding it writes the standard, documented artifact to
