@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import zipfile
 from collections import deque
 
@@ -143,10 +144,21 @@ def _blob_type(blob: dict) -> str:
 
 def _results(x):
     """SharpHound stores collected principal lists either as a bare list or as
-    {"Collected":bool,"Results":[...]} - normalise to a list of dicts."""
+    {"Collected":bool,"Results":[...]} - normalise to a list."""
     if isinstance(x, dict):
         return x.get("Results") or []
     return x or []
+
+
+def _oid(entry):
+    """Extract an ObjectIdentifier (SID/GUID) from a member entry, which may be a
+    {"ObjectIdentifier": ...} dict (current SharpHound) or a bare SID string
+    (older/hand-built JSON). Returns None if neither."""
+    if isinstance(entry, dict):
+        return entry.get("ObjectIdentifier") or entry.get("UserSID")
+    if isinstance(entry, str):
+        return entry
+    return None
 
 
 def is_sharphound(path: str) -> bool:
@@ -215,27 +227,25 @@ def load_graph(path: str) -> dict:
 
             if btype == "groups":
                 for m in obj.get("Members") or []:
-                    add_edge(m.get("ObjectIdentifier"), "MemberOf", sid)
+                    add_edge(_oid(m), "MemberOf", sid)
             elif btype == "computers":
                 for m in _results(obj.get("LocalAdmins")):
-                    add_edge(m.get("ObjectIdentifier"), "AdminTo", sid)
+                    add_edge(_oid(m), "AdminTo", sid)
                 for m in _results(obj.get("RemoteDesktopUsers")):
-                    add_edge(m.get("ObjectIdentifier"), "CanRDP", sid)
+                    add_edge(_oid(m), "CanRDP", sid)
                 for m in _results(obj.get("PSRemoteUsers")):
-                    add_edge(m.get("ObjectIdentifier"), "CanPSRemote", sid)
+                    add_edge(_oid(m), "CanPSRemote", sid)
                 for m in _results(obj.get("DcomUsers")):
-                    add_edge(m.get("ObjectIdentifier"), "ExecuteDCOM", sid)
+                    add_edge(_oid(m), "ExecuteDCOM", sid)
                 for s in _results(obj.get("Sessions")):
-                    add_edge(sid, "HasSession", s.get("UserSID") or s.get("ObjectIdentifier"))
+                    add_edge(sid, "HasSession", _oid(s))
                 for t in obj.get("AllowedToDelegate") or []:
-                    add_edge(sid, "AllowedToDelegate",
-                             t.get("ObjectIdentifier") if isinstance(t, dict) else t)
+                    add_edge(sid, "AllowedToDelegate", _oid(t))
                 for m in _results(obj.get("AllowedToAct")):
-                    add_edge(m.get("ObjectIdentifier"), "AllowedToAct", sid)
+                    add_edge(_oid(m), "AllowedToAct", sid)
             elif btype == "users":
                 for t in obj.get("AllowedToDelegate") or []:
-                    add_edge(sid, "AllowedToDelegate",
-                             t.get("ObjectIdentifier") if isinstance(t, dict) else t)
+                    add_edge(sid, "AllowedToDelegate", _oid(t))
             elif btype == "domains":
                 domains[sid] = props
                 domains[sid]["_trusts"] = obj.get("Trusts") or []
@@ -337,6 +347,10 @@ def attack_paths(graph: dict, owned: set[str] | None = None,
     starts = _sources(graph, owned or set())
     if not starts:
         return []
+    # "Any authenticated user" only when the start set is the low-priv fallback -
+    # not merely when --owned was omitted (an --owned that matched nothing also
+    # falls back to everyone, and mislabelling it as a named user is misleading).
+    any_user = all(is_everyone(s) for s in starts)
     targets = high_value_targets(graph)
     out = []
     for tsid, tnode in targets.items():
@@ -352,7 +366,7 @@ def attack_paths(graph: dict, owned: set[str] | None = None,
             f"  -[{st['label']}]->  {st['dst']}" for st in steps)
         out.append({"start": start_name, "target": short(tnode),
                     "length": len(path), "steps": steps, "chain": chain,
-                    "any_user": not owned})
+                    "any_user": any_user})
     out.sort(key=lambda p: p["length"])
     return out[:max_paths]
 
@@ -370,12 +384,18 @@ def findings(graph: dict) -> list[dict]:
     first. Each carries the exact EXISTING-tool command to prove/abuse it."""
     out: list[dict] = []
     nodes = graph["nodes"]
+    # Domain Controllers: computers that are members of the Domain Controllers
+    # group (RID 516). DCs legitimately hold unconstrained delegation, so we use
+    # this (not a name guess) to avoid flagging them.
+    dc_sids = {src for src, label, dst in graph["edges"]
+               if label == "MemberOf" and _rid(dst) == "516"}
 
     for sid, node in nodes.items():
         props = node.get("props") or {}
         name = node.get("name") or short(node)
         ntype = node["type"]
-        enabled = props.get("enabled", True)
+        enabled = props.get("enabled")
+        enabled = True if enabled is None else enabled     # SharpHound null -> unknown
 
         if ntype == "User" and props.get("hasspn") and enabled \
                 and not name.upper().startswith("KRBTGT"):
@@ -400,7 +420,7 @@ def findings(graph: dict) -> list[dict]:
                 "-usersfile users.txt ; hashcat -m 18200 asrep.hash wordlist",
                 "Require Kerberos pre-authentication on the account."))
 
-        if props.get("unconstraineddelegation") and _rid(sid) not in ("516",) \
+        if props.get("unconstraineddelegation") and sid not in dc_sids \
                 and not is_dc(node):
             out.append(_finding(
                 "delegation", "high", "Unconstrained delegation (non-DC)",
@@ -506,9 +526,10 @@ def is_dc(node: dict) -> bool:
     props = (node or {}).get("props") or {}
     if node.get("type") != "Computer":
         return False
-    name = (node.get("name") or "").upper()
+    host = (node.get("name") or "").upper().split(".")[0]
     return "DOMAIN CONTROLLER" in str(props.get("system_tags") or "").upper() \
-        or bool(props.get("isdc")) or "DC" in name.split(".")[0].split("-")
+        or bool(props.get("isdc")) \
+        or "DC" in host.split("-") or host.startswith("DC")
 
 
 # --- Kerberos "for effect" (needs a credential/hash) ----------------------------
@@ -594,12 +615,16 @@ def fill_creds(analysis: dict, creds: dict | None) -> dict:
         subs.append(("<dc-ip>", dc))
         subs.append(("<dc>", dc))
 
+    # Single left-to-right pass (longest token first) so a value that happens to
+    # contain another token - e.g. a password literally "<dc>" - is never re-scanned.
+    mapping = dict(subs)
+    pattern = re.compile("|".join(re.escape(t) for t in
+                                  sorted(mapping, key=len, reverse=True))) if mapping else None
+
     def apply(text):
-        if not isinstance(text, str):
+        if pattern is None or not isinstance(text, str):
             return text
-        for tok, val in subs:
-            text = text.replace(tok, val)
-        return text
+        return pattern.sub(lambda m: mapping[m.group(0)], text)
 
     for f in analysis.get("findings", []):
         f["command"] = apply(f.get("command", ""))
@@ -641,9 +666,13 @@ def findings_to_vulns(analysis: dict, ip: str, hostname: str = "") -> list:
             evidence += f"\n\nPrincipal: {who}" + (f"  ->  {tgt}" if tgt else "")
         if f.get("command"):
             evidence += f"\n\nProve / abuse:\n{f['command']}"
+        # script_id carries the principal/target so Vuln.key is UNIQUE per finding
+        # (distinct kerberoastable users, ESC templates, ... aren't deduped away in
+        # the main totals) - while the generic title still lets group_findings
+        # aggregate them into a single writeup that lists every affected principal.
         out.append(Vuln(
             ip=ip, port=None, protocol="tcp",
-            script_id=f"ad-{cat}", state="finding", title=f["title"],
+            script_id=f"ad-{cat}:{who}|{tgt}"[:80], state="finding", title=f["title"],
             severity=f["severity"], source="adcs" if cat.startswith("adcs-") else "bloodhound",
             confidence="confirmed", cwes=list(cwes),
             output=evidence.strip(), remediation=f.get("remediation", "")))

@@ -3346,6 +3346,100 @@ class BloodHoundTest(unittest.TestCase):
             self.assertIn("AS-REP roastable account (no Kerberos pre-auth)", t2)  # kept
             self.assertIn("MS17-010", t2)                        # scan vuln survived
 
+    def test_distinct_findings_are_not_deduped_in_main_totals(self):
+        # Two kerberoastable users share the generic title but must produce TWO
+        # Vulns (distinct keys) so the main severity totals aren't undercounted.
+        from recce import bloodhound as bh
+        B = self.BASE
+        analysis = {"findings": [
+            {"category": "kerberoast", "severity": "medium",
+             "title": "Kerberoastable account", "principal": "SVC1@C", "target": "",
+             "detail": "", "command": "x", "remediation": "y"},
+            {"category": "kerberoast", "severity": "medium",
+             "title": "Kerberoastable account", "principal": "SVC2@C", "target": "",
+             "detail": "", "command": "x", "remediation": "y"}]}
+        vulns = bh.findings_to_vulns(analysis, "10.0.0.9", "C")
+        self.assertEqual(len({v.key for v in vulns}), 2)         # distinct, not collapsed
+        _ = B  # silence
+
+    def test_domain_controller_not_flagged_for_unconstrained_delegation(self):
+        from recce import bloodhound as bh
+        B = self.BASE
+        with tempfile.TemporaryDirectory() as d:
+            # DC01 has unconstrained delegation AND is a member of Domain Controllers
+            # (RID 516). It must NOT be reported (that's normal for a DC).
+            comps = {"meta": {"type": "computers"}, "data": [
+                {"ObjectIdentifier": f"{B}-1000",
+                 "Properties": {"name": "DC01.CORP.LOCAL", "enabled": True,
+                                "unconstraineddelegation": True}, "Aces": []}]}
+            groups = {"meta": {"type": "groups"}, "data": [
+                {"ObjectIdentifier": f"{B}-516",
+                 "Properties": {"name": "DOMAIN CONTROLLERS@CORP.LOCAL"},
+                 "Members": [{"ObjectIdentifier": f"{B}-1000", "ObjectType": "Computer"}],
+                 "Aces": []}]}
+            import json as _json
+            for n, b in (("computers", comps), ("groups", groups)):
+                with open(os.path.join(d, f"{n}.json"), "w") as fh:
+                    fh.write(_json.dumps(b))
+            fs = bh.findings(bh.load_graph(d))
+        self.assertFalse([f for f in fs if f["category"] == "delegation"])
+        # A non-DC computer with unconstrained delegation IS flagged.
+        with tempfile.TemporaryDirectory() as d:
+            comps = {"meta": {"type": "computers"}, "data": [
+                {"ObjectIdentifier": f"{B}-1001",
+                 "Properties": {"name": "APP01.CORP.LOCAL", "enabled": True,
+                                "unconstraineddelegation": True}, "Aces": []}]}
+            import json as _json
+            with open(os.path.join(d, "computers.json"), "w") as fh:
+                fh.write(_json.dumps(comps))
+            fs = bh.findings(bh.load_graph(d))
+        self.assertTrue([f for f in fs if f["category"] == "delegation"])
+
+    def test_enabled_null_is_treated_as_enabled(self):
+        from recce import bloodhound as bh
+        B = self.BASE
+        with tempfile.TemporaryDirectory() as d:
+            users = {"meta": {"type": "users"}, "data": [
+                {"ObjectIdentifier": f"{B}-1001",
+                 "Properties": {"name": "SVC@C", "enabled": None, "hasspn": True,
+                                "serviceprincipalnames": ["x/y"]}, "Aces": []}]}
+            import json as _json
+            with open(os.path.join(d, "users.json"), "w") as fh:
+                fh.write(_json.dumps(users))
+            fs = bh.findings(bh.load_graph(d))
+        self.assertTrue([f for f in fs if f["category"] == "kerberoast"])
+
+    def test_bare_string_members_do_not_crash(self):
+        from recce import bloodhound as bh
+        B = self.BASE
+        with tempfile.TemporaryDirectory() as d:
+            # Members / LocalAdmins as bare SID strings (older SharpHound).
+            groups = {"meta": {"type": "groups"}, "data": [
+                {"ObjectIdentifier": f"{B}-512", "Properties": {"name": "DA@C"},
+                 "Members": [f"{B}-1001"], "Aces": []}]}
+            comps = {"meta": {"type": "computers"}, "data": [
+                {"ObjectIdentifier": f"{B}-1000", "Properties": {"name": "WS@C"},
+                 "LocalAdmins": [f"{B}-1001"], "Aces": []}]}
+            import json as _json
+            for n, b in (("groups", groups), ("computers", comps)):
+                with open(os.path.join(d, f"{n}.json"), "w") as fh:
+                    fh.write(_json.dumps(b))
+            g = bh.load_graph(d)                                 # must not raise
+        labels = {(s.split("-")[-1], lbl, dd.split("-")[-1]) for s, lbl, dd in g["edges"]}
+        self.assertIn(("1001", "MemberOf", "512"), labels)
+        self.assertIn(("1001", "AdminTo", "1000"), labels)
+
+    def test_fill_creds_password_containing_a_token_is_safe(self):
+        from recce import bloodhound as bh
+        an = {"findings": [{"command": "run <DOMAIN>/<user>:<pass> against <dc>"}],
+              "kerberos": [], "paths": []}
+        # Password literally contains "<dc>" - must NOT be re-substituted.
+        bh.fill_creds(an, {"domain": "corp.local", "user": "alice",
+                           "secret": "p<dc>w", "is_hash": False, "dc_ip": "10.0.0.1"})
+        cmd = an["findings"][0]["command"]
+        self.assertIn("corp.local/alice:p<dc>w", cmd)            # password intact
+        self.assertTrue(cmd.endswith("against 10.0.0.1"))        # real <dc> filled
+
     def test_fill_creds_makes_commands_copy_paste_ready(self):
         from recce import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
@@ -3434,6 +3528,22 @@ class AdcsCertipyTest(unittest.TestCase):
         self.assertIn("certipy req", esc1["command"])
         self.assertIn("VulnUser", esc1["command"])               # real template name
         self.assertIn("Domain Users", esc1["principal"])         # who can enroll
+
+    def test_enrollment_rights_as_dict_does_not_crash(self):
+        from recce import adcs
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "c.json")
+            data = {"Certificate Templates": {"0": {
+                "Template Name": "VulnUser",
+                "Permissions": {"Enrollment Permissions": {
+                    "Enrollment Rights": {"CORP\\Domain Users": "Enroll"}}},  # dict form
+                "[!] Vulnerabilities": {"ESC1": "x"}}}}
+            import json as _json
+            with open(p, "w") as fh:
+                fh.write(_json.dumps(data))
+            fs = adcs.findings(p)                                # must not raise
+        self.assertTrue(fs)
+        self.assertIn("Domain Users", fs[0]["principal"])
 
     def test_certipy_flows_into_workbook_with_creds(self):
         from recce import cli, xlsx
