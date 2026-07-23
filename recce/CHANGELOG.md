@@ -55,11 +55,13 @@ totals, the prove engine, the reports, and its own workbook tab._
     critical/high findings sort to the top of each subnet, and the # Vulns cell is
     coloured by the worst severity.
   - **Vulnerabilities** and **Verification** fold by host (worst-hosts first), with
-    the Hostname column moved into the band and the Details preview bounded (~200
-    chars) so rows stop being tall walls of text — full evidence stays on Verification
-    and the write-ups.
+    the Hostname column moved into the band.
   - **Services** folds by host too, with Hostname moved into the band.
-  Identity columns stay frozen while you scroll, and every sheet keeps its autofilter.
+  Wide text columns (Finding, Details, Remediation, Evidence, Enum command, …) now
+  **wrap** so they read DOWN inside their column instead of running off to the right,
+  while narrow columns stay single-line — the Details/Evidence are shown in **full**,
+  never truncated. Identity columns stay frozen while you scroll, and every sheet
+  keeps its autofilter.
 - **Distribution is a plain drop-in tarball, not a wheel.** The shipped release
   artifact is the `make_package.sh` burn package — a single `recce-<version>/`
   directory you extract and run with `./bin/recce ...` (or `python3 -m recce`), no

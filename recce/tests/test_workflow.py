@@ -168,7 +168,9 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
         # ftp-anon is web02 only.
         self.assertIn("FTP", " ".join(r["Finding"] for r in by_ip.get("10.0.20.6", [])))
 
-    def test_grouped_by_host_no_hostname_col_and_bounded_details(self):
+    def test_grouped_by_host_no_hostname_col_and_full_details(self):
+        from recce.report_excel import build_workbook
+        from recce.models import Host, Port, Vuln
         rows = self.sheets["Vulnerabilities"]
         hdr = rows[0]
         self.assertNotIn("Hostname", hdr)                 # Hostname moved to the band
@@ -177,11 +179,21 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
         bands = [str(r[ipc]) for r in rows[1:] if "finding" in str(r[ipc])]
         self.assertTrue(bands)
         self.assertTrue(any("worst:" in b for b in bands))
-        # Details is a bounded preview, never a wall of text.
-        dc = hdr.index("Details")
-        for r in rows[1:]:
-            if len(r) > dc:
-                self.assertLessEqual(len(str(r[dc])), 210)
+        # Details is shown IN FULL (wrapped), never truncated with an ellipsis.
+        big = "A" * 1200
+        h = Host(ip="10.9.9.9", subnet="10.9.9.0/24", state="up", enumerated=True,
+                 ports=[Port(portid=445, service="smb")],
+                 vulns=[Vuln(ip="10.9.9.9", port=445, protocol="tcp", script_id="x",
+                             title="f", severity="high", source="nse", state="finding",
+                             output=big)])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([h], out)
+            vr = xlsx.read_sheets(out)["Vulnerabilities"]
+        dc = vr[0].index("Details")
+        detail = next(str(r[dc]) for r in vr[1:] if len(r) > dc and "A" in str(r[dc]))
+        self.assertEqual(detail, big)                     # full, untruncated
+        self.assertNotIn("…", detail)
 
     def test_exploit_column_proven_vs_candidate(self):
         _hdr, by_ip = rows_by_ip(self.sheets, "Vulnerabilities")

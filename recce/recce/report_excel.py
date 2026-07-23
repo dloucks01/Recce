@@ -126,6 +126,9 @@ _STEP_WIDTHS = {"Enumerated": 11, "Vuln-scan": 11, "Web": 7, "AD": 6, "DB": 6,
 # right-hand columns. 0 (default) freezes only the header row.
 _FREEZE_COLS = {"Checklist": 3, "Services": 2, "Vulnerabilities": 3,
                 "Verification": 2}
+# Any data column at least this wide wraps its text (so long cells read DOWN inside
+# their column instead of running off to the right); narrow columns stay single-line.
+_WRAP_WIDTH = 34
 
 
 def _spec_checklist(hosts: list[Host]) -> SheetSpec:
@@ -346,9 +349,10 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
     ordered.sort(key=lambda hv: (worst[hv[0].ip], _ip_sort_key(hv[0].ip),
                                  order.get((hv[1].severity or "").lower(), 9)))
     for h, v in ordered:
-        # A short preview only - the full evidence lives on Verification, the write-ups
-        # and Raw NSE; keeping this bounded stops the rows becoming tall walls of text.
-        out = v.output if len(v.output) <= 200 else v.output[:200].rstrip() + " …"
+        # Full output, shown in a wrapped column so it reads down inside its cell
+        # (never truncated). Rows fold under the per-host band, so verbose findings
+        # stay out of the way until you expand that host.
+        out = v.output
         rows.append({"key": tr.vuln_row_key(v), "group": h.ip,
                      "data": {
             "Severity": v.severity.upper(), "IP": h.ip,
@@ -812,6 +816,7 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             else:
                 val = data.get(header, "")
                 st = styles.get(header)
+                wide = _w >= _WRAP_WIDTH       # wide cols wrap so text reads down
                 if st:                        # styler-assigned accent (severity/wrap)
                     if st == "wrap":
                         st = "wrap_band" if band else "wrap"
@@ -821,7 +826,12 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
                 elif header == "IP":          # teal monospace accent
                     cells.append((val, "ip_band" if band else "ip"))
                 elif header in MONO_COLS:      # machine data -> monospace
-                    cells.append((val, "cell_band_mono" if band else "cell_mono"))
+                    if wide:
+                        cells.append((val, "wrap_band_mono" if band else "wrap_mono"))
+                    else:
+                        cells.append((val, "cell_band_mono" if band else "cell_mono"))
+                elif wide:                    # wide free-text -> wrap, don't run across
+                    cells.append((val, "wrap_band" if band else "wrap"))
                 else:
                     cells.append((val, data_style))
         sheet.write(cells, outline=(1 if grouped else 0))
@@ -921,9 +931,9 @@ def _build_guide(wb, meta: dict) -> None:
         ("Web", "Every HTTP/HTTPS endpoint (any port), its tech stack, web-finding "
                 "count, and the exact Kali deep-scan commands. Run `recce web`."),
         ("Vulnerabilities", "Findings folded under a collapsible per-host band (hosts "
-                            "with the worst findings first), severity-coloured, with a "
-                            "short Details preview; full evidence is on Verification / "
-                            "the write-ups."),
+                            "with the worst findings first), severity-coloured. Wide "
+                            "columns wrap so they read down, not across; Details is "
+                            "shown in full."),
         ("Exploits", "searchsploit matches (EDB-ID, type, CVEs, local path)."),
         ("Verification", "Is it REAL? Per-host collapsible bands; per-finding verdict "
                          "(CONFIRMED / LIKELY / FALSE POSITIVE / INCONCLUSIVE) with the "
