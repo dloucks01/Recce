@@ -176,6 +176,16 @@ def _v_potato(host, port, vuln):
                           "SeImpersonatePrivilege = Enabled. Use recce deploy/ingest to collect it."]
 
 
+def _v_smb_writable(host, port, vuln):
+    # recce STOR'd a marker to the share, listed it, and deleted it -> write proven.
+    return CONFIRMED, [
+        "recce proved this by writing a marker file to the share, listing it back, then "
+        "deleting it (reversible) - the write actually landed, it is not inferred from "
+        "an ACL.",
+        "Escalate within ROE: drop a poisoned .SCF/.URL/.LNK and capture NetNTLM with "
+        "Responder, or a web shell if the share backs a web root."]
+
+
 def _v_nullsession(host, port, vuln):
     if _nse_vulnerable(vuln) or re.search(r"logged in|shares|allows sessions", vuln.output or "", re.I):
         return CONFIRMED, ["The check actually established an anonymous/null session (it enumerated without "
@@ -530,6 +540,13 @@ _RECIPES: list[dict] = [
      "finish": "on-target: GodPotato -cmd \"cmd /c whoami\"  (expect: nt authority\\system) - within ROE.",
      "fp": "The privilege is present but DISABLED, or you don't actually have code exec in that token yet.",
      "fn": _v_potato},
+    {"id": "smb-writable-share", "match": r"writable smb share",
+     "name": "Writable SMB share (proven)",
+     "pre": ["SMB (445) reachable", "Write access to a non-admin share"],
+     "finish": "smbclient //<ip>/<share> -N -c 'put poison.scf'  then capture NetNTLM "
+               "with Responder, or drop a web shell if the share backs a web root.",
+     "fp": "None - recce already wrote and read back a marker file.",
+     "fn": _v_smb_writable},
     {"id": "smb-null-session", "match": r"null session|anonymous.*smb|smb.*anonymous|guest.*access|"
                                         r"smb-enum-shares",
      "name": "SMB null / anonymous session",

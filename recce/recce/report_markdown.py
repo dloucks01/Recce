@@ -79,8 +79,10 @@ def build_markdown(hosts: list[Host], out_path: str, title: str = "Enumeration R
     if findings:
         for h, v in findings:
             refs = f" [{', '.join(v.ids)}]" if v.ids else ""
+            label = v.title or v.script_id
+            src = f" _({v.source})_" if v.source and v.source != "nse" else ""
             lines.append(f"- `{h.ip}:{v.port or '-'}` **{v.severity.upper()}** "
-                         f"{v.script_id}{refs} - {v.state}")
+                         f"{label}{refs}{src}")
     else:
         lines.append("_No high/critical findings from automated scripts._")
     lines.append("")

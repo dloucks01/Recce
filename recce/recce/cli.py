@@ -3273,8 +3273,12 @@ def cmd_docker(args: argparse.Namespace) -> int:
         return 0
     print(f"[+] {len(tgts)} Docker endpoint(s):")
     for t in tgts:
-        state = "EXPOSED (unauth)" if t.get("exposed") else \
-            ("locked/tls" if t.get("exposed") is False else "not probed")
+        if t.get("exposed"):
+            state = "EXPOSED (unauth)"
+        elif t.get("probed"):
+            state = "locked (mutual-TLS / authenticated)"
+        else:
+            state = "not probed"
         extra = f"  {t.get('version', '')}" if t.get("version") else ""
         print(f"      {t['ip']}:{t['port']}  {state}{extra}")
 
@@ -3366,7 +3370,8 @@ def cmd_kubernetes(args: argparse.Namespace) -> int:
         return 0
     print(f"[+] {len(tgts)} Kubernetes surface(s):")
     for t in tgts:
-        exposed = t.get("anon_pods") or t.get("anon_list") or t.get("v2_readable")
+        exposed = (t.get("anon_pods") or t.get("anon_list")
+                   or t.get("v2_readable") or t.get("v3_readable"))
         state = "EXPOSED (unauth)" if exposed else \
             ("reachable" if t.get("reachable") else "not probed")
         print(f"      {t['ip']}:{t['port']}  {t.get('role', '')}  {state}")

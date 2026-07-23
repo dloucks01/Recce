@@ -97,10 +97,13 @@ def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict
             hello = _read_resp(s, timeout)
             if not re.search(r"^220", hello.strip()[:3]) and "220" not in hello[:8]:
                 return None
-            banner = ""
-            m = re.search(r"220[ -](.*)", hello)
-            if m:
-                banner = m.group(1).strip()
+            # A multi-line 220 greeting often carries the product/version on a LATER
+            # line (e.g. "220-Welcome\r\n220 ProFTPD 1.3.5 ready"). Join every 220
+            # line so the known-backdoor match sees the whole greeting, not just the
+            # first line.
+            parts = [m.group(1).strip() for m in
+                     re.finditer(r"(?m)^220[ -](.*)$", hello)]
+            banner = " ".join(p for p in parts if p).strip()
             feat = _cmd(s, "FEAT", timeout)
             auth_tls = bool(re.search(r"\bAUTH\s+TLS\b|\bAUTH\s+SSL\b|\bFTPS\b",
                                       feat, re.I))

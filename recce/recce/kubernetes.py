@@ -6,9 +6,9 @@ Stdlib-only HTTP(S) probes of the cluster's most dangerous network exposures:
     exposes /exec /run - code execution inside any pod on the node (→ node, often
     cluster, compromise). The deprecated **read-only port** (10255, HTTP) leaks the
     full pod spec (env-var secrets, images) with no auth at all.
-  * **kube-apiserver** (6443 / 8443 HTTPS, or the legacy insecure 8080): whether the
-    `system:anonymous` user can reach the API and, critically, whether RBAC lets it
-    LIST namespaces / secrets (a 200 = cluster-wide read, often game over).
+  * **kube-apiserver** (6443 / 8443 HTTPS): whether the `system:anonymous` user can
+    reach the API and, critically, whether RBAC lets it LIST namespaces / secrets
+    (a 200 = cluster-wide read, often game over).
   * **etcd** (2379): the cluster's backing store; unauthenticated read = every Secret
     (all service-account tokens, TLS keys) in plaintext.
 
@@ -27,7 +27,11 @@ from .models import Host, Port
 _TIMEOUT = 6.0
 _KUBELET = 10250
 _KUBELET_RO = 10255
-_API_PORTS = (6443, 8443, 8080)
+# 6443 is the secure apiserver; 8443 is the common alt. The legacy --insecure-port
+# (8080) was removed in Kubernetes 1.20, and 8080 is a very common generic-HTTP port,
+# so recce only treats it as an apiserver when nmap names the service kube-apiserver
+# (handled in is_k8s), never by bare port number.
+_API_PORTS = (6443, 8443)
 _ETCD = 2379
 _K8S_PORTS = (_KUBELET, _KUBELET_RO, 6443, 8443, _ETCD)
 
@@ -53,8 +57,9 @@ def role(port: int) -> str:
     return "unknown"
 
 
-def _get(ip: str, port: int, path: str, tls: bool, timeout: float = _TIMEOUT):
-    """GET a path. Returns (status, parsed_json_or_text) or None."""
+def _req(ip: str, port: int, path: str, tls: bool, method: str = "GET",
+         body: str | None = None, timeout: float = _TIMEOUT):
+    """Issue one request. Returns (status, parsed_json_or_text) or None."""
     conn = None
     try:
         if tls:
@@ -62,14 +67,16 @@ def _get(ip: str, port: int, path: str, tls: bool, timeout: float = _TIMEOUT):
                 ip, port, timeout=timeout, context=ssl._create_unverified_context())
         else:
             conn = http.client.HTTPConnection(ip, port, timeout=timeout)
-        conn.request("GET", path, headers={"Accept": "application/json",
-                                           "User-Agent": "recce-k8s/1.0"})
+        headers = {"Accept": "application/json", "User-Agent": "recce-k8s/1.0"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
-        body = resp.read(262144).decode("utf-8", "replace")
+        raw = resp.read(262144).decode("utf-8", "replace")
         try:
-            return resp.status, json.loads(body)
+            return resp.status, json.loads(raw)
         except ValueError:
-            return resp.status, body
+            return resp.status, raw
     except (OSError, http.client.HTTPException, ssl.SSLError, ValueError):
         return None
     finally:
@@ -78,6 +85,11 @@ def _get(ip: str, port: int, path: str, tls: bool, timeout: float = _TIMEOUT):
                 conn.close()
             except OSError:
                 pass
+
+
+def _get(ip: str, port: int, path: str, tls: bool, timeout: float = _TIMEOUT):
+    """GET a path. Returns (status, parsed_json_or_text) or None."""
+    return _req(ip, port, path, tls, "GET", None, timeout)
 
 
 def _try_get(ip, port, path, timeout):
@@ -133,9 +145,19 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
             return None
         out["tls"] = tls
         out["etcd_version"] = _etcd_version(ver[1])
+        # v2 keys API (disabled by default since etcd 3.4, but still seen on older
+        # clusters).
         keys, _ = _try_get(ip, port, "/v2/keys/?recursive=true", timeout)
         out["v2_readable"] = bool(keys and keys[0] == 200
                                   and isinstance(keys[1], dict) and "node" in keys[1])
+        # v3 gRPC-gateway (what every modern Kubernetes ships): an unauthenticated
+        # maintenance/status read = no client-cert-auth = the whole store is readable.
+        v3 = _req(ip, port, "/v3/maintenance/status", tls, "POST", "{}", timeout)
+        if v3 is None:
+            v3 = _req(ip, port, "/v3/maintenance/status", not tls, "POST", "{}", timeout)
+        out["v3_readable"] = bool(v3 and v3[0] == 200 and isinstance(v3[1], dict)
+                                  and ("version" in v3[1] or "dbSize" in v3[1]
+                                       or "header" in v3[1]))
         return out
     return None
 
@@ -315,12 +337,14 @@ def findings(hosts: list[Host], probes: dict | None = None) -> list[dict]:
                         "Disable anonymous auth (--anonymous-auth=false) unless a health "
                         "endpoint requires it.",
                         ["CWE-306"], kind="api_anon_open"))
-            elif r == "etcd" and pr.get("v2_readable"):
+            elif r == "etcd" and (pr.get("v2_readable") or pr.get("v3_readable")):
+                api = "v2 keys" if pr.get("v2_readable") else "v3 gRPC-gateway"
                 out.append(_finding(
                     "critical", "etcd exposed unauthenticated (all cluster secrets)",
-                    tgt, "etcd answered an unauthenticated key read. etcd holds every "
-                    "Kubernetes object in the clear, including all Secrets (service-"
-                    f"account tokens, TLS keys).  Version: {pr.get('etcd_version', '?')}.",
+                    tgt, f"etcd answered an unauthenticated read via its {api} API. etcd "
+                    "holds every Kubernetes object in the clear, including all Secrets "
+                    "(service-account tokens, TLS keys).  Version: "
+                    f"{pr.get('etcd_version', '?')}.",
                     "etcdctl",
                     "ETCDCTL_API=3 etcdctl --endpoints <ip>:2379 get / --prefix --keys-only "
                     "; ... get /registry/secrets/... (dump secrets - ROE)",
@@ -400,7 +424,8 @@ def analyze(hosts: list[Host], active: bool = True) -> dict:
                 probes[(t["ip"], t["port"])] = pr
                 t["reachable"] = True
                 for k in ("anon_pods", "anon_list", "anon_secrets", "v2_readable",
-                          "version", "etcd_version", "pod_count", "anon_status"):
+                          "v3_readable", "version", "etcd_version", "pod_count",
+                          "anon_status"):
                     if k in pr:
                         t[k] = pr[k]
     fs = findings(hosts, probes)
