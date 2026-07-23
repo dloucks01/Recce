@@ -2320,6 +2320,9 @@ class HtmlReportTest(unittest.TestCase):
                         "Hosts", "CVE-2017-0143"):
             self.assertIn(section, html)
         self.assertIn("smb-vuln-ms17-010 &lt;x&gt;", html)   # HTML-escaped title
+        # Attack-path graph is embedded (Mermaid), copyable and offline.
+        self.assertIn('class="mermaid', html)
+        self.assertIn("flowchart LR", html)
 
     def test_empty_hosts_ok(self):
         from recce import report_html
@@ -3111,6 +3114,48 @@ class AttackPathTest(unittest.TestCase):
         h = Host(ip="10.0.0.1", os_family="Linux",
                  ports=[Port(portid=23, service="telnet")])
         self.assertEqual(ap.build([h]), [])              # no confirmed findings
+
+    def test_mermaid_graph(self):
+        from recce import attackpath as ap
+        hosts = self._hosts()
+        mmd = ap.mermaid(hosts)
+        self.assertTrue(mmd.startswith("flowchart LR"))
+        self.assertIn('subgraph S0["Initial Access"]', mmd)
+        self.assertIn("10.0.10.5", mmd)                  # real host in a node
+        self.assertIn("-->", mmd)                        # stage-to-stage flow
+        # Same host walks stages -> a dashed continuity edge.
+        self.assertIn("same host", mmd)
+
+    def test_dot_graph(self):
+        from recce import attackpath as ap
+        hosts = self._hosts()
+        dot = ap.dot(hosts)
+        self.assertTrue(dot.startswith("digraph attack_path {"))
+        self.assertIn("rankdir=LR", dot)
+        self.assertIn("cluster_0", dot)
+        self.assertIn("10.0.10.5", dot)
+        self.assertTrue(dot.rstrip().endswith("}"))
+
+    def test_graph_empty_is_valid(self):
+        from recce import attackpath as ap
+        h = Host(ip="10.0.0.1", os_family="Linux",
+                 ports=[Port(portid=23, service="telnet")])
+        self.assertIn("flowchart LR", ap.mermaid([h]))
+        self.assertIn("digraph", ap.dot([h]))
+
+    def test_cmd_writes_graph_files(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as dd:
+            db = os.path.join(dd, "results.sqlite")
+            st = Store(db)
+            for h in self._hosts():
+                st.upsert_host(h)
+            st.close()
+            rc = cli.cmd_attackpath(SimpleNamespace(output_dir=dd, targets=[]))
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(os.path.join(dd, "attack_path.mmd")))
+            self.assertTrue(os.path.exists(os.path.join(dd, "attack_path.dot")))
 
 
 class AVAwarenessTest(unittest.TestCase):

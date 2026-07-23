@@ -141,6 +141,14 @@ _Accumulating fixes since 0.2.3; folded into the next tagged release._
     - **WordPress plugin/version enum (wpscan-lite)** — core version (generator /
       `readme.html`), XML-RPC status, and a common-plugin sweep with each plugin's
       version from its `readme.txt` Stable tag.
+- **Attack-path graph.** `recce attackpath` now also writes the synthesised path
+  as a diagram — `attack_path.mmd` (Mermaid: stage subgraphs left-to-right, one
+  node per confirmed step `host + finding`, dashed edges tracking a single box
+  walked through the stages) and `attack_path.dot` (Graphviz: `dot -Tpng
+  attack_path.dot -o attack_path.png`). Both are grounded purely in confirmed
+  findings — no new scanning. The Mermaid source is also embedded, copyable, in
+  the HTML report's Attack-path section (offline: no external JS), so the graph
+  travels with the report and pastes straight into mermaid.live / GitHub.
 - **`exploitplan` now emits benign PoC build recipes — the payload source, the
   build command, and the delivery — not just "drop a binary here."** For each
   confirmed finding it writes the standard, documented artifact to
