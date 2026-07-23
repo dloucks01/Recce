@@ -17,8 +17,18 @@ All notable changes to recce are documented here. Dates are UTC.
   Vulnerabilities sheet, the write-ups, a dedicated **LDAP** workbook tab, the prove
   engine (anonymous-bind / anonymous-read / cleartext each adjudicated CONFIRMED —
   recce performed the bind itself), the exploit plan (ldapsearch enumeration,
-  ntlmrelayx relay), the `status` service-module coverage, and the Checklist
-  auto-tick. Optional `-u/-p/-d` only pre-fills the credentialed follow-on commands.
+  ntlmrelayx relay), the `status` service-module coverage, and the Checklist auto-tick.
+  - **Authenticated enumeration is now in-house too** (`recce ldap -u U -p P -d DOM`):
+    the stdlib client does a UPN simple bind and **paged** subtree searches (walking
+    past AD's MaxPageSize via the SimplePagedResults control) for users, computers and
+    the domain object, deriving kerberoastable / AS-REP-roastable / unconstrained- &
+    constrained-delegation / privileged / disabled from the `userAccountControl` bits
+    and attributes. It produces `Account` objects that flow straight into **Users &
+    Accounts, AD Quick Wins, Kerberoast and AS-REP** — no hand-off to nxc/bloodhound-
+    python — plus module findings for machine-account-quota > 0, a zero lockout
+    threshold (spray-friendly), and passwords in `description` fields. An extensible-
+    match filter encoder (`userAccountControl:1.2.840.113556.1.4.803:=…`) backs the
+    bit tests. LDAPS (636/3269) is TLS-wrapped for the authenticated bind too.
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a

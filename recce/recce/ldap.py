@@ -110,16 +110,106 @@ def build_bind_request(msgid: int = 1, dn: str = "", password: str = "") -> byte
 
 
 def build_search_request(msgid: int, base: str, scope: int,
-                         attributes: list[str]) -> bytes:
-    """LDAPMessage{ msgid, [APPLICATION 3] SearchRequest{...} } with the present
-    filter (objectClass=*). scope: 0 base / 1 one-level / 2 subtree."""
-    filt = _tlv(0x87, b"objectClass")               # present filter [7] "objectClass"
+                         attributes: list[str], filt: bytes | None = None,
+                         size_limit: int = 0, cookie: bytes | None = None,
+                         page_size: int = 0) -> bytes:
+    """LDAPMessage{ msgid, [APPLICATION 3] SearchRequest{...}, [0] controls? }.
+
+    scope: 0 base / 1 one-level / 2 subtree. `filt` is raw Filter bytes (default the
+    present filter (objectClass=*)). Pass page_size (+ a cookie from a previous page)
+    to attach the SimplePagedResults control - required to walk past AD's MaxPageSize."""
+    if filt is None:
+        filt = _tlv(0x87, b"objectClass")           # present filter [7] "objectClass"
     attrs = _tlv(0x30, b"".join(_octet(a) for a in attributes))
     body = (_octet(base) + _enum(scope) + _enum(0)  # derefAliases = neverDerefAliases
-            + _int(0) + _int(0) + _boolean(False)   # sizeLimit, timeLimit, typesOnly
+            + _int(size_limit) + _int(0) + _boolean(False)   # sizeLimit, timeLimit, typesOnly
             + filt + attrs)
     searchreq = _tlv(0x63, body)                    # [APPLICATION 3] constructed
-    return _tlv(0x30, _int(msgid) + searchreq)
+    msg = _int(msgid) + searchreq
+    if page_size:
+        msg += _paged_control(page_size, cookie or b"")
+    return _tlv(0x30, msg)
+
+
+# --- Filter encoders (RFC 4511 4.5.1) -------------------------------------------
+
+def f_equal(attr: str, value: str) -> bytes:
+    """equalityMatch [3] SEQUENCE{ attributeDesc, assertionValue }."""
+    return _tlv(0xA3, _octet(attr) + _octet(value))
+
+
+def f_present(attr: str) -> bytes:
+    """present [7] AttributeDescription."""
+    return _tlv(0x87, attr.encode())
+
+
+def f_and(*subs: bytes) -> bytes:
+    return _tlv(0xA0, b"".join(subs))               # and [0]
+
+
+def f_or(*subs: bytes) -> bytes:
+    return _tlv(0xA1, b"".join(subs))               # or [1]
+
+
+def f_not(sub: bytes) -> bytes:
+    return _tlv(0xA2, sub)                           # not [2]
+
+
+# LDAP_MATCHING_RULE_BIT_AND - test individual userAccountControl bits.
+_RULE_BIT_AND = "1.2.840.113556.1.4.803"
+
+
+def f_bitand(attr: str, bit: int, rule: str = _RULE_BIT_AND) -> bytes:
+    """extensibleMatch [9] MatchingRuleAssertion - e.g. a userAccountControl bit test
+    (AS-REP: userAccountControl:1.2.840.113556.1.4.803:=4194304)."""
+    return _tlv(0xA9, _tlv(0x81, rule.encode())     # matchingRule [1]
+                + _tlv(0x82, attr.encode())         # type [2]
+                + _tlv(0x83, str(bit).encode()))    # matchValue [3]
+
+
+# --- SimplePagedResults control (1.2.840.113556.1.4.319) ------------------------
+
+_PAGED_OID = "1.2.840.113556.1.4.319"
+
+
+def _paged_control(page_size: int, cookie: bytes = b"") -> bytes:
+    val = _tlv(0x30, _int(page_size) + _octet(cookie))    # realSearchControlValue
+    control = _tlv(0x30, _octet(_PAGED_OID) + _octet(val))
+    return _tlv(0xA0, control)                             # controls [0] SEQ OF Control
+
+
+def _extract_cookie(done_msg: bytes) -> bytes:
+    """The paged-results cookie from a searchResDone's response controls (b'' = done)."""
+    try:
+        _, body, _ = _parse_tlv(done_msg, 0)
+        _, _mid, i = _parse_tlv(body, 0)
+        _, _op, i = _parse_tlv(body, i)             # protocolOp (searchResDone)
+        if i >= len(body):
+            return b""
+        tag, controls, _ = _parse_tlv(body, i)      # controls [0]
+        if tag != 0xA0:
+            return b""
+        j = 0
+        while j < len(controls):
+            _, ctl, j = _parse_tlv(controls, j)     # one Control SEQUENCE
+            _, ctype, k = _parse_tlv(ctl, 0)
+            if ctype.decode("latin-1") != _PAGED_OID:
+                continue
+            # value is the last OCTET STRING in the control (criticality may precede).
+            last = None
+            while k < len(ctl):
+                t, v, k = _parse_tlv(ctl, k)
+                if t == 0x04:
+                    last = v
+            if last is None:
+                return b""
+            _, inner, _ = _parse_tlv(last, 0)        # SEQ{ size, cookie }
+            _, _size, m = _parse_tlv(inner, 0)
+            _, cookie, _ = _parse_tlv(inner, m)
+            return cookie
+        return b""
+    except (IndexError, ValueError):
+        return b""
 
 
 # --- BER decoding ---------------------------------------------------------------
@@ -224,7 +314,14 @@ def _read_message(sock, timeout: float) -> bytes | None:
 
 def _read_search(sock, timeout: float, cap: int = 64) -> list[dict]:
     """Collect searchResEntry attribute dicts until searchResDone / cap / EOF."""
-    entries = []
+    return _read_search_paged(sock, timeout, cap)[0]
+
+
+def _read_search_paged(sock, timeout: float,
+                       cap: int = 4000) -> tuple[list[dict], bytes]:
+    """Collect one page of searchResEntry attribute dicts; return (entries, cookie).
+    cookie is the SimplePagedResults cookie off the searchResDone (b'' = last page)."""
+    entries: list[dict] = []
     for _ in range(cap):
         msg = _read_message(sock, timeout)
         if msg is None:
@@ -237,8 +334,8 @@ def _read_search(sock, timeout: float, cap: int = 64) -> list[dict]:
             except (IndexError, ValueError):
                 continue
         elif op == 0x65:                            # searchResDone
-            break
-    return entries
+            return entries, _extract_cookie(msg)
+    return entries, b""
 
 
 # --- credential-free probe ------------------------------------------------------
@@ -345,6 +442,245 @@ def ldap_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
+# --- authenticated enumeration (stdlib) -----------------------------------------
+
+# userAccountControl bits (MS-ADTS 2.2.16).
+_UAC_DISABLED = 0x0002
+_UAC_DONT_EXPIRE = 0x10000
+_UAC_TRUSTED_FOR_DELEG = 0x80000        # unconstrained delegation
+_UAC_DONT_REQ_PREAUTH = 0x400000        # AS-REP roastable
+_UAC_TRUSTED_TO_AUTH = 0x1000000        # constrained delegation w/ protocol transition
+
+_USER_ATTRS = ["sAMAccountName", "userPrincipalName", "userAccountControl",
+               "servicePrincipalName", "memberOf", "adminCount", "description",
+               "msDS-AllowedToDelegateTo"]
+_COMPUTER_ATTRS = ["sAMAccountName", "dNSHostName", "operatingSystem",
+                   "userAccountControl", "msDS-AllowedToDelegateTo"]
+_DOMAIN_ATTRS = ["ms-DS-MachineAccountQuota", "minPwdLength", "lockoutThreshold",
+                 "maxPwdAge"]
+# Description/comment fields that look like they hold a secret.
+_PW_HINT = ("pass", "pwd", "pw=", "pw:", "secret", "cred", "kennwort", "mot de passe")
+
+
+def _open(ip: str, port: int, timeout: float):
+    """A connected (TLS-wrapped for 636/3269) socket, or None. Caller closes."""
+    try:
+        raw = socket.create_connection((ip, port), timeout=timeout)
+    except OSError:
+        return None
+    if not _is_tls_port(port):
+        return raw
+    import ssl
+    try:
+        return ssl._create_unverified_context().wrap_socket(raw, server_hostname=ip)
+    except (OSError, ssl.SSLError, ValueError):
+        try:
+            raw.close()
+        except OSError:
+            pass
+        return None
+
+
+def _bind_dn(creds: dict) -> str:
+    """AD accepts a userPrincipalName for a simple bind; build user@domain unless the
+    operator already passed a UPN / DOMAIN\\user / full DN."""
+    user = creds.get("user", "")
+    domain = creds.get("domain", "")
+    if any(c in user for c in ("@", "\\", "=")):
+        return user
+    return f"{user}@{domain}" if domain else user
+
+
+def _paged_search(sock, base: str, filt: bytes, attrs: list[str], timeout: float,
+                  msgid_start: int = 10, page_size: int = 200,
+                  max_pages: int = 500) -> list[dict]:
+    """Subtree search walking every SimplePagedResults page (past AD's MaxPageSize)."""
+    out: list[dict] = []
+    cookie, mid = b"", msgid_start
+    for _ in range(max_pages):
+        sock.sendall(build_search_request(mid, base, 2, attrs, filt=filt,
+                                          cookie=cookie, page_size=page_size))
+        entries, cookie = _read_search_paged(sock, timeout)
+        out.extend(entries)
+        mid += 1
+        if not cookie:
+            break
+    return out
+
+
+def enum_authenticated(ip: str, port: int, base: str, creds: dict,
+                       timeout: float = _TIMEOUT) -> dict:
+    """Authenticated LDAP enumeration over the stdlib client: simple-bind with creds,
+    then paged-search users + computers + the domain object. {users, computers,
+    domain, error}. Simple bind sends the password (encrypted on LDAPS; cleartext on
+    389 - the operator's choice, same as ldapsearch -x -w)."""
+    sock = _open(ip, port, timeout)
+    if sock is None:
+        return {"error": "connect failed"}
+    try:
+        sock.settimeout(timeout)
+        sock.sendall(build_bind_request(1, _bind_dn(creds), creds.get("secret", "")))
+        rc = result_code(_read_message(sock, timeout))
+        if rc != 0:
+            return {"error": f"authenticated bind rejected (LDAP result {rc})",
+                    "bind_dn": _bind_dn(creds)}
+        users = _paged_search(sock, base,
+                              f_and(f_equal("objectCategory", "person"),
+                                    f_equal("objectClass", "user")),
+                              _USER_ATTRS, timeout, msgid_start=10)
+        computers = _paged_search(sock, base, f_equal("objectClass", "computer"),
+                                  _COMPUTER_ATTRS, timeout, msgid_start=1000)
+        sock.sendall(build_search_request(9000, base, 0, _DOMAIN_ATTRS))
+        dom = _read_search(sock, timeout)
+        return {"users": users, "computers": computers,
+                "domain": dom[0] if dom else {}, "bind_dn": _bind_dn(creds),
+                "error": None}
+    except OSError as e:
+        return {"error": f"enumeration error: {e}"}
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _uac(attrs: dict) -> int:
+    try:
+        return int(_first(attrs, "userAccountControl", "0"))
+    except ValueError:
+        return 0
+
+
+def _dn_cn(dn: str) -> str:
+    head = dn.split(",", 1)[0]
+    return head[3:] if head[:3].upper() == "CN=" else head
+
+
+def _user_account(attrs: dict, domain: str, dc_ip: str) -> "object | None":
+    from .models import Account
+    name = _first(attrs, "sAMAccountName")
+    if not name:
+        return None
+    uac = _uac(attrs)
+    a: dict = {"uac": str(uac)}
+    spns = attrs.get("servicePrincipalName") or []
+    if spns and name.lower() != "krbtgt":
+        a["spn"] = spns[0] if len(spns) == 1 else "; ".join(spns[:4])
+    if uac & _UAC_DONT_REQ_PREAUTH:
+        a["asrep_roastable"] = "yes"
+    if _first(attrs, "adminCount") == "1":
+        a["admincount"] = "1"
+    mo = attrs.get("memberOf") or []
+    if mo:
+        a["memberof"] = "; ".join(_dn_cn(g) for g in mo[:8])
+    deleg = attrs.get("msDS-AllowedToDelegateTo") or []
+    if uac & _UAC_TRUSTED_FOR_DELEG:
+        a["delegation"] = "unconstrained"
+    elif deleg:
+        a["delegation"] = "constrained -> " + "; ".join(deleg[:3])
+    elif uac & _UAC_TRUSTED_TO_AUTH:
+        a["delegation"] = "constrained (protocol transition)"
+    a["enabled"] = "false" if uac & _UAC_DISABLED else "true"
+    desc = _first(attrs, "description")
+    if desc:
+        a["description"] = desc
+    return Account(ip=dc_ip, source="ldap", kind="user", name=name, domain=domain,
+                   detail=_first(attrs, "userPrincipalName") or desc, attrs=a)
+
+
+def _computer_account(attrs: dict, domain: str, dc_ip: str) -> "object | None":
+    """Only computers with delegation are worth an Account row (they are attack-path
+    pivots); the rest would just flood Users & Accounts."""
+    from .models import Account
+    name = _first(attrs, "sAMAccountName")
+    uac = _uac(attrs)
+    deleg = attrs.get("msDS-AllowedToDelegateTo") or []
+    kind = ("unconstrained" if uac & _UAC_TRUSTED_FOR_DELEG
+            else ("constrained -> " + "; ".join(deleg[:3]) if deleg else ""))
+    if not name or not kind:
+        return None
+    return Account(ip=dc_ip, source="ldap", kind="computer", name=name, domain=domain,
+                   detail=_first(attrs, "dNSHostName") or _first(attrs, "operatingSystem"),
+                   attrs={"delegation": kind, "uac": str(uac)})
+
+
+def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict, list]:
+    """Fold an authenticated-enum result onto a DC host: (re)build its LDAP accounts and
+    return (summary_for_target, module_findings). Refreshes source='ldap' accounts so a
+    re-run doesn't duplicate."""
+    users = en.get("users") or []
+    computers = en.get("computers") or []
+    accts = [a for a in (_user_account(u, domain, dc_ip) for u in users) if a]
+    accts += [a for a in (_computer_account(c, domain, dc_ip) for c in computers) if a]
+    if host is not None:
+        host.accounts = [a for a in host.accounts if a.source != "ldap"] + accts
+        if not host.ntlm.get("dns_domain") and domain:
+            host.ntlm = {**host.ntlm, "dns_domain": domain}
+
+    kerb = [a for a in accts if a.kind == "user" and a.attrs.get("spn")]
+    asrep = [a for a in accts if a.attrs.get("asrep_roastable") == "yes"]
+    uncon = [a for a in accts if a.attrs.get("delegation") == "unconstrained"]
+    pw_desc = [a for a in accts if a.kind == "user" and any(
+        h in (a.attrs.get("description", "").lower()) for h in _PW_HINT)]
+
+    dom = en.get("domain") or {}
+    try:
+        maq = int(_first(dom, "ms-DS-MachineAccountQuota", "0"))
+    except ValueError:
+        maq = 0
+    try:
+        lockout = int(_first(dom, "lockoutThreshold", "-1"))
+    except ValueError:
+        lockout = -1
+
+    tgt = f"{dc_ip}:{port}"
+    fs = [_finding(
+        "info", "Authenticated LDAP enumeration", tgt,
+        f"Bound as {en.get('bind_dn', '')} and enumerated {len(users)} user(s) and "
+        f"{len(computers)} computer(s): {len(kerb)} kerberoastable, {len(asrep)} "
+        f"AS-REP-roastable, {len(uncon)} with unconstrained delegation. These populate "
+        "the Users & Accounts, AD Quick Wins, Kerberoast and AS-REP report views.",
+        "ldapsearch / netexec",
+        f"nxc ldap {dc_ip} -u <user> -p <pass> --users --kerberoasting kerb.txt",
+        "Review privileged accounts, SPNs and delegation; this is expected read access "
+        "for an authenticated principal.", ["CWE-200"], kind="")]
+    if maq > 0:
+        fs.append(_finding(
+            "medium", "Machine account quota allows adding computers", tgt,
+            f"ms-DS-MachineAccountQuota = {maq}: any authenticated user can join up to "
+            f"{maq} computer account(s) to the domain - the primitive behind RBCD and "
+            "several coercion->relay chains.", "netexec / addcomputer",
+            f"nxc ldap {dc_ip} -u <user> -p <pass> -M maq   # or impacket-addcomputer",
+            "Set ms-DS-MachineAccountQuota to 0 and delegate machine-join to a specific "
+            "group.", ["CWE-284"], kind="ldap_maq"))
+    if lockout == 0:
+        fs.append(_finding(
+            "medium", "No account lockout threshold (password-spray friendly)", tgt,
+            "The domain lockoutThreshold is 0 - accounts never lock, so an attacker can "
+            "password-spray the whole user list recce just enumerated with no risk of "
+            "lockout.", "netexec (spray)",
+            f"nxc ldap {dc_ip} -u users.txt -p 'Season2025!' --continue-on-success",
+            "Set a lockout threshold (e.g. 5-10) with an observation window.",
+            ["CWE-307"], kind="ldap_lockout"))
+    if pw_desc:
+        names = ", ".join(a.name for a in pw_desc[:12])
+        fs.append(_finding(
+            "high", "Passwords in LDAP description/comment fields", tgt,
+            f"{len(pw_desc)} account description(s) look like they contain a credential "
+            f"(e.g. {names}). Descriptions are world-readable to any authenticated user - "
+            "a classic source of valid passwords.", "ldapsearch",
+            f"ldapsearch -x -H ldap://{dc_ip} -D '<user>@{domain}' -w '<pass>' -b '<base>' "
+            "'(description=*)' sAMAccountName description",
+            "Remove secrets from description/info attributes; rotate the exposed passwords.",
+            ["CWE-522", "CWE-200"], kind="ldap_pw_desc"))
+
+    summary = {"auth_ok": True, "auth_users": len(users),
+               "auth_computers": len(computers), "kerberoastable": len(kerb),
+               "asrep": len(asrep), "unconstrained_deleg": len(uncon),
+               "maq": maq, "lockout": lockout}
+    return summary, fs
+
+
 # --- narratives -----------------------------------------------------------------
 
 _NARRATIVE = {
@@ -374,6 +710,23 @@ _NARRATIVE = {
         "protection is what lets an attacker relay coerced NTLM authentication to LDAP "
         "(ntlmrelayx) to create machine accounts or grant DCSync. Require LDAPS/StartTLS "
         "and enforce LDAP signing + channel binding."),
+    "ldap_maq": (
+        "The domain's ms-DS-MachineAccountQuota lets an ordinary authenticated user "
+        "create computer accounts. An attacker with any domain credential adds a machine "
+        "account they control, which is the primitive behind resource-based constrained "
+        "delegation (RBCD) and several coercion->relay privilege-escalation chains. Set "
+        "the quota to 0 and delegate machine-join to a named group."),
+    "ldap_lockout": (
+        "The domain enforces no account-lockout threshold, so credentials never lock on "
+        "repeated failures. Against the full user list recce just enumerated, an attacker "
+        "can password-spray common passwords indefinitely with no risk of locking anyone "
+        "out - a reliable path to a first valid credential. Set a lockout threshold and "
+        "observation window."),
+    "ldap_pw_desc": (
+        "Account description/info attributes contain what look like passwords. Those "
+        "fields are readable by every authenticated user, so a single low-privileged "
+        "credential harvests them - a recurring source of valid, often privileged, "
+        "passwords. Remove secrets from directory attributes and rotate anything exposed."),
 }
 
 
@@ -394,9 +747,15 @@ TESTING_NARRATIVE = [
     ("3. RootDSE recon",
      "The domain and forest DNS names, DC FQDN, functional level and SASL mechanisms are "
      "captured pre-auth and pre-filled into the follow-on ldapsearch / netexec commands."),
-    ("4. Runbook",
-     "The exact anonymous and credentialed enumeration commands (ldapsearch, nxc ldap "
-     "--users/--groups/--kerberoasting, bloodhound-python) are staged per DC."),
+    ("4. Authenticated enumeration (with -u/-p/-d)",
+     "The same stdlib client simple-binds with the supplied credential and PAGES the "
+     "directory (past AD's MaxPageSize) for users, computers and the domain object, "
+     "deriving kerberoastable / AS-REP-roastable / delegation / privileged accounts from "
+     "the userAccountControl bits - in-house, no nxc/bloodhound hand-off. The accounts "
+     "populate Users & Accounts, AD Quick Wins, Kerberoast and AS-REP directly."),
+    ("5. Runbook",
+     "The exact anonymous and credentialed follow-on commands (ldapsearch, nxc ldap "
+     "--kerberoasting/--asreproast, bloodhound-python for the full graph) are staged per DC."),
 ]
 
 
@@ -544,9 +903,16 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 def analyze(hosts: list[Host], creds: dict | None = None,
             active: bool = True) -> dict:
-    """Full LDAP analysis. Returns {targets, findings, runbooks, probes, stats}."""
+    """Full LDAP analysis. Returns {targets, findings, runbooks, probes, stats}.
+
+    When creds are supplied and active, also runs AUTHENTICATED enumeration per DC
+    (paged users/computers/domain) and folds the resulting Account objects onto the
+    matching host in place - so they populate Users & Accounts, AD Quick Wins,
+    Kerberoast and AS-REP without a hand-off to nxc/bloodhound-python."""
     targets = ldap_targets(hosts)
+    host_by_ip = {h.ip: h for h in hosts}
     probes: dict = {}
+    auth_fs: list[dict] = []
     if active:
         for t in targets:
             pr = probe(t["ip"], t["port"])
@@ -558,7 +924,17 @@ def analyze(hosts: list[Host], creds: dict | None = None,
                 t["anon_read"] = pr.get("anon_read", False)
                 t["dc_level"] = pr.get("dc_level", "")
                 t["naming_context"] = pr.get("naming_context", "")
-    fs = findings(hosts, probes)
+            base = t.get("naming_context") or (pr or {}).get("naming_context") or ""
+            if creds and base:
+                en = enum_authenticated(t["ip"], t["port"], base, creds)
+                if en.get("error"):
+                    t["auth_error"] = en["error"]
+                else:
+                    summary, afs = apply_enum(host_by_ip.get(t["ip"]),
+                                              t.get("domain", ""), t["ip"], t["port"], en)
+                    t.update(summary)
+                    auth_fs.extend(afs)
+    fs = findings(hosts, probes) + auth_fs
     runbooks = []
     for t in targets:
         base = t.get("naming_context", "")
