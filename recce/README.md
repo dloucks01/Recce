@@ -702,6 +702,15 @@ provable runbook:
   object / a DC, rendered as an edge chain with the abuse per hop.
 - **Kerberos actions for effect** — roast, AS-REP, DCSync, delegation ticket
   forging, staged with your credential.
+- **Live Kerberos capture (opt-in)** — with creds + `--dc-ip`, recce doesn't just
+  *stage* the roast, it **runs** the published impacket tools to capture the real
+  crackable material and folds each capture in as a **proven** finding:
+  `--roast` (`GetUserSPNs -request` → live TGS-REP hashes), `--asrep`
+  (`GetNPUsers -request` → AS-REP hashes), `--dcsync` (`secretsdump -just-dc` →
+  replicated NTLM hashes incl. **krbtgt**). All three are read-only (request
+  tickets / replicate secrets — nothing is modified). Captured hashes land in
+  `eng/loot/` ready for `hashcat`; `--screenshots` saves terminal-output proof
+  images.
 
 Credentials-first and copy-paste-ready — give it `-u/-p/-d` (no NT hash needed)
 and every generated command is pre-filled with your account. Findings feed the
@@ -712,6 +721,10 @@ also populate the dedicated **AD Findings** and **AD Attack Paths** sheets.
 # SharpHound + Certipy, credentialed — paths start from your account:
 python -m recce ad loot.zip 20260101_Certipy.json \
      -u alice -p 'Passw0rd!' -d corp.local --dc-ip 10.0.10.10 -o eng
+
+# Live capture: roast + AS-REP + DCSync the domain, with proof screenshots:
+python -m recce ad loot.zip -u alice -p 'Passw0rd!' -d corp.local \
+     --dc-ip 10.0.10.10 --roast --asrep --dcsync --screenshots -o eng
 
 # Re-import after remediating some findings (drop the ones that are now fixed):
 python -m recce ad loot.zip -u alice -p 'Passw0rd!' -d corp.local --replace-ad -o eng
