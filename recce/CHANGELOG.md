@@ -46,6 +46,20 @@ totals, the prove engine, the reports, and its own workbook tab._
     unchanged (its stdin-pipe already runs in memory at any size).
 
 ### Changed
+- **Workbook is far easier on the eyes at scale (900+ hosts).** The big list/finding
+  tabs now use Excel's collapsible row grouping so a large scope isn't one endless
+  grid:
+  - **Checklist** folds by subnet — click the outline [-] to collapse a whole /24 to
+    one summary band (`subnet · N hosts · reviewed · high/crit`), expand the one
+    you're working. The repeated Subnet column is gone (it's in the band), hosts with
+    critical/high findings sort to the top of each subnet, and the # Vulns cell is
+    coloured by the worst severity.
+  - **Vulnerabilities** and **Verification** fold by host (worst-hosts first), with
+    the Hostname column moved into the band and the Details preview bounded (~200
+    chars) so rows stop being tall walls of text — full evidence stays on Verification
+    and the write-ups.
+  - **Services** folds by host too, with Hostname moved into the band.
+  Identity columns stay frozen while you scroll, and every sheet keeps its autofilter.
 - **Distribution is a plain drop-in tarball, not a wheel.** The shipped release
   artifact is the `make_package.sh` burn package — a single `recce-<version>/`
   directory you extract and run with `./bin/recce ...` (or `python3 -m recce`), no
