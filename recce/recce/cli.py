@@ -3397,7 +3397,8 @@ def cmd_ldap(args: argparse.Namespace) -> int:
     creds = None
     if args.username:
         user, domain = _split_userdomain(args.username, args.domain)
-        creds = {"user": user, "secret": args.password or "", "domain": domain}
+        creds = {"user": user, "secret": args.password or "", "domain": domain,
+                 "hash": getattr(args, "hash", None) or ""}   # --hash -> NTLM pass-the-hash
 
     active = not args.no_probe
     analysis = _ldap.analyze(hosts, creds=creds, active=active)
@@ -4385,7 +4386,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="save a terminal-style RootDSE proof screenshot per DC")
     lp.add_argument("--no-probe", action="store_true",
                     help="skip the live bind/read; just write the commands")
-    _add_creds(lp)   # only used to pre-fill the credentialed follow-on commands
+    _add_creds(lp)
+    lp.add_argument("--hash", metavar="NThash",
+                    help="NTLM hash for pass-the-hash (with -u/-d): an NTLM SASL bind "
+                         "authenticates the enumeration without the plaintext password")
     lp.add_argument("-o", "--output-dir", default="engagement")
     lp.add_argument("--title", default="Recce Engagement")
     lp.set_defaults(func=cmd_ldap)
@@ -4445,7 +4449,8 @@ FTP servers?                 recce ftp -o eng   (anonymous/AUTH-TLS + known back
                              --prove-write for a reversible writable-dir proof)
 Docker API (2375/2376)?      recce docker -o eng   (CONFIRM unauth API = root RCE)
 Kubernetes cluster?          recce k8s -o eng   (kubelet / kube-apiserver / etcd)
-LDAP / AD directory?         recce ldap -o eng   (anon bind + RootDSE + anon read)
+LDAP / AD directory?         recce ldap -o eng   (anon bind + RootDSE + anon read;
+                             add -u/-p/-d or --hash <NT> for authenticated / PtH enum)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.

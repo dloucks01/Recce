@@ -29,6 +29,13 @@ All notable changes to recce are documented here. Dates are UTC.
     threshold (spray-friendly), and passwords in `description` fields. An extensible-
     match filter encoder (`userAccountControl:1.2.840.113556.1.4.803:=…`) backs the
     bit tests. LDAPS (636/3269) is TLS-wrapped for the authenticated bind too.
+  - **Pass-the-hash** (`recce ldap -u U -d DOM --hash <NT>`): a new stdlib `ntlm`
+    module (NTLMSSP Type 1/2/3 with an NTLMv2 response, and a pure-Python MD4 since
+    modern OpenSSL drops it) drives an LDAP SASL **GSS-SPNEGO** bind, so the whole
+    authenticated enumeration above runs from an NT hash with no plaintext password.
+    The NTLMv2 crypto is validated against the MS-NLMP 4.2.4 worked example. (The bind
+    authenticates only — it does not sign subsequent traffic, so use LDAPS where a DC
+    enforces LDAP signing on 389.)
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a

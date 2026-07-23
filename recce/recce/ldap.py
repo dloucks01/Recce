@@ -109,6 +109,33 @@ def build_bind_request(msgid: int = 1, dn: str = "", password: str = "") -> byte
     return _tlv(0x30, _int(msgid) + bindreq)
 
 
+def build_sasl_bind(msgid: int, mechanism: str, credentials: bytes = b"") -> bytes:
+    """LDAPMessage{ msgid, [APPLICATION 0] BindRequest{ 3, "", sasl [3]{ mech, creds } } }.
+    Used for the GSS-SPNEGO / NTLM exchange (pass-the-hash)."""
+    sasl = _octet(mechanism) + (_octet(credentials) if credentials else b"")
+    auth = _tlv(0xA3, sasl)                          # authentication CHOICE sasl [3]
+    bindreq = _tlv(0x60, _int(3) + _octet("") + auth)
+    return _tlv(0x30, _int(msgid) + bindreq)
+
+
+def sasl_creds(msg: bytes) -> bytes:
+    """serverSaslCreds [7] from a BindResponse (the NTLM CHALLENGE), or b''."""
+    try:
+        _, body, _ = _parse_tlv(msg, 0)
+        _, _mid, i = _parse_tlv(body, 0)
+        _, op, _ = _parse_tlv(body, i)              # [APPLICATION 1] bindResponse value
+        j = 0
+        for _ in range(3):                          # resultCode, matchedDN, errorMessage
+            _, _v, j = _parse_tlv(op, j)
+        while j < len(op):
+            tag, val, j = _parse_tlv(op, j)
+            if tag == 0x87:                         # serverSaslCreds [7]
+                return val
+        return b""
+    except (IndexError, ValueError):
+        return b""
+
+
 def build_search_request(msgid: int, base: str, scope: int,
                          attributes: list[str], filt: bytes | None = None,
                          size_limit: int = 0, cookie: bytes | None = None,
@@ -508,22 +535,52 @@ def _paged_search(sock, base: str, filt: bytes, attrs: list[str], timeout: float
     return out
 
 
+_SASL_IN_PROGRESS = 14
+
+
+def _ntlm_bind(sock, user: str, domain: str, nthash: bytes, timeout: float) -> int | None:
+    """SASL GSS-SPNEGO NTLM bind (pass-the-hash): send NEGOTIATE, read the CHALLENGE
+    from serverSaslCreds, reply with the NTLMv2 AUTHENTICATE. Returns the final LDAP
+    resultCode (0 = success), or None on a malformed exchange."""
+    from . import ntlm
+    sock.sendall(build_sasl_bind(1, "GSS-SPNEGO", ntlm.type1()))
+    resp = _read_message(sock, timeout)
+    if result_code(resp) != _SASL_IN_PROGRESS:
+        return result_code(resp)                    # rejected outright / no NTLM
+    chal = ntlm.parse_type2(sasl_creds(resp))
+    if chal is None:
+        return None
+    sock.sendall(build_sasl_bind(2, "GSS-SPNEGO",
+                                 ntlm.type3(user, domain, nthash, chal)))
+    return result_code(_read_message(sock, timeout))
+
+
+def _authenticate(sock, creds: dict, timeout: float) -> tuple[bool, str]:
+    """Bind with the supplied credential. Pass-the-hash (creds['hash']) uses an NTLM
+    SASL bind; otherwise a simple bind with the password. Returns (ok, method)."""
+    from . import ntlm
+    if creds.get("hash"):
+        rc = _ntlm_bind(sock, creds.get("user", ""), creds.get("domain", ""),
+                        ntlm.normalize_nt_hash(creds["hash"]), timeout)
+        return rc == 0, "NTLM (pass-the-hash)"
+    sock.sendall(build_bind_request(1, _bind_dn(creds), creds.get("secret", "")))
+    return result_code(_read_message(sock, timeout)) == 0, "simple bind"
+
+
 def enum_authenticated(ip: str, port: int, base: str, creds: dict,
                        timeout: float = _TIMEOUT) -> dict:
-    """Authenticated LDAP enumeration over the stdlib client: simple-bind with creds,
-    then paged-search users + computers + the domain object. {users, computers,
-    domain, error}. Simple bind sends the password (encrypted on LDAPS; cleartext on
-    389 - the operator's choice, same as ldapsearch -x -w)."""
+    """Authenticated LDAP enumeration over the stdlib client: bind with creds (simple
+    bind with a password, or an NTLM SASL bind for pass-the-hash), then paged-search
+    users + computers + the domain object. {users, computers, domain, error}."""
     sock = _open(ip, port, timeout)
     if sock is None:
         return {"error": "connect failed"}
     try:
         sock.settimeout(timeout)
-        sock.sendall(build_bind_request(1, _bind_dn(creds), creds.get("secret", "")))
-        rc = result_code(_read_message(sock, timeout))
-        if rc != 0:
-            return {"error": f"authenticated bind rejected (LDAP result {rc})",
-                    "bind_dn": _bind_dn(creds)}
+        ok, method = _authenticate(sock, creds, timeout)
+        if not ok:
+            return {"error": f"authenticated bind rejected ({method})",
+                    "bind_dn": _bind_dn(creds), "bind_method": method}
         users = _paged_search(sock, base,
                               f_and(f_equal("objectCategory", "person"),
                                     f_equal("objectClass", "user")),
@@ -534,7 +591,7 @@ def enum_authenticated(ip: str, port: int, base: str, creds: dict,
         dom = _read_search(sock, timeout)
         return {"users": users, "computers": computers,
                 "domain": dom[0] if dom else {}, "bind_dn": _bind_dn(creds),
-                "error": None}
+                "bind_method": method, "error": None}
     except OSError as e:
         return {"error": f"enumeration error: {e}"}
     finally:
@@ -636,7 +693,8 @@ def apply_enum(host, domain: str, dc_ip: str, port: int, en: dict) -> tuple[dict
     tgt = f"{dc_ip}:{port}"
     fs = [_finding(
         "info", "Authenticated LDAP enumeration", tgt,
-        f"Bound as {en.get('bind_dn', '')} and enumerated {len(users)} user(s) and "
+        f"Bound as {en.get('bind_dn', '')} via {en.get('bind_method', 'simple bind')} "
+        f"and enumerated {len(users)} user(s) and "
         f"{len(computers)} computer(s): {len(kerb)} kerberoastable, {len(asrep)} "
         f"AS-REP-roastable, {len(uncon)} with unconstrained delegation. These populate "
         "the Users & Accounts, AD Quick Wins, Kerberoast and AS-REP report views.",
@@ -747,8 +805,9 @@ TESTING_NARRATIVE = [
     ("3. RootDSE recon",
      "The domain and forest DNS names, DC FQDN, functional level and SASL mechanisms are "
      "captured pre-auth and pre-filled into the follow-on ldapsearch / netexec commands."),
-    ("4. Authenticated enumeration (with -u/-p/-d)",
-     "The same stdlib client simple-binds with the supplied credential and PAGES the "
+    ("4. Authenticated enumeration (with -u/-p/-d, or --hash for pass-the-hash)",
+     "The same stdlib client binds with the supplied credential - a simple bind with a "
+     "password, or an NTLM SASL (GSS-SPNEGO) bind for pass-the-hash - and PAGES the "
      "directory (past AD's MaxPageSize) for users, computers and the domain object, "
      "deriving kerberoastable / AS-REP-roastable / delegation / privileged accounts from "
      "the userAccountControl bits - in-house, no nxc/bloodhound hand-off. The accounts "

@@ -4007,6 +4007,46 @@ class DockerTest(unittest.TestCase):
             self.assertEqual(cli.main(["docker", "-o", out, "--no-probe"]), 0)
 
 
+class NtlmTest(unittest.TestCase):
+    """NTLMSSP / NTLMv2 crypto, validated against the MS-NLMP 4.2.4 worked example."""
+
+    def test_md4_and_nt_hash_vectors(self):
+        from recce import ntlm as N
+        self.assertEqual(N.md4(b"").hex(), "31d6cfe0d16ae931b73c59d7e0c089c0")
+        # NT hash of "password" (MD4 of the UTF-16LE password).
+        self.assertEqual(N.nt_hash("password").hex(),
+                         "8846f7eaee8fb117ad06bdd830b7586c")
+
+    def test_ntlmv2_matches_ms_nlmp_vector(self):
+        from recce import ntlm as N
+        nthash = N.nt_hash("Password")               # MS-NLMP example password
+        # ResponseKeyNT = HMAC-MD5(NT hash, UPPER(user)+domain).
+        self.assertEqual(N._ntv2_key("User", "Domain", nthash).hex(),
+                         "0c868a403bfd7a93a3001ef22ef02e3f")
+        target_info = bytes.fromhex(
+            "02000c0044006f006d00610069006e0001000c00530065007200760065007200"
+            "00000000")
+        resp = N.ntlmv2_response("User", "Domain", nthash,
+                                 bytes.fromhex("0123456789abcdef"), target_info,
+                                 timestamp=0,
+                                 client_challenge=bytes.fromhex("aaaaaaaaaaaaaaaa"))
+        # NTProofStr is the first 16 bytes of the NtChallengeResponse.
+        self.assertEqual(resp[:16].hex(), "68cd0ab851e51c96aabc927bebef6a1c")
+
+    def test_message_structure_and_hash_normalize(self):
+        from recce import ntlm as N
+        self.assertEqual(N.type1()[:8], N._SIG)
+        ch = {"challenge": b"\x01" * 8, "target_info": b"", "flags": N._TYPE1_FLAGS}
+        t3 = N.type3("u", "d", b"\x00" * 16, ch)
+        self.assertEqual(t3[:8], N._SIG)
+        self.assertEqual(t3[8:12], b"\x03\x00\x00\x00")   # MessageType 3
+        # LM:NT and a bare NT hash both normalize to the 16-byte NT hash.
+        nt = "8846f7eaee8fb117ad06bdd830b7586c"
+        self.assertEqual(N.normalize_nt_hash(nt), bytes.fromhex(nt))
+        self.assertEqual(N.normalize_nt_hash("aad3b435b51404eeaad3b435b51404ee:" + nt),
+                         bytes.fromhex(nt))
+
+
 class LdapTest(unittest.TestCase):
     """Deep LDAP module: the stdlib BER client, the probe against a mock DC, findings,
     prove verdicts, and the full `recce ldap` command."""
@@ -4186,6 +4226,65 @@ class LdapTest(unittest.TestCase):
             self.assertIn("Machine account quota", titles)
             self.assertIn("lockout", titles.lower())
             self.assertIn("Passwords in LDAP description", titles)
+        finally:
+            srv.shutdown()
+
+    def test_ntlm_pass_the_hash_bind(self):
+        import struct
+        from recce import ldap as L, ntlm as N
+        from recce.models import Host
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+
+        def attr(n, vals):
+            return tlv(0x30, L._octet(n) + tlv(0x31, b"".join(L._octet(v) for v in vals)))
+
+        def entry(mid, dn, pairs):
+            return tlv(0x30, L._int(mid) + tlv(0x64, L._octet(dn)
+                       + tlv(0x30, b"".join(attr(n, v) for n, v in pairs))))
+
+        def sdone(mid):
+            return tlv(0x30, L._int(mid) + tlv(0x65, L._enum(0) + L._octet("")
+                       + L._octet("")))
+
+        def type2_msg():
+            ti = b""
+            return (N._SIG + struct.pack("<I", 2) + struct.pack("<HHI", 0, 0, 48)
+                    + struct.pack("<I", N.NEGOTIATE_UNICODE
+                                  | N.NEGOTIATE_EXTENDED_SESSIONSECURITY)
+                    + bytes.fromhex("0123456789abcdef") + b"\x00" * 8
+                    + struct.pack("<HHI", len(ti), len(ti), 48) + ti)
+
+        def sasl_inprogress(mid=1):
+            # BindResponse resultCode=14 (saslBindInProgress) + serverSaslCreds [7]=Type2
+            op = (L._enum(14) + L._octet("") + L._octet("") + tlv(0x87, type2_msg()))
+            return tlv(0x30, L._int(mid) + tlv(0x61, op))
+
+        def bind_ok(mid=2):
+            return tlv(0x30, L._int(mid) + tlv(0x61, L._enum(0) + L._octet("")
+                       + L._octet("")))
+        # NEGOTIATE -> CHALLENGE, AUTHENTICATE -> success, then the searches.
+        enum_script = [
+            sasl_inprogress(1), bind_ok(2),
+            entry(10, "CN=svc", [("sAMAccountName", ["svc_web"]),
+                                 ("servicePrincipalName", ["HTTP/web"]),
+                                 ("userAccountControl", ["512"])]) + sdone(10),
+            sdone(1000),
+            entry(9000, "DC=corp,DC=local", [("lockoutThreshold", ["5"])]) + sdone(9000),
+        ]
+        srv, port = self._serve_scripts([enum_script])
+        try:
+            nt = N.nt_hash("Password").hex()
+            en = L.enum_authenticated("127.0.0.1", port, "DC=corp,DC=local",
+                                      {"user": "alice", "domain": "corp.local",
+                                       "secret": "", "hash": nt})
+            self.assertIsNone(en["error"])
+            self.assertEqual(en["bind_method"], "NTLM (pass-the-hash)")
+            self.assertEqual([u.get("sAMAccountName") for u in en["users"]], [["svc_web"]])
+            h = Host(ip="10.0.10.10")
+            L.apply_enum(h, "corp.local", "10.0.10.10", 389, en)
+            self.assertIn("svc_web", [a.name for a in h.accounts])
         finally:
             srv.shutdown()
 
