@@ -137,11 +137,16 @@ class ServicesPerIpFidelityTest(unittest.TestCase):
         self.assertEqual(ftp_rows[0]["IP"], "10.0.20.6")
         self.assertIn("ftp", ftp_rows[0]["Service"].lower())
 
-    def test_hostname_column_matches_the_row_ip(self):
-        _hdr, by_ip = rows_by_ip(self.sheets, "Services")
-        for ip, rows in by_ip.items():
-            for r in rows:
-                self.assertEqual(r["Hostname"], FACTS[ip]["host"])
+    def test_hostname_rides_in_the_collapsible_ip_band(self):
+        # Hostname is no longer a per-row column; it appears once in each host's
+        # collapsible band (IP · hostname · N ports), not repeated on every port row.
+        rows = self.sheets["Services"]
+        self.assertNotIn("Hostname", rows[0])
+        ipc = rows[0].index("IP")
+        bands = " ".join(str(r[ipc]) for r in rows[1:] if "·" in str(r[ipc]))
+        for ip, facts in FACTS.items():
+            if facts["host"]:
+                self.assertIn(facts["host"], bands)
 
 
 class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
@@ -162,6 +167,21 @@ class VulnerabilitiesPerIpFidelityTest(unittest.TestCase):
                              " ".join(r["Finding"] for r in by_ip.get(ip, [])))
         # ftp-anon is web02 only.
         self.assertIn("FTP", " ".join(r["Finding"] for r in by_ip.get("10.0.20.6", [])))
+
+    def test_grouped_by_host_no_hostname_col_and_bounded_details(self):
+        rows = self.sheets["Vulnerabilities"]
+        hdr = rows[0]
+        self.assertNotIn("Hostname", hdr)                 # Hostname moved to the band
+        ipc = hdr.index("IP")
+        # A collapsible per-host band exists (IP · hostname · N findings · worst ...).
+        bands = [str(r[ipc]) for r in rows[1:] if "finding" in str(r[ipc])]
+        self.assertTrue(bands)
+        self.assertTrue(any("worst:" in b for b in bands))
+        # Details is a bounded preview, never a wall of text.
+        dc = hdr.index("Details")
+        for r in rows[1:]:
+            if len(r) > dc:
+                self.assertLessEqual(len(str(r[dc])), 210)
 
     def test_exploit_column_proven_vs_candidate(self):
         _hdr, by_ip = rows_by_ip(self.sheets, "Vulnerabilities")
@@ -629,11 +649,17 @@ class WorkbookStructureTest(unittest.TestCase):
             build_workbook(sample_hosts(), out)
 
             def _check(path):
+                import re as _re
                 wb = load_workbook(path)
                 ck = wb["Checklist"]
                 ipc = [c.value for c in ck[1]].index("IP") + 1
-                ip_row = {ck.cell(row=r, column=ipc).value: r
-                          for r in range(2, ck.max_row + 1)}
+                # The IP column also carries the collapsible subnet-band labels; keep
+                # only the rows whose IP cell is a bare IPv4 (the real host rows).
+                ip_row = {}
+                for r in range(2, ck.max_row + 1):
+                    v = ck.cell(row=r, column=ipc).value
+                    if isinstance(v, str) and _re.fullmatch(r"\d+\.\d+\.\d+\.\d+", v):
+                        ip_row[v] = r
                 ov = wb["Overview"]
                 deep = {c.value: c.hyperlink.location
                         for row in ov.iter_rows() for c in row

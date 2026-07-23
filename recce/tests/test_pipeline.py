@@ -443,10 +443,13 @@ class InPlaceUpdateTest(unittest.TestCase):
             rows = xlsx.read_sheets(out)["Checklist"]
             hdr = rows[0]
             ipc = hdr.index("IP")
-            ips = [r[ipc] for r in rows[1:]]
+            # Skip the collapsible subnet band rows (empty Reviewed checkbox cell).
+            data_rows = [r for r in rows[1:]
+                         if r[0] in (xlsx.CHECK_ON, xlsx.CHECK_OFF)]
+            ips = [r[ipc] for r in data_rows]
         # Existing order kept; new IP appended last (not sorted in).
         self.assertEqual(ips, ["10.0.0.10", "10.0.0.20", "10.0.0.1"])
-        self.assertEqual(rows[1][0], xlsx.CHECK_ON)  # first host still reviewed (☑)
+        self.assertEqual(data_rows[0][0], xlsx.CHECK_ON)  # first host still reviewed
 
 
 class XlsxEngineTest(unittest.TestCase):
@@ -1550,10 +1553,40 @@ class SubnetCoverageTest(unittest.TestCase):
         from recce.report_excel import _spec_checklist
         hosts = [Host(ip="10.0.20.9", subnet="10.0.20.0/24"),
                  Host(ip="10.0.10.5", subnet="10.0.10.0/24")]
-        rows = _spec_checklist(hosts).rows
+        spec = _spec_checklist(hosts)
+        rows = spec.rows
         # Sorted by subnet then IP -> 10.0.10.x before 10.0.20.x.
         self.assertEqual([r["data"]["IP"] for r in rows], ["10.0.10.5", "10.0.20.9"])
-        self.assertEqual(rows[0]["data"]["Subnet"], "10.0.10.0/24")
+        # Subnet now lives in the collapsible group band, not a per-row column.
+        self.assertEqual(spec.group_by, "Subnet")
+        self.assertEqual(rows[0]["group"], "10.0.10.0/24")
+        self.assertNotIn("Subnet", rows[0]["data"])
+
+    def test_checklist_collapsible_band_rollup_and_risk_sort(self):
+        from recce.report_excel import build_workbook
+        from recce.models import Vuln
+        from recce import xlsx as _x, tracking as _tr
+        crit = Host(ip="10.0.10.9", subnet="10.0.10.0/24", state="up", enumerated=True,
+                    ports=[Port(portid=445, service="smb")],
+                    vulns=[Vuln(ip="10.0.10.9", port=445, protocol="tcp", script_id="x",
+                                title="f", severity="critical", source="nse",
+                                state="finding")])
+        clean = Host(ip="10.0.10.1", subnet="10.0.10.0/24", state="up", enumerated=True,
+                     ports=[Port(portid=22, service="ssh")])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([clean, crit], out,
+                           tracking={_tr.host_key("10.0.10.1"): (True, "")})
+            rows = xlsx.read_sheets(out)["Checklist"]
+        ipc = rows[0].index("IP")
+        band = next(r for r in rows[1:] if str(r[ipc]).startswith("10.0.10.0/24"))
+        self.assertIn("2 hosts", str(band[ipc]))
+        self.assertIn("1/2 reviewed", str(band[ipc]))
+        self.assertIn("high/crit", str(band[ipc]))                # the critical host
+        # Risk-first: the critical host sorts above the clean host within the subnet.
+        host_ips = [r[ipc] for r in rows[1:]
+                    if r[0] in (_x.CHECK_ON, _x.CHECK_OFF)]
+        self.assertEqual(host_ips, ["10.0.10.9", "10.0.10.1"])
 
     def test_store_scope_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2039,7 +2072,8 @@ class StepCheckboxTest(unittest.TestCase):
             build_workbook([h], out)
             rows = xlsx.read_sheets(out)["Checklist"]
             header = rows[0]
-            row = rows[1]
+            # rows[1] is now the collapsible subnet band; take the first host row.
+            row = next(r for r in rows[1:] if r[0] in (xlsx.CHECK_ON, xlsx.CHECK_OFF))
             for col in ("DB", "Web", "AD"):
                 self.assertEqual(row[header.index(col)], tr.STEP_NA)
             back = read_workbook_tracking(out)

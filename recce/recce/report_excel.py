@@ -45,6 +45,17 @@ _SEV_STYLE = {
     "critical": "sev_critical", "high": "sev_high", "medium": "sev_medium",
     "low": "sev_low", "info": "sev_info",
 }
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _host_sev_rank(h) -> int:
+    """0=critical .. 4=info, 6=no findings - so risky hosts sort to the top."""
+    return min((_SEV_RANK.get((v.severity or "").lower(), 5) for v in h.vulns), default=6)
+
+
+def _host_maxsev(h) -> str:
+    return {0: "critical", 1: "high", 2: "medium", 3: "low", 4: "info"}.get(
+        _host_sev_rank(h), "")
 
 # Columns holding machine data render in a monospace font (like the HTML
 # previews), so IPs, ports, versions, CVEs and IDs line up and read as data.
@@ -64,7 +75,9 @@ class SheetSpec:
     rows: list[dict]                   # {"key": str, "data": {header: value}}
     styler: Callable | None = None     # data_dict -> {header: style_name}
     skip_if_empty: bool = False
-    group_by: str | None = None        # header to group rows under collapsible host bands
+    group_by: str | None = None        # row["group"] value to fold rows under collapsible bands
+    # (group_value, [row dicts]) -> band label; default = "<group> · <hostname> · N <noun>".
+    group_summary: Callable | None = None
 
 
 # Tab colours group the sheets into visual bands in Excel's tab bar, by role:
@@ -111,14 +124,19 @@ _STEP_WIDTHS = {"Enumerated": 11, "Vuln-scan": 11, "Web": 7, "AD": 6, "DB": 6,
 # How many leading identity columns to freeze per sheet (in addition to the
 # header row), so the host IP stays on-screen while scrolling through the wide
 # right-hand columns. 0 (default) freezes only the header row.
-_FREEZE_COLS = {"Checklist": 3, "Services": 2, "Vulnerabilities": 3}
+_FREEZE_COLS = {"Checklist": 3, "Services": 2, "Vulnerabilities": 3,
+                "Verification": 2}
 
 
 def _spec_checklist(hosts: list[Host]) -> SheetSpec:
-    """One row per IP, grouped by subnet, with a checkbox for each workflow step.
+    """One row per IP, folded under a collapsible per-subnet band, with a checkbox
+    for each workflow step.
 
-    Rows are sorted by subnet then IP, so every subnet's hosts sit together (and
-    you can filter to one subnet). Auto steps (Enumerated/Vuln-scan/Web/DB) turn
+    Each subnet is a collapsible group (click the outline [-] to fold a whole /24 to
+    one summary band: "subnet · N hosts · reviewed · high/crit") - so 900 hosts
+    become a handful of bands you expand one at a time. Within a subnet, hosts with
+    critical/high findings sort to the top, and the # Vulns cell is coloured by the
+    worst severity so risk pops out. Auto steps (Enumerated/Vuln-scan/Web/DB) turn
     green when the tool finishes them; manual steps (AD review, Access/Priv-esc/
     Creds/Lateral) are operator sign-offs you tick as you go. Steps that don't
     apply to a host show "—" instead of a box (no Web box without a web server,
@@ -128,8 +146,10 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     per-port on the Services tab rather than as columns here.
     """
     step_cols = [(h, "check", _STEP_WIDTHS.get(h, 9)) for h in tr.STEP_COLUMNS]
+    # The Subnet column is gone: rows fold under a collapsible per-subnet band that
+    # carries the subnet + a rollup, so it isn't repeated on every one of 900 rows.
     cols = [
-        ("Reviewed", "checkbox", 9), ("Subnet", "data", 16), ("IP", "data", 15),
+        ("Reviewed", "checkbox", 9), ("IP", "data", 15),
         ("Hostname", "data", 22), ("OS", "data", 20), ("Hops", "data", 6),
         ("Roles", "data", 22), ("Open ports", "data", 28), ("# Vulns", "data", 8),
         ("AV / EDR", "data", 26),
@@ -137,7 +157,10 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
         ("Notes", "notes", 28), ("Key", "key", 4),
     ]
     rows = []
-    for h in sorted(hosts, key=lambda x: (_subnet_sort_key(x.subnet), _ip_sort_key(x.ip))):
+    # Sort by subnet (keeps each subnet's rows contiguous for the band), then by risk
+    # so the hosts with critical/high findings float to the top of each subnet, then IP.
+    for h in sorted(hosts, key=lambda x: (_subnet_sort_key(x.subnet),
+                                          _host_sev_rank(x), _ip_sort_key(x.ip))):
         checks = {header: (tr.step_key(step, h.ip), tr.step_auto(h, step),
                            tr.step_applies(h, step))
                   for header, step in tr.STEP_COLUMNS.items()}
@@ -146,16 +169,37 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
             # the sweep was truncated - flag the list as partial so it's never read
             # as authoritative (downstream phases key off these ports)
             open_ports = (open_ports + "  ⚠ PARTIAL (sweep timed out)").strip()
-        rows.append({"key": tr.host_key(h.ip), "checks": checks, "data": {
-            "Subnet": h.subnet, "IP": h.ip, "Hostname": h.hostname, "OS": h.os_guess,
+        rows.append({"key": tr.host_key(h.ip), "group": h.subnet or "(no subnet)",
+                     "checks": checks, "data": {
+            "IP": h.ip, "Hostname": h.hostname, "OS": h.os_guess,
             "Hops": (str(h.distance) if h.distance else ""),
             "Roles": ", ".join(h.roles), "Open ports": open_ports,
-            "# Vulns": len(h.vulns), "AV / EDR": "; ".join(h.defenses)}})
-    return SheetSpec(CHECKLIST_TITLE, cols, rows, _styler_checklist)
+            "# Vulns": len(h.vulns), "AV / EDR": "; ".join(h.defenses),
+            "_maxsev": _host_maxsev(h)}})
+    return SheetSpec(CHECKLIST_TITLE, cols, rows, _styler_checklist,
+                     group_by="Subnet", group_summary=_checklist_band)
+
+
+def _checklist_band(subnet: str, grows: list[dict], tracking: Tracking) -> str:
+    """The collapsible subnet band label: subnet · N hosts · reviewed · high/crit."""
+    n = len(grows)
+    reviewed = sum(1 for r in grows if tracking.get(r["key"], (False, ""))[0])
+    hc = sum(1 for r in grows if r["data"].get("_maxsev") in ("critical", "high"))
+    label = (f"{subnet or '(no subnet)'}      ·   {n} host{'s' if n != 1 else ''}"
+             f"   ·   {reviewed}/{n} reviewed")
+    if hc:
+        label += f"   ·   ⚠ {hc} high/crit"
+    return label
 
 
 def _styler_checklist(d: dict) -> dict:
-    return {"Roles": "boldred"} if "Domain Controller" in str(d.get("Roles", "")) else {}
+    out = {}
+    if "Domain Controller" in str(d.get("Roles", "")):
+        out["Roles"] = "boldred"
+    sev = d.get("_maxsev")
+    if d.get("# Vulns") and sev in _SEV_STYLE:      # colour the count by worst severity
+        out["# Vulns"] = _SEV_STYLE[sev]
+    return out
 
 
 def _styler_vulns(d: dict) -> dict:
@@ -194,9 +238,11 @@ def _spec_services(hosts: list[Host]) -> SheetSpec:
     track exactly which ports they've looked at, are working, or haven't touched."""
     from . import serviceenum as se
     from . import svcdetect
+    # Hostname isn't a column - it rides in the collapsible per-IP band, so it isn't
+    # repeated on every port row.
     cols = [
         ("Status", "status", 15), ("IP", "data", 16),
-        ("Hostname", "data", 24), ("Port", "data", 7), ("Proto", "data", 6),
+        ("Port", "data", 7), ("Proto", "data", 6),
         ("Service", "data", 16), ("ID source", "data", 10),
         ("Product", "data", 22), ("Version", "data", 16),
         ("Backing binary", "data", 34),
@@ -279,28 +325,56 @@ def _spec_services_by_product(hosts: list[Host]) -> SheetSpec:
 
 
 def _spec_vulns(hosts: list[Host]) -> SheetSpec:
+    # Findings fold under a collapsible per-host band (Hostname lives there, not on
+    # every row), so a host's findings collapse to one line and the hosts with the
+    # worst findings sort to the top.
     cols = [
         ("Triaged", "checkbox", 9), ("Severity", "data", 10), ("IP", "data", 16),
-        ("Hostname", "data", 20), ("Port", "data", 6), ("Finding", "data", 44),
+        ("Port", "data", 6), ("Finding", "data", 44),
         ("Source", "data", 11), ("Conf.", "data", 10), ("CVE / refs", "data", 22),
         ("CWE", "data", 16), ("Exploit", "data", 52),
         ("Remediation", "data", 44), ("Details", "data", 50),
         ("Notes", "notes", 26), ("Key", "key", 4),
     ]
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    worst = {h.ip: min((order.get((v.severity or "").lower(), 9) for v in h.vulns),
+                       default=9) for h in hosts}
     rows = []
     ordered = [(h, v) for h in hosts for v in h.vulns]
-    ordered.sort(key=lambda hv: (order.get(hv[1].severity, 9), _ip_sort_key(hv[0].ip)))
+    # host worst-severity, then IP (keeps a host's findings contiguous for the band),
+    # then this finding's severity.
+    ordered.sort(key=lambda hv: (worst[hv[0].ip], _ip_sort_key(hv[0].ip),
+                                 order.get((hv[1].severity or "").lower(), 9)))
     for h, v in ordered:
-        out = v.output if len(v.output) < 700 else v.output[:700] + " ..."
-        rows.append({"key": tr.vuln_row_key(v),
+        # A short preview only - the full evidence lives on Verification, the write-ups
+        # and Raw NSE; keeping this bounded stops the rows becoming tall walls of text.
+        out = v.output if len(v.output) <= 200 else v.output[:200].rstrip() + " …"
+        rows.append({"key": tr.vuln_row_key(v), "group": h.ip,
                      "data": {
-            "Severity": v.severity.upper(), "IP": h.ip, "Hostname": h.hostname,
+            "Severity": v.severity.upper(), "IP": h.ip,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
             "Source": v.source, "Conf.": v.confidence, "CVE / refs": ", ".join(v.ids),
             "CWE": ", ".join(v.cwes), "Exploit": _exploit_cell(h, v),
-            "Remediation": v.remediation, "Details": out}})
-    return SheetSpec("Vulnerabilities", cols, rows, _styler_vulns)
+            "Remediation": v.remediation, "Details": out,
+            "Hostname": h.hostname, "_worstsev": v.severity}})
+    return SheetSpec("Vulnerabilities", cols, rows, _styler_vulns,
+                     group_by="IP", group_summary=_vuln_band)
+
+
+def _vuln_band(ip: str, grows: list[dict], tracking: Tracking) -> str:
+    """Collapsible per-host band on Vulnerabilities: IP · hostname · N · worst sev."""
+    hostname = grows[0]["data"].get("Hostname", "")
+    order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+    worst = min((str(r["data"].get("Severity", "")).upper() for r in grows),
+                key=lambda s: order.get(s, 9), default="")
+    n = len(grows)
+    label = f"{ip}"
+    if hostname:
+        label += f"   ·   {hostname}"
+    label += f"   ·   {n} finding{'s' if n != 1 else ''}"
+    if worst:
+        label += f"   ·   worst: {worst}"
+    return label
 
 
 # Config / crypto-hardening weaknesses are never "run this exploit" findings,
@@ -497,20 +571,36 @@ def _spec_verification(hosts: list[Host]) -> SheetSpec:
     from . import proofs
     cols = [
         ("Verdict", "data", 15), ("IP", "data", 16), ("Port", "data", 7),
-        ("Vulnerability", "data", 34), ("Evidence (why this verdict)", "data", 72),
-        ("Preconditions", "data", 44), ("Finish proving (in ROE)", "data", 56),
-        ("False positive if…", "data", 40), ("Key", "key", 4),
+        ("Vulnerability", "data", 34), ("Evidence (why this verdict)", "data", 64),
+        ("Preconditions", "data", 40), ("Finish proving (in ROE)", "data", 52),
+        ("False positive if…", "data", 36), ("Key", "key", 4),
     ]
+    vrank = {"CONFIRMED": 0, "LIKELY": 1, "INCONCLUSIVE": 2, "FALSE POSITIVE": 3}
+    results = list(proofs.verify_hosts(hosts))
+    # Contiguous per host (for the band), CONFIRMED first within a host.
+    results.sort(key=lambda r: (_ip_sort_key(r["ip"]),
+                                vrank.get(r["verdict"], 4)))
     rows = []
-    for r in proofs.verify_hosts(hosts):
-        rows.append({"key": r["key"], "data": {
+    for r in results:
+        rows.append({"key": r["key"], "group": r["ip"], "data": {
             "Verdict": r["verdict"], "IP": r["ip"], "Port": r["port"] or "",
             "Vulnerability": r["vuln"],
             "Evidence (why this verdict)": "  •  ".join(r["evidence"]),
             "Preconditions": "; ".join(r["preconditions"]),
             "Finish proving (in ROE)": r["finish"],
-            "False positive if…": r["fp"]}})
-    return SheetSpec("Verification", cols, rows, _styler_verification, skip_if_empty=True)
+            "False positive if…": r["fp"], "_verdict": r["verdict"]}})
+    return SheetSpec("Verification", cols, rows, _styler_verification,
+                     skip_if_empty=True, group_by="IP", group_summary=_verify_band)
+
+
+def _verify_band(ip: str, grows: list[dict], tracking: Tracking) -> str:
+    """Collapsible per-host band on Verification: IP · N checks · confirmed count."""
+    n = len(grows)
+    confirmed = sum(1 for r in grows if r["data"].get("_verdict") == "CONFIRMED")
+    label = f"{ip}   ·   {n} check{'s' if n != 1 else ''}"
+    if confirmed:
+        label += f"   ·   ✔ {confirmed} CONFIRMED"
+    return label
 
 
 def _spec_privesc_playbook(hosts: list[Host]) -> SheetSpec:
@@ -674,12 +764,16 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
     for kind, key in items:
         excel_row += 1
         if kind == "hdr":
-            # A collapsible section band: IP + hostname + count in the IP column,
-            # the rest blank but styled, so a whole host folds into one row.
+            # A collapsible section band: a summary in the IP column, the rest blank
+            # but styled, so a whole host (or subnet) folds into one row.
             grp_rows = buckets[key]
-            hostname = rows_by_key[grp_rows[0]]["data"].get("Hostname", "")
-            label = f"{key}   ·   {hostname}   ·   {len(grp_rows)} {noun}".replace(
-                "·      ·", "·")
+            if spec.group_summary:
+                label = spec.group_summary(key, [rows_by_key[k] for k in grp_rows],
+                                           tracking)
+            else:
+                hostname = rows_by_key[grp_rows[0]]["data"].get("Hostname", "")
+                label = f"{key}   ·   {hostname}   ·   {len(grp_rows)} {noun}".replace(
+                    "·      ·", "·")
             hdr_cells = []
             for ci, (_h, _role, _w) in enumerate(spec.cols, start=1):
                 hdr_cells.append((label if ci == ip_col else "", "group"))
@@ -789,7 +883,10 @@ def _build_guide(wb, meta: dict) -> None:
 
     sh.write([("How to use it", "title")])
     for line in [
-        "1. Go to the CHECKLIST tab - one row per IP, a checkbox for each step.",
+        "1. Go to the CHECKLIST tab - one row per IP, a checkbox for each step. Each "
+        "subnet is a collapsible group: click the [-] in the left margin to fold a "
+        "whole /24 to one summary band, expand the one you're working. Hosts with "
+        "high/critical findings sort to the top of each subnet.",
         "2. Auto steps (Enumerated / Vuln-scan / Web / DB) turn green when the tool "
         "finishes them. Manual sign-offs (AD, and the kill-chain Access / Priv-esc "
         "/ Creds / Lateral) start unchecked - you tick them as you go.",
@@ -814,18 +911,24 @@ def _build_guide(wb, meta: dict) -> None:
                     "that matter, plus a troubleshooting table. Start here if you "
                     "just want the commands."),
         ("Overview", "Totals, review progress, and live-hosts-per-subnet coverage."),
-        ("Checklist", "THE working tab: one row per IP (grouped by subnet) with a "
-                      "checkbox for each phase + host detail + Reviewed + Notes."),
-        ("Services", "The other working tab: every open port with a per-port Status "
-                     "(not started / in progress / done) and Notes - track each "
-                     "port you work (incl. SMB, remote access, mail, SNMP)."),
+        ("Checklist", "THE working tab: one row per IP under a collapsible per-subnet "
+                      "band (fold a /24 to one summary line), a checkbox for each phase "
+                      "+ host detail + Reviewed + Notes. # Vulns is coloured by worst "
+                      "severity; risky hosts sort to the top of each subnet."),
+        ("Services", "The other working tab: every open port folded under a collapsible "
+                     "per-host band, each with a Status (not started / in progress / "
+                     "done) and Notes - track each port you work."),
         ("Web", "Every HTTP/HTTPS endpoint (any port), its tech stack, web-finding "
                 "count, and the exact Kali deep-scan commands. Run `recce web`."),
-        ("Vulnerabilities", "Findings by severity: CVE + remediation (offline engine)."),
+        ("Vulnerabilities", "Findings folded under a collapsible per-host band (hosts "
+                            "with the worst findings first), severity-coloured, with a "
+                            "short Details preview; full evidence is on Verification / "
+                            "the write-ups."),
         ("Exploits", "searchsploit matches (EDB-ID, type, CVEs, local path)."),
-        ("Verification", "Is it REAL? Per-finding verdict (CONFIRMED / LIKELY / "
-                         "FALSE POSITIVE / INCONCLUSIVE) with the evidence + the exact "
-                         "safe command to finish proving. Run `recce prove`."),
+        ("Verification", "Is it REAL? Per-host collapsible bands; per-finding verdict "
+                         "(CONFIRMED / LIKELY / FALSE POSITIVE / INCONCLUSIVE) with the "
+                         "evidence + the exact safe command to finish proving. Run "
+                         "`recce prove`."),
         ("Services by Product", "Who runs the same service+version (mass-patch pivot)."),
         # --- per-service deep-dive band (grouped, right after the findings) ---
         ("Databases", "DB inventory: engine, version, auth, databases, users."),
@@ -2021,8 +2124,22 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     host_rows: dict[str, int] = {}
     if checklist_spec:
         ck_keys = _ordered_keys(checklist_spec.rows, order_map.get(CHECKLIST_TITLE))
-        key_ip = {r["key"]: r["data"]["IP"] for r in checklist_spec.rows}
-        host_rows = {key_ip[k]: 2 + i for i, k in enumerate(ck_keys) if k in key_ip}
+        by_key = {r["key"]: r for r in checklist_spec.rows}
+        key_ip = {k: r["data"]["IP"] for k, r in by_key.items()}
+        # Walk the SAME emission order the writer uses. When the sheet is grouped, a
+        # collapsible band row precedes each new group, so the host rows shift down by
+        # one per group seen - account for that or the Overview links land wrong.
+        grouped = bool(checklist_spec.group_by)
+        excel_row, seen = 1, set()
+        for k in ck_keys:
+            if grouped:
+                g = by_key[k].get("group", "")
+                if g not in seen:
+                    seen.add(g)
+                    excel_row += 1               # the subnet band row
+            excel_row += 1
+            if k in key_ip:
+                host_rows[key_ip[k]] = excel_row
 
     def _emit(spec):
         if spec.skip_if_empty and not spec.rows:
