@@ -3517,6 +3517,135 @@ class WebTier1Test(unittest.TestCase):
         self.assertTrue(app and all(r["verdict"] == proofs.CONFIRMED for r in app))
 
 
+class WebSqliTest(unittest.TestCase):
+    """SQL injection (error / boolean / FP-safety) and form-field fuzzing over a mock
+    app: an error-based GET param, a boolean-based GET param, a dynamic page that must
+    NOT false-positive, a POST search form (error-based) and a reflected form field."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        from urllib.parse import urlparse, parse_qs
+
+        cls.hit_delete = False
+
+        class H(http.server.BaseHTTPRequestHandler):
+            counter = 0
+
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body):
+                self.send_response(code)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+            def do_GET(self):
+                u = urlparse(self.path)
+                idv = parse_qs(u.query, keep_blank_values=True).get("id", [""])[0]
+                if u.path == "/prod":                       # error-based (MySQL)
+                    if any(c in idv for c in ("'", '"', "\\")):
+                        return self._send(200, b"You have an error in your SQL syntax; "
+                                          b"check the manual that corresponds to your MySQL "
+                                          b"server version for the right syntax near '''")
+                    return self._send(200, b"<html>Product page for a valid id.</html>")
+                if u.path == "/boolsqli":                   # boolean-based blind
+                    s = idv.replace(" ", "")
+                    false = ("1=2" in s) or ("'1'='2" in s)
+                    if false:
+                        return self._send(200, b"<html>No matching record found.</html>")
+                    return self._send(200, b"<html>Record: ACME Widget, in stock.</html>")
+                if u.path == "/dyn":                        # highly dynamic -> no FP
+                    H.counter += 1
+                    blob = (b"A" if H.counter % 2 else b"B") * 400
+                    return self._send(200, b"<html>" + blob + b"</html>")
+                if u.path == "/":
+                    return self._send(200,
+                        b"<html><body><a href='/prod?id=1'>p</a>"
+                        b"<form method=post action=/search><input name=q></form>"
+                        b"<form method=post action=/reflectform><input name=name></form>"
+                        b"<form method=post action=/account/delete><input name=x></form>"
+                        b"</body></html>")
+                return self._send(404, b"no")
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(length).decode() if length else ""
+                d = parse_qs(raw, keep_blank_values=True)
+                if self.path == "/search":                  # error-based (MSSQL)
+                    q = d.get("q", [""])[0]
+                    if any(c in q for c in ("'", '"', "\\")):
+                        return self._send(200, b"Microsoft SQL Server error: Unclosed "
+                                          b"quotation mark after the character string")
+                    return self._send(200, b"<html>search results</html>")
+                if self.path == "/reflectform":             # reflects + evaluates {{7*7}}
+                    name = d.get("name", [""])[0].replace("{{7*7}}", "49")
+                    return self._send(200, ("<html>hello " + name + "</html>").encode())
+                if self.path == "/account/delete":          # destructive - must be skipped
+                    cls.hit_delete = True
+                    return self._send(200, b"DELETED")
+                return self._send(404, b"no")
+
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def _port(self):
+        return Port(portid=self.port, service="http", state="open")
+
+    def test_error_based_get(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/prod", "id", None)
+        fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /prod", send)
+        self.assertTrue(fs and fs[0].script_id == "web-sqli")
+        self.assertIn("error-based", fs[0].title)
+        self.assertIn("MySQL", fs[0].title)
+
+    def test_boolean_based_get(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/boolsqli", "id", None)
+        fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /boolsqli", send)
+        self.assertTrue(fs and fs[0].script_id == "web-sqli")
+        self.assertIn("boolean-based", fs[0].title)
+
+    def test_dynamic_page_no_false_positive(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/dyn", "id", None)
+        fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /dyn", send)
+        self.assertEqual(fs, [])            # a page that changes every request must not FP
+
+    def test_form_field_fuzzing_via_scan_crawl(self):
+        from recce import web
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        pages, added = web.scan_crawl(h)
+        sids = {v.script_id for v in h.vulns}
+        self.assertIn("web-sqli", sids)     # /prod GET param + /search POST field
+        self.assertIn("web-ssti", sids)     # /reflectform field evaluated {{7*7}}
+        # A form field injection came from the POST search form.
+        self.assertTrue(any(v.script_id == "web-sqli" and "field 'q'" in v.title
+                            for v in h.vulns))
+        # The destructive form (action=/account/delete) is never submitted.
+        self.assertFalse(WebSqliTest.hit_delete)
+
+    def test_prove_confirms_sqli(self):
+        from recce import web, proofs
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/prod", "id", None)
+        fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /prod", send)
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        h.vulns = fs
+        recs = proofs.verify_host(h)
+        self.assertTrue(recs and recs[0]["verdict"] == proofs.CONFIRMED)
+        self.assertEqual(proofs.recipe_for(fs[0])["id"], "web-sqli")
+
+
 class PocRecipeTest(unittest.TestCase):
     def test_finding_text_selects_the_right_recipe(self):
         from recce import poc

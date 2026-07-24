@@ -1455,11 +1455,12 @@ def cmd_web(args: argparse.Namespace) -> int:
     total_findings = 0
     creds = getattr(args, "creds", False)
     do_crawl = getattr(args, "crawl", False)
+    sqli_time = getattr(args, "sqli_time", False)
 
     def _scan(h):
         profiles = web.scan_host(h, active, auth, creds)
         if do_crawl:
-            pages, added = web.scan_crawl(h, auth)
+            pages, added = web.scan_crawl(h, auth, time_based=sqli_time)
             print(f"    [{h.ip}] crawled {pages} page(s), +{added} finding(s)")
         return profiles
 
@@ -4215,8 +4216,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "HTTP Basic-auth endpoints (lockout-aware, <=5 tries/endpoint)")
     wb.add_argument("--crawl", action="store_true",
                     help="same-origin crawl each site (authenticated with --cookie/"
-                         "--header): discover pages/params/forms, test discovered "
-                         "params for reflection/SSTI, flag cleartext-login / no-CSRF forms")
+                         "--header): discover pages/params/forms, then test discovered "
+                         "GET params AND form fields for reflection/SSTI + SQL injection "
+                         "(error/boolean), and flag cleartext-login / no-CSRF forms")
+    wb.add_argument("--sqli-time", action="store_true",
+                    help="with --crawl, also run the slower TIME-based blind SQLi probe "
+                         "(sends deliberate DB sleeps; confirms by scaling the delay)")
     wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.
