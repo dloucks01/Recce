@@ -35,7 +35,7 @@ def header_index(rows, *must_have):
 
 class TargetsTest(unittest.TestCase):
     def test_cidr_and_range(self):
-        hosts, sm = load_targets(["10.0.0.0/30", "192.168.1.5-8"])
+        hosts, sm, _ = load_targets(["10.0.0.0/30", "192.168.1.5-8"])
         self.assertEqual(hosts, ["10.0.0.1", "10.0.0.2", "192.168.1.5",
                                  "192.168.1.6", "192.168.1.7", "192.168.1.8"])
         # A CIDR token becomes the subnet label for its hosts.
@@ -44,19 +44,19 @@ class TargetsTest(unittest.TestCase):
         self.assertEqual(sm["192.168.1.5"], "192.168.1.0/24")
 
     def test_exclusions(self):
-        hosts, _ = load_targets(["192.168.1.0/29"])
+        hosts, _, _ = load_targets(["192.168.1.0/29"])
         kept = apply_exclusions(hosts, ["192.168.1.1", "192.168.1.2-3"])
         self.assertNotIn("192.168.1.1", kept)
         self.assertNotIn("192.168.1.3", kept)
         self.assertIn("192.168.1.4", kept)
 
     def test_dedup(self):
-        hosts, _ = load_targets(["10.0.0.1", "10.0.0.1", "10.0.0.0/30"])
+        hosts, _, _ = load_targets(["10.0.0.1", "10.0.0.1", "10.0.0.0/30"])
         self.assertEqual(hosts.count("10.0.0.1"), 1)
 
     def test_range_drops_network_and_broadcast(self):
         # A full-octet range means "the subnet", not "scan .0 and .255".
-        hosts, _ = load_targets(["10.200.37.0-255"])
+        hosts, _, _ = load_targets(["10.200.37.0-255"])
         self.assertNotIn("10.200.37.0", hosts)
         self.assertNotIn("10.200.37.255", hosts)
         self.assertIn("10.200.37.1", hosts)
@@ -64,8 +64,30 @@ class TargetsTest(unittest.TestCase):
 
     def test_explicit_single_dot_zero_is_respected(self):
         # An explicitly-typed single address is kept (the user asked for it).
-        hosts, _ = load_targets(["10.200.37.0"])
+        hosts, _, _ = load_targets(["10.200.37.0"])
         self.assertEqual(hosts, ["10.200.37.0"])
+
+    def test_file_parses_ip_hostname_pairs(self):
+        # An authoritative @file may carry IP+hostname (space / comma / tab / hosts-
+        # file style); the name is captured and the IP is still the scan target.
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "scope.txt")
+            with open(f, "w") as fh:
+                fh.write("10.0.0.5 dc01.corp.local\n"
+                         "10.0.0.6,web01\n"
+                         "10.0.0.7\tmail01 alias.corp\n"
+                         "10.0.0.0/30\n"          # a CIDR: no bogus name attached
+                         "# a comment line\n"
+                         "\n"
+                         "203.0.113.9\n")         # bare IP, no name
+            hosts, _, names = load_targets(["@" + f])
+        self.assertIn("10.0.0.5", hosts)
+        self.assertIn("10.0.0.1", hosts)          # CIDR expanded
+        self.assertEqual(names["10.0.0.5"], "dc01.corp.local")
+        self.assertEqual(names["10.0.0.6"], "web01")
+        self.assertEqual(names["10.0.0.7"], "mail01")   # first non-IP token wins
+        self.assertNotIn("10.0.0.1", names)       # a CIDR line gets no hostname
+        self.assertNotIn("203.0.113.9", names)
 
 
 class ParserTest(unittest.TestCase):
@@ -1355,9 +1377,10 @@ class RobustnessTest(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 result = cli._discover(args, profile, store, paths)
             store.close()
-            # 4-tuple (…, disc_reasons) matching what cmd_enum/cmd_scan unpack; the
-            # error path must not return a short tuple (that crashed the caller).
-            self.assertEqual(result, (None, [], None, None))
+            # 5-tuple (…, disc_reasons, hostname_map) matching what cmd_enum/cmd_scan
+            # unpack; the error path must not return a short tuple (that crashed the
+            # caller).
+            self.assertEqual(result, (None, [], None, None, {}))
             self.assertIn("Invalid targets", buf.getvalue())
 
     def test_main_top_level_guard_returns_clean_on_crash(self):
@@ -7758,6 +7781,56 @@ class DiscoveryReconfirmTest(unittest.TestCase):
                 self.assertEqual((rec2, calls["n"]), ({}, 0))
         finally:
             scanner.reconfirm_hosts = orig
+
+    def test_seed_targets_preseeds_named_up_hosts(self):
+        # An authoritative list pre-registers every target BEFORE scanning, so a
+        # timeout/failure can't drop it. Each is present, named, and shown up.
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "r.sqlite"))
+            n = cli._seed_targets(st, ["10.0.0.5", "10.0.0.6"],
+                                  {"10.0.0.5": "10.0.0.0/24", "10.0.0.6": "10.0.0.0/24"},
+                                  {"10.0.0.5": "dc01.corp.local"})
+            self.assertEqual(n, 2)
+            h5 = st.get_host("10.0.0.5")
+            h6 = st.get_host("10.0.0.6")
+            st.close()
+        self.assertIsNotNone(h5)                         # present before any scan
+        self.assertEqual(h5.hostnames, ["dc01.corp.local"])
+        self.assertEqual(h5.up_reason, "target-list")
+        self.assertTrue(h5.is_up)                         # provided list vouches -> up
+        self.assertIsNotNone(h6)                          # a nameless target is seeded too
+
+    def test_seed_targets_never_clobbers_a_scanned_host(self):
+        # Re-seeding merges - it must not wipe ports/findings already collected.
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "r.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                ports=[Port(portid=445, state="open")],
+                                up_reason="syn-ack", enumerated=True))
+            cli._seed_targets(st, ["10.0.0.5"], {"10.0.0.5": "10.0.0.0/24"},
+                              {"10.0.0.5": "dc01"})
+            h = st.get_host("10.0.0.5")
+            st.close()
+        self.assertTrue(h.open_ports)                    # scan result preserved
+        self.assertEqual(h.up_reason, "syn-ack")         # real reply reason kept
+
+    def test_targets_up_implies_pn(self):
+        # --targets-up forces -Pn semantics so discovery can never drop a provided host.
+        from recce import cli, scanner
+        prof = scanner.ScanProfile()
+        args = SimpleNamespace(targets_up=True, no_discovery=False)
+        cli._apply_profile_overrides(prof, args)
+        self.assertFalse(prof.ping_discovery)            # discovery skipped
+        self.assertTrue(prof.assume_up)                  # every target scanned as up
+        # Without the flag (and without -Pn) discovery still runs normally.
+        prof2 = scanner.ScanProfile()
+        cli._apply_profile_overrides(prof2, SimpleNamespace(targets_up=False,
+                                                            no_discovery=False))
+        self.assertTrue(prof2.ping_discovery)
 
 
 if __name__ == "__main__":

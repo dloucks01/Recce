@@ -385,7 +385,12 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.version_all = True
     if g("version_intensity") is not None:
         profile.version_intensity = args.version_intensity
-    profile.ping_discovery = not g("no_discovery", False)
+    # An authoritative target list implies -Pn: every provided host is treated as up
+    # (we pre-seed them), so discovery must not drop any as "down".
+    if g("targets_up", False):
+        profile.ping_discovery = False
+    else:
+        profile.ping_discovery = not g("no_discovery", False)
     profile.assume_up = not profile.ping_discovery   # -Pn: fail-fast on dead IPs
     if g("no_reconfirm", False):
         profile.reconfirm = False
@@ -479,7 +484,7 @@ def _mkissue(scan_issue, phase: str) -> dict:
 
 
 def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=True,
-                 disc_reason=""):
+                 disc_reason="", provided_name=""):
     """Returns (host|None, issues)."""
     issues: list[dict] = []
     truncated = False
@@ -547,6 +552,10 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     # when we have one, else "user-set" under -Pn (scanned on faith - not proof, so
     # a silent host stays UNKNOWN, never marked down). An open port speaks for itself.
     host.up_reason = up_reason or ("user-set" if profile.assume_up else host.up_reason)
+    # An authoritative list supplies the hostname up front; keep it (nmap-resolved
+    # names, if any, come first) so the host is labelled even when it answered nothing.
+    if provided_name:
+        host.hostnames = list(dict.fromkeys(host.hostnames + [provided_name]))
     # Recover the services nmap left as unknown/blank: mine its kept fingerprint,
     # fall back to the curated port map, then a stdlib banner grab (active) - so a
     # port like 5040 becomes 'Windows CDPSvc', not a dead 'unknown'.
@@ -597,19 +606,36 @@ def _reconfirm_missed(missed, profile, paths):
     return recovered, iss
 
 
+def _seed_targets(store, live_ips, subnet_map, hostname_map):
+    """Pre-register every target as a known host BEFORE scanning, so a slow/timed-out/
+    failed scan can never make a real target vanish from the report ('false no hosts').
+    Each is stored up-front with its provided hostname and up_reason 'target-list'; the
+    enum phase then enriches it in place. Returns the count seeded."""
+    from .models import Host
+    n = 0
+    for ip in live_ips:
+        h = Host(ip=ip, subnet=subnet_map.get(ip, ""), up_reason="target-list")
+        name = hostname_map.get(ip)
+        if name:
+            h.hostnames = [name]
+        store.upsert_host(h, merge=True)     # merge: never clobber an already-scanned host
+        n += 1
+    return n
+
+
 def _discover(args, profile, store, paths):
     try:
-        hosts, subnet_map = load_targets(args.targets)
+        hosts, subnet_map, hostname_map = load_targets(args.targets)
     except (ValueError, OSError) as e:
         # Bad CIDR/range (ValueError) or a missing/unreadable @file (OSError) - the
         # literal first thing a tester types. Fail with a clear message, not a crash.
         print(f"[x] Invalid targets: {e}\n    Fix the IP / range / CIDR / @file "
               "and re-run.")
-        return None, [], None, None
+        return None, [], None, None, {}
     hosts = apply_exclusions(hosts, args.exclude or [])
     if not hosts:
         print("[x] No targets after expansion/exclusion.")
-        return None, [], None, None
+        return None, [], None, None, {}
     # Record the full scope so the report accounts for every subnet, even those
     # that turn out to have no live hosts.
     sizes: dict[str, int] = {}
@@ -706,14 +732,20 @@ def _discover(args, profile, store, paths):
         done = store.scanned_ips()
         live_ips = [ip for ip in live_ips if ip not in done]
         print(f"[+] Resume: {len(live_ips)} host(s) remaining.")
-    return subnet_map, live_ips, port_map, disc_reasons
+    # Authoritative list: seed each responder's up-reason so a provided host is shown
+    # up (labelled 'target-list') even before its scan finishes.
+    if getattr(args, "targets_up", False):
+        for ip in live_ips:
+            disc_reasons.setdefault(ip, "target-list")
+    return subnet_map, live_ips, port_map, disc_reasons, hostname_map
 
 
 def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
-                disc_reasons=None) -> None:
+                disc_reasons=None, hostname_map=None) -> None:
     creds = _creds_of(args)
     workers = max(1, args.workers)
     disc_reasons = disc_reasons or {}
+    hostname_map = hostname_map or {}
     # --no-probes disables our active stdlib layer (banner grabs); the free passive
     # layers (servicefp mining + curated port map) still run.
     active_probe = not getattr(args, "no_probes", False)
@@ -723,7 +755,8 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
     refresher = _Refresher(args)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_enum_worker, ip, profile, paths, creds, port_map,
-                             subnet_map, active_probe, disc_reasons.get(ip, "")): ip
+                             subnet_map, active_probe, disc_reasons.get(ip, ""),
+                             hostname_map.get(ip, "")): ip
                    for ip in live_ips}
         for fut in as_completed(futures):
             ip = futures[fut]
@@ -1181,13 +1214,18 @@ def cmd_enum(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     store.set_meta("engagement", args.title)
-    subnet_map, live_ips, port_map, disc_reasons = _discover(args, profile, store, paths)
+    subnet_map, live_ips, port_map, disc_reasons, hostname_map = _discover(
+        args, profile, store, paths)
     if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
+    if getattr(args, "targets_up", False):
+        seeded = _seed_targets(store, live_ips, subnet_map, hostname_map)
+        print(f"[+] Authoritative list: pre-seeded {seeded} host(s) - every target is "
+              "in the report even if its scan times out or fails.")
     try:
         _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
-                    disc_reasons)
+                    disc_reasons, hostname_map)
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
     except KeyboardInterrupt:
@@ -1234,13 +1272,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     store.set_meta("engagement", args.title)
-    subnet_map, live_ips, port_map, disc_reasons = _discover(args, profile, store, paths)
+    subnet_map, live_ips, port_map, disc_reasons, hostname_map = _discover(
+        args, profile, store, paths)
     if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
+    if getattr(args, "targets_up", False):
+        seeded = _seed_targets(store, live_ips, subnet_map, hostname_map)
+        print(f"[+] Authoritative list: pre-seeded {seeded} host(s) - every target is "
+              "in the report even if its scan times out or fails.")
     try:
         _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
-                    disc_reasons)
+                    disc_reasons, hostname_map)
         _phase_vulns(store, paths, args, profile)
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
@@ -4019,6 +4062,12 @@ def _add_discovery(pp) -> None:
                     help="skip the ping sweep and scan every target as if up (like "
                          "nmap -Pn). Use this when hosts block ping - common on "
                          "firewalled / Windows / AD networks.")
+    pp.add_argument("--targets-up", action="store_true", dest="targets_up",
+                    help="treat the target list as AUTHORITATIVE: implies -Pn, and "
+                         "PRE-SEEDS every target (with its @file hostname) into the "
+                         "report up front - so a slow / timed-out / failed scan can "
+                         "never make a real host vanish ('no hosts'). Use with a "
+                         "complete IP[,hostname] @file you trust.")
     pp.add_argument("--fast", action="store_true",
                     help="go fast: masscan network-wide sweep instead of per-host "
                          "nmap (and, in `scan`, top-signal vuln scripts only)")
@@ -4639,6 +4688,10 @@ LDAP / AD directory?         recce ldap -o eng   (anon bind + RootDSE + anon rea
 SNMP (161/udp)?              recce snmp -o eng   (community guessing + read-only walk
                              of users / processes / software -> spray list)
 MongoDB (27017-19)?          recce mongodb -o eng   (CONFIRM unauth listDatabases)
+
+Have a complete IP/hostname list?  recce enum @scope.txt --targets-up
+                             (lines: 'IP hostname'; pre-seeds every host so a
+                             timeout never drops a real target from the report)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.
