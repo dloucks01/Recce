@@ -69,6 +69,20 @@ All notable changes to recce are documented here. Dates are UTC.
   into the severity totals, the Vulnerabilities sheet, the write-ups, a dedicated
   **MongoDB** workbook tab, the prove engine (unauth `listDatabases` CONFIRMED), the
   exploit plan (mongosh / mongodump), and the `status` coverage.
+- **Web signatures — Tier 1 niche-app coverage (data-driven, no new module).** Extends
+  the existing `web` sweep (`web.py`) rather than adding per-app modules, so each app is
+  a fingerprint + a self-proving path, folding into the same **Web** / **Vulnerabilities**
+  / **Verification** sheets. Added: **Jenkins** script console reachable unauthenticated
+  (critical — Groovy RCE), **Keycloak** admin console reachable, **Grafana** plugin path
+  traversal (CVE-2021-43798, reads `/etc/passwd` read-only to confirm), **HashiCorp
+  Vault** seal-status/version exposure, **Elasticsearch** unauthenticated index read
+  (data exposure), and **Kibana** version disclosure — plus fingerprints for all six.
+  A new **form/JSON default-credential probe** (`_form_login_defaults`, opt-in via
+  `--creds`, one attempt per documented default, lockout-aware) confirms **Grafana**
+  `admin/admin` and **MinIO** `minioadmin/minioadmin`, and HTTP-Basic `guest/guest`
+  now covers the **RabbitMQ** management API. Each finding gets a CONFIRMED prove-engine
+  verdict with app-specific escalation and an exploit-plan action (Jenkins RCE, Grafana
+  file read, Elasticsearch dump, default-cred login).
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a

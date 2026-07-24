@@ -332,6 +332,14 @@ airgapped, none need internet):
    X-Content-Type-Options, version-disclosing `Server` banners) and **TLS
    certificate & protocol analysis** (expired/self-signed/soon-to-expire certs,
    hostname mismatch, negotiable SSLv3/TLS 1.0/1.1). Disable with `--no-probes`.
+   The web sweep (`web.py`) also carries **data-driven application signatures** —
+   fingerprint + a self-proving unauthenticated path — for high-value apps:
+   **Jenkins** (unauth script-console RCE), **Keycloak** (admin console),
+   **Grafana** (CVE-2021-43798 file read), **HashiCorp Vault**, **Elasticsearch**
+   (unauth index read), **Kibana**, plus exposed `.git`/`.env`, Spring Actuator
+   and Tomcat Manager. With `--creds` it runs a bounded, lockout-aware
+   **default-credential** probe (HTTP Basic + form/JSON logins: Grafana
+   `admin/admin`, MinIO `minioadmin`, RabbitMQ `guest/guest`).
 4. **`searchsploit` (Exploit-DB, offline)** maps every service's product+version
    to known public exploits on a dedicated **Exploits** sheet (EDB-ID, type,
    title, CVEs, local path).
