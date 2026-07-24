@@ -47,6 +47,7 @@ _CWE_TYPE = [
     (("CWE-89",), "SQL Injection", "Confidentiality, Integrity"),
     (("CWE-79",), "Cross-Site Scripting", "Integrity"),
     (("CWE-352",), "Cross-Site Request Forgery (CSRF)", "Integrity"),
+    (("CWE-601",), "Open Redirect", "Integrity"),
     (("CWE-502",), "Insecure Deserialization", _CIA),
     (("CWE-918",), "Server-Side Request Forgery (SSRF)", "Confidentiality, Integrity"),
     (("CWE-611",), "XML External Entity (XXE) Injection", "Confidentiality, Integrity"),
@@ -68,7 +69,7 @@ _CWE_TYPE = [
       "CWE-527", "CWE-532", "CWE-203", "CWE-215", "CWE-548", "CWE-615"),
      "Information / Credential Disclosure", "Confidentiality"),
     (("CWE-693", "CWE-1021", "CWE-16", "CWE-650", "CWE-441", "CWE-284", "CWE-1004",
-      "CWE-614", "CWE-942", "CWE-799"), "Security Misconfiguration", "Integrity"),
+      "CWE-614", "CWE-942", "CWE-799", "CWE-1275"), "Security Misconfiguration", "Integrity"),
     (("CWE-364",), "Race Condition", "Integrity, Availability"),
     (("CWE-406", "CWE-400"), "Resource Exhaustion / Denial of Service", "Availability"),
     (("CWE-1104", "CWE-1392", "CWE-477"), "Unmaintained / Default Components", _CIA),
@@ -107,6 +108,8 @@ _CWE_NAME = {
     "CWE-548": "Information Exposure Through Directory Listing",
     "CWE-614": "Sensitive Cookie Without 'Secure' Attribute",
     "CWE-1004": "Sensitive Cookie Without 'HttpOnly' Flag",
+    "CWE-1275": "Sensitive Cookie with Improper SameSite Attribute",
+    "CWE-601": "URL Redirection to Untrusted Site (Open Redirect)",
     "CWE-942": "Permissive Cross-domain Policy with Untrusted Domains",
     "CWE-266": "Incorrect Privilege Assignment",
     "CWE-269": "Improper Privilege Management", "CWE-284": "Improper Access Control",
@@ -217,6 +220,10 @@ _TYPE_IMPACT = {
     "Cross-Site Request Forgery (CSRF)":
         "trick a logged-in user's browser into performing unwanted actions on the "
         "application without their knowledge or consent",
+    "Open Redirect":
+        "abuse the site's own domain to send victims to an attacker-controlled page - "
+        "lending credibility to phishing, or smuggling a token through a trusted "
+        "OAuth/SSO redirect",
     "Path Traversal / File Inclusion":
         "read files outside the intended area of the application - and in some cases "
         "run code - exposing configuration, credentials, or source",

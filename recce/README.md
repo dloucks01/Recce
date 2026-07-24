@@ -344,9 +344,14 @@ airgapped, none need internet):
    fields** for reflection/SSTI and **SQL injection** — error-based (MySQL/
    PostgreSQL/MSSQL/Oracle/SQLite error signatures), boolean-based blind
    (true≈baseline vs false-diverges, re-tested, skipped on dynamic pages), and
-   opt-in time-based blind (`--sqli-time`). Payloads are non-destructive
-   (quote-break + `AND`/sleep, never stacked `DROP`/`UPDATE`/`DELETE`);
-   destructive-looking forms and password/anti-CSRF fields are never touched.
+   opt-in time-based blind (`--sqli-time`), plus **open redirect** and generic
+   **path traversal / local file read** on the same params/fields. Payloads are
+   non-destructive (quote-break + `AND`/sleep, traversal reads only; never
+   stacked `DROP`/`UPDATE`/`DELETE`); destructive-looking forms and
+   password/anti-CSRF fields are never touched. Every response's **cookies** are
+   graded too — missing HttpOnly/Secure/SameSite, `SameSite=None` without Secure,
+   a session cookie over cleartext HTTP, a missing `__Host-`/`__Secure-` prefix,
+   or an over-broad parent `Domain`.
 4. **`searchsploit` (Exploit-DB, offline)** maps every service's product+version
    to known public exploits on a dedicated **Exploits** sheet (EDB-ID, type,
    title, CVEs, local path).

@@ -71,7 +71,15 @@ def _fetch(ip: str, port: Port, path: str = "/", method: str = "GET", read: int 
             req_headers.setdefault("Content-Type", "application/json")
         conn.request(method, path, body=body, headers=req_headers)
         resp = conn.getresponse()
-        headers = {k.lower(): v for k, v in resp.getheaders()}
+        # Collapse duplicate headers (last wins) EXCEPT Set-Cookie, whose repeats are
+        # each a distinct cookie - join them with newline so cookie/JWT analysis sees all.
+        headers: dict = {}
+        for k, v in resp.getheaders():
+            lk = k.lower()
+            if lk == "set-cookie" and lk in headers:
+                headers[lk] += "\n" + v
+            else:
+                headers[lk] = v
         body = b""
         if method != "HEAD":
             body = resp.read(read)
@@ -444,6 +452,58 @@ _PATHS = [
 ]
 
 _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
+
+# Cookie names that indicate a session / auth / anti-CSRF token (hardening matters most).
+_SESSION_COOKIE = re.compile(r"sess|sid|auth|token|jwt|remember|login|sso|csrf", re.I)
+
+
+def _cookie_findings(ip: str, port: Port, set_cookie_blob: str) -> list[Vuln]:
+    """Per-cookie hygiene from the Set-Cookie header(s): HttpOnly, Secure, SameSite,
+    __Host-/__Secure- prefix, cleartext-session transport, and over-broad Domain scope.
+    Deduped by (cookie name, issue) so many cookies don't spam identical findings."""
+    out: list[Vuln] = []
+    if not set_cookie_blob:
+        return out
+    tls = probes._is_tls(port)
+    seen: set = set()
+
+    for line in set_cookie_blob.split("\n"):
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        low = line.lower()
+        session = bool(_SESSION_COOKIE.search(name))
+
+        def add(sev, title, cwes, fix):
+            if (name, title) in seen:
+                return
+            seen.add((name, title))
+            out.append(_mk(ip, port, "web-cookie", sev, f"{title}: {name}", cwes,
+                           f"Set-Cookie: {line[:140]}", fix))
+
+        if "httponly" not in low:
+            add("low", "Cookie without HttpOnly", ["CWE-1004"],
+                "Set HttpOnly so client-side JavaScript cannot read the cookie.")
+        if tls and "secure" not in low:
+            add("low", "Cookie without Secure (served over HTTPS)", ["CWE-614"],
+                "Set the Secure flag so the cookie is only sent over HTTPS.")
+        if "samesite" not in low:
+            add("low", "Cookie without SameSite (CSRF / cross-site surface)",
+                ["CWE-1275"], "Set SameSite=Lax (or Strict) to limit cross-site sending.")
+        elif "samesite=none" in low and "secure" not in low:
+            add("medium", "Cookie SameSite=None without Secure", ["CWE-1275"],
+                "SameSite=None requires the Secure attribute; browsers reject it otherwise.")
+        if session and not tls:
+            add("medium", "Session cookie set over cleartext HTTP (token exposed on the wire)",
+                ["CWE-319"], "Serve authentication over HTTPS + HSTS.")
+        if session and not (name.startswith("__Host-") or name.startswith("__Secure-")):
+            add("info", "Session cookie without __Host-/__Secure- prefix", ["CWE-1275"],
+                "Prefix session cookies with __Host- to pin host + Secure + Path=/.")
+        if re.search(r"domain=(\.[^;]+)", low):
+            add("low", "Cookie scoped to a broad parent Domain", ["CWE-1275"],
+                "Drop the leading-dot Domain; scope cookies to the exact host.")
+    return out
 
 
 def _prove_put(ip: str, port: Port, auth: dict | None):
@@ -1013,6 +1073,61 @@ def _sqli_via(ip: str, port: Port, where: str, send, time_based: bool = False) -
     return []
 
 
+# --- open redirect --------------------------------------------------------------
+_REDIR_HOST = "recce-oob.example"                       # a host we'll never legitimately host
+_REDIR_PAYLOADS = (f"https://{_REDIR_HOST}/x", f"//{_REDIR_HOST}/x", f"/\\{_REDIR_HOST}/x")
+
+
+def _open_redirect_via(ip: str, port: Port, where: str, send) -> list[Vuln]:
+    """A parameter reflected into the Location of a 3xx pointing at an attacker host.
+    Reads the redirect only (http.client does not auto-follow) - non-destructive."""
+    for payload in _REDIR_PAYLOADS:
+        r = send(payload)[0]
+        if not r or not (300 <= r[0] < 400):
+            continue
+        loc = (r[1].get("location") or "").strip()
+        low = loc.lower()
+        if low.startswith((f"https://{_REDIR_HOST}", f"http://{_REDIR_HOST}",
+                           f"//{_REDIR_HOST}", f"/\\{_REDIR_HOST}")):
+            return [_mk(ip, port, "web-openredirect", "medium",
+                        f"Open redirect via {where}", ["CWE-601"],
+                        f"{where} set to {payload!r} -> HTTP {r[0]} Location: {loc[:120]} "
+                        "(redirects to an attacker-controlled host).",
+                        "Allow-list redirect targets; never redirect to a raw user value.",
+                        confidence="confirmed")]
+    return []
+
+
+# --- generic path traversal / local file read ----------------------------------
+_TRAVERSAL_PAYLOADS = (
+    "../../../../../../../../etc/passwd",
+    "....//....//....//....//....//etc/passwd",
+    "..%2f..%2f..%2f..%2f..%2f..%2fetc/passwd",
+    "../../../../../../../../windows/win.ini",
+)
+_TRAVERSAL_HIT = re.compile(r"root:.*?:0:0:|\[fonts\]|\[extensions\]", re.I)
+# Only worth traversing params that plausibly name a file/path (keeps the budget + FP low).
+_FILEISH_PARAM = re.compile(
+    r"file|path|page|template|doc|download|include|dir|folder|load|read|view|attachment|img|src",
+    re.I)
+
+
+def _traversal_via(ip: str, port: Port, where: str, param: str, send) -> list[Vuln]:
+    if not _FILEISH_PARAM.search(param):
+        return []
+    for payload in _TRAVERSAL_PAYLOADS:
+        b = _body(send(payload))
+        if b and _TRAVERSAL_HIT.search(b):
+            what = "/etc/passwd" if "win.ini" not in payload else "windows/win.ini"
+            return [_mk(ip, port, "web-lfi", "high",
+                        f"Path traversal / local file read via {where}", ["CWE-22"],
+                        f"{where} set to {payload!r} returned {what} content "
+                        "(the app reads a file path from our input).",
+                        "Canonicalise + allow-list file paths; never build a path from raw "
+                        "user input.", confidence="confirmed")]
+    return []
+
+
 _SKIP_FORM_ACTION = re.compile(r"delete|remove|destroy|drop|logout|signout|purge|reset", re.I)
 
 
@@ -1033,12 +1148,23 @@ def _crawl_findings(ip: str, port: Port, cres: dict) -> list[Vuln]:
     return out
 
 
+def _inject_param(ip, port, where, param, send, sqli, time_based):
+    """Run every input-injection check against one parameter/field via its `send`
+    closure: reflection/SSTI, SQLi (optional), open redirect, path traversal."""
+    fs = _reflect_via(ip, port, where, send)
+    if sqli:
+        fs += _sqli_via(ip, port, where, send, time_based)
+    fs += _open_redirect_via(ip, port, where, send)
+    fs += _traversal_via(ip, port, where, param, send)
+    return fs
+
+
 def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
                time_based: bool = False) -> tuple[int, int]:
     """Crawl every web endpoint (authenticated if auth is set), test discovered GET
-    params AND form fields for reflection/SSTI and (default) SQL injection, and flag
-    risky forms. `time_based` opts into the slower time-blind SQLi probe. Returns
-    (pages_crawled, findings_added)."""
+    params AND form fields for reflection/SSTI, SQL injection, open redirect and path
+    traversal, and flag risky forms. `time_based` opts into the slower time-blind SQLi
+    probe. Returns (pages_crawled, findings_added)."""
     existing = {v.key for v in host.vulns}
     pages = added = 0
     for port in host.open_ports:
@@ -1051,11 +1177,12 @@ def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
 
         # Discovered GET query params.
         for pth, prm in cres["params"]:
-            fs += _reflect_param(host.ip, port, pth, prm, auth)
-            if sqli and budget > 0:
-                fs += _sqli_via(host.ip, port, f"param '{prm}' on {pth}",
-                                _make_sender(host.ip, port, "get", pth, prm, auth), time_based)
-                budget -= 1
+            if budget <= 0:
+                break
+            send = _make_sender(host.ip, port, "get", pth, prm, auth)
+            fs += _inject_param(host.ip, port, f"param '{prm}' on {pth}", prm,
+                                send, sqli, time_based)
+            budget -= 1
 
         # Form fields (POST/GET bodies) - skip obviously destructive forms.
         for form in (cres["forms"] or [])[:6]:
@@ -1063,12 +1190,12 @@ def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
                 continue
             where_base = f"form {(form.get('method') or 'get').upper()} {form['action']}"
             for prm in _fuzzable_fields(form):
+                if budget <= 0:
+                    break
                 send = _make_sender(host.ip, port, "form", form, prm, auth)
-                fs += _reflect_via(host.ip, port, f"field '{prm}' of {where_base}", send)
-                if sqli and budget > 0:
-                    fs += _sqli_via(host.ip, port, f"field '{prm}' of {where_base}",
-                                    send, time_based)
-                    budget -= 1
+                fs += _inject_param(host.ip, port, f"field '{prm}' of {where_base}", prm,
+                                    send, sqli, time_based)
+                budget -= 1
 
         for v in fs:
             if v.key in existing:
@@ -1124,18 +1251,8 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
                             "Directory listing enabled", ["CWE-548"],
                             f"GET {profile['url']}/ returned an auto-index page.",
                             "Disable automatic directory indexing (Options -Indexes)."))
-    # Weak cookie flags.
-    ck = headers.get("set-cookie", "")
-    if ck:
-        low = ck.lower()
-        if "httponly" not in low:
-            findings.append(_mk(ip, port, "web-cookie", "low",
-                                "Session cookie without HttpOnly", ["CWE-1004"],
-                                f"Set-Cookie: {ck[:120]}", "Set HttpOnly on session cookies."))
-        if probes._is_tls(port) and "secure" not in low:
-            findings.append(_mk(ip, port, "web-cookie", "low",
-                                "Session cookie without Secure (over HTTPS)", ["CWE-614"],
-                                f"Set-Cookie: {ck[:120]}", "Set the Secure flag on HTTPS cookies."))
+    # Cookie hardening (per Set-Cookie): HttpOnly / Secure / SameSite / prefix / scope.
+    findings.extend(_cookie_findings(ip, port, headers.get("set-cookie", "")))
     # Dangerous HTTP methods. When PUT is advertised AND active, we don't just
     # trust the Allow header - we prove it: PUT a marker, GET it back, DELETE it.
     opt = _fetch(ip, port, "/", method="OPTIONS", auth=auth)
