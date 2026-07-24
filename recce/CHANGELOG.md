@@ -44,6 +44,31 @@ All notable changes to recce are documented here. Dates are UTC.
     the whole sealed channel is exercised end-to-end against a mock DC that recovers
     the session key from the client's Type 3 and seals its own replies. LDAPS remains
     the path when you'd rather let TLS carry it (no sealing then).
+- **`snmp` — deep SNMP enumeration over UDP (stdlib only).** A hand-rolled SNMP v2c
+  client on a raw UDP socket (BER/ASN.1 with OID base-128 encoding, GETNEXT walking —
+  no pysnmp), so it runs on a stock airgapped Kali. Credential-free and **read-only**:
+  recce never sends a SET, so a read-write community is flagged by *name* but never
+  exercised. Against a host it **guesses common community strings** (public/private/…),
+  reads the **system group** (sysDescr / sysName), and **walks** the Windows LanManager
+  user table, running processes, installed software and interfaces. Enumerated local
+  accounts become `Account` objects that flow into **Users & Accounts** (a pre-auth
+  spray list). Findings (guessable community, exposed user accounts, process/software
+  inventory) fold into the severity totals, the Vulnerabilities sheet, the write-ups, a
+  dedicated **SNMP** workbook tab, the prove engine (each disclosure adjudicated
+  CONFIRMED — recce read the data back itself), the exploit plan (snmpwalk / snmp-check
+  → spray), and the `status` service-module coverage. SNMP discovery *is* a GET, so no
+  prior UDP scan is required — `recce snmp` probes 161 directly.
+- **`mongodb` — deep MongoDB enumeration (stdlib only).** A hand-rolled MongoDB wire-
+  protocol client (OP_MSG opcode 2013 with a minimal BSON encoder/decoder — no pymongo).
+  Credential-free and read-only: it runs **hello** + **buildInfo** to fingerprint the
+  version and replica-set role, then the discriminator — **`listDatabases` without
+  authentication**. If the instance returns the database list, it is exposed
+  unauthenticated (full read/write to every database) and recce raises a **critical**
+  finding; if it errors "not authorized", auth is enforced and recce reports it
+  reachable-but-locked (no finding). An end-of-life build raises a medium. Findings fold
+  into the severity totals, the Vulnerabilities sheet, the write-ups, a dedicated
+  **MongoDB** workbook tab, the prove engine (unauth `listDatabases` CONFIRMED), the
+  exploit plan (mongosh / mongodump), and the `status` coverage.
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a

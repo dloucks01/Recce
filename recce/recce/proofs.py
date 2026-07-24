@@ -271,6 +271,52 @@ def _v_ldap(host, port, vuln):
         "FP only if the bind was actually refused - recce would not have raised this."]
 
 
+def _v_snmp(host, port, vuln):
+    # recce guessed the community and read data back over the wire (or walked the
+    # LanMgr user table), so the disclosure is directly observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "user account" in b:
+        return CONFIRMED, [
+            "recce walked the LanManager user MIB (1.3.6.1.4.1.77.1.2.25) and the agent "
+            "returned account names - an unauthenticated spray list (directly observed).",
+            "Re-read them and pivot to a spray: snmp-check <ip> -c <community>; then "
+            "nxc smb <ip> -u users.txt -p passwords.txt.",
+            "FP only if the walk returned nothing - recce would not have raised this."]
+    if "process / software" in b:
+        return CONFIRMED, [
+            "recce walked the host-resources MIB and the agent returned running "
+            "processes / installed software unauthenticated (directly observed).",
+            "snmpwalk -v2c -c <community> <ip> 1.3.6.1.2.1.25.6.3.1.2 (installed "
+            "software); mine for AV/EDR and unpatched builds.",
+            "FP only if the walk returned nothing - recce would not have raised this."]
+    return CONFIRMED, [
+        "recce guessed the community string and the agent answered with SNMP data "
+        "unauthenticated (directly observed, not a banner guess).",
+        "snmpwalk -v2c -c <community> <ip>  (or snmp-check <ip> -c <community>) to dump "
+        "the full tree; a read-WRITE community (verify - recce did NOT send a SET) lets "
+        "you push configuration.",
+        "FP only if the community was actually refused - recce would not have raised this."]
+
+
+def _v_mongodb(host, port, vuln):
+    # recce spoke the wire protocol and listDatabases returned the database list with
+    # no credential, so the no-auth exposure is directly observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "end-of-life" in b or "legacy" in b:
+        return CONFIRMED, [
+            "recce read the running MongoDB version via buildInfo and it is past "
+            "end-of-life (directly observed).",
+            "mongosh mongodb://<ip>:<port>/ --eval 'db.version()' to re-read; check the "
+            "release against the support matrix.",
+            "FP only if a vendor backported fixes to this build in place."]
+    return CONFIRMED, [
+        "recce sent listDatabases over the MongoDB wire protocol with no authentication "
+        "and the server returned the database list (directly observed).",
+        "Dump it: mongosh mongodb://<ip>:<port>/ --eval 'db.adminCommand({listDatabases:1})' "
+        "then mongodump --host <ip> --port <port> --out loot/  (read/write in ROE).",
+        "FP only if the server actually required auth (it would have returned an error)."]
+
+
 def _v_ftp_backdoor(host, port, vuln):
     # A banner-matched trojaned/backdoored FTP build. The banner is strong evidence
     # but backdoor presence is only truly proven by triggering it, so LIKELY with the
@@ -640,6 +686,24 @@ _RECIPES: list[dict] = [
                "-b the naming context; nxc ldap <ip> -u '' -p '' --users.",
      "fp": "The anonymous bind was actually refused (recce would not have raised this).",
      "fn": _v_ldap},
+    {"id": "snmp-community",
+     "match": r"snmp readable with a guessable community|guessable community string|"
+              r"snmp exposes local user|snmp exposes process",
+     "name": "SNMP readable with a guessable community string",
+     "pre": ["SNMP (161/udp) reachable", "A default/guessable community string is accepted"],
+     "finish": "snmpwalk -v2c -c <community> <ip>  (or snmp-check <ip> -c <community>) - "
+               "recce already read data back to prove it.",
+     "fp": "The community was actually refused (recce would not have raised this).",
+     "fn": _v_snmp},
+    {"id": "mongodb-unauth",
+     "match": r"mongodb exposed without authentication|mongodb.*(no auth|unauth)|"
+              r"mongodb end-of-life|mongodb.*legacy build",
+     "name": "MongoDB exposed without authentication",
+     "pre": ["MongoDB (27017-27019) reachable", "listDatabases answered with no credential"],
+     "finish": "mongosh mongodb://<ip>:<port>/ --eval 'db.adminCommand({listDatabases:1})' "
+               "then mongodump --host <ip> --port <port> --out loot/  (recce already read it).",
+     "fp": "The server actually enforced auth and returned an error.",
+     "fn": _v_mongodb},
     {"id": "ftp-backdoor",
      "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
      "name": "Backdoored / RCE FTP build",
