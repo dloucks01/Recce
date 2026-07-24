@@ -1205,7 +1205,7 @@ class EnvironmentAndTargetsTest(unittest.TestCase):
             with open(f, "w") as fh:
                 fh.write("10.0.0.1\n# a comment\n10.0.0.2   # trailing\n"
                          "10.0.1.0/30\n\n")
-            hosts, sm = load_targets(["@" + f])
+            hosts, sm, _ = load_targets(["@" + f])
         self.assertIn("10.0.0.1", hosts)
         self.assertIn("10.0.0.2", hosts)
         self.assertIn("10.0.1.1", hosts)                 # expanded from the CIDR
@@ -2087,7 +2087,7 @@ class EnumRobustnessTest(unittest.TestCase):
         store.set_scope("10.0.0.0/24", 254)
 
         def fake_worker(ip, profile, paths, creds, port_map, subnet_map,
-                        active_probe=True, disc_reason=""):
+                        active_probe=True, disc_reason="", provided_name=""):
             if ip == "10.0.0.11":            # worker raises
                 raise RuntimeError("boom")
             if ip == "10.0.0.12":            # timed out -> None + issue

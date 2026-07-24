@@ -970,6 +970,14 @@ firewalled-but-alive box is confirmed up, never ruled dead. A host is only ever 
 as confirmed-up on a **real reply** (or an open port) — a silent host stays UNKNOWN,
 never marked down.
 
+**Authoritative target list (`--targets-up`).** When you have a complete IP/hostname
+list you trust, pass `--targets-up` with an `@file` (lines may be `IP hostname`, space/
+comma/tab-separated). recce treats the list as ground truth: it implies `-Pn` and
+**pre-seeds every target into the report up front** (named, `up_reason=target-list`), so
+a slow, timed-out, crashed, or even hard-killed scan can **never** make a real host
+vanish — the host is already recorded and scanning only enriches it (rebuild anytime
+with `recce report`).
+
 ## Command & option reference
 
 Every command takes targets as a single IP, several IPs, a range

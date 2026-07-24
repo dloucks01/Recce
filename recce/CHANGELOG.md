@@ -122,6 +122,16 @@ All notable changes to recce are documented here. Dates are UTC.
   fail-fast, skipped above `reconfirm_cap` = 1024 non-responders), and disableable with
   `--no-reconfirm`. This complements the existing 0-response → auto-`-Pn` fallback, the
   0-port congestion-adaptive re-scan, and the UDP liveness probe.
+- **`--targets-up` — authoritative target list (no false "no hosts" from a timeout).**
+  Target `@files` now parse `IP hostname` pairs (space / comma / tab / `hosts`-file
+  style) — the name flows into the report and the IP stays the scan target. With
+  `--targets-up`, recce treats the list as authoritative: it implies `-Pn` and
+  **pre-seeds every target into the datastore up front** (with its provided hostname,
+  `up_reason` = `target-list`), so a slow, timed-out, crashed or killed scan can never
+  make a real host vanish from the report — the host is already there and scanning only
+  enriches it. Pre-seeding persists immediately to SQLite, so even a hard-killed run
+  keeps every target (rebuildable with `recce report`). Use it when you have a complete
+  IP/hostname list you trust.
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a
