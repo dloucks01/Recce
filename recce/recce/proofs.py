@@ -444,6 +444,53 @@ def _v_web_exposure(host, port, vuln):
                        "(whatweb / nikto / nuclei). For .git, dump it: git-dumper <url>/.git ./loot."]
 
 
+def _v_web_app(host, port, vuln):
+    # Tier-1 niche-app exposures: recce fetched/authenticated the endpoint itself, so
+    # each is directly observed -> CONFIRMED, with the app-specific escalation.
+    t = (vuln.title or "").lower()
+    if "jenkins script console" in t:
+        return CONFIRMED, [
+            "recce reached the Jenkins Groovy script console on an unauthenticated GET "
+            "(the console form came back) - that IS arbitrary code execution as the "
+            "Jenkins process.",
+            "RCE within ROE: curl <url>/scriptText --data-urlencode "
+            "'script=println \"id\".execute().text'  (or use the web console)."]
+    if "grafana" in t and ("traversal" in t or "file read" in t):
+        return CONFIRMED, [
+            "recce read /etc/passwd through the Grafana plugin path traversal "
+            "(CVE-2021-43798) - the response carried the root:...:0:0: line.",
+            "Read app secrets next: /public/plugins/<plugin>/../../.../conf/defaults.ini "
+            "and the Grafana DB for admin hashes / datasource creds (within ROE)."]
+    if "elasticsearch readable" in t:
+        return CONFIRMED, [
+            "recce listed Elasticsearch indices with no credential - the cluster serves "
+            "reads unauthenticated.",
+            "Dump it: curl <url>/_search?size=100 ; enumerate indices for PII/secrets."]
+    if "keycloak admin console" in t:
+        return CONFIRMED, [
+            "recce reached the Keycloak admin console unauthenticated (the console app "
+            "loaded) - identity for every federated app sits behind it.",
+            "Try default admin/admin at the console; a working login = realm/user takeover."]
+    if "vault" in t:
+        return CONFIRMED, [
+            "recce read the Vault seal-status API unauthenticated (version + sealed state "
+            "returned) - the API is network-reachable.",
+            "If it is dev-mode / a token leaks, read every secret (vault kv get ...); "
+            "otherwise this is version + exposure recon (match the version to CVEs)."]
+    if "kibana" in t:
+        return CONFIRMED, [
+            "recce read the Kibana status/version endpoint - the version maps to known "
+            "CVEs (several prototype-pollution -> RCE chains).",
+            "Match it: searchsploit kibana <version>; pivot to the ES cluster behind it."]
+    if "default" in t and "credential" in t:
+        return CONFIRMED, [
+            "recce authenticated with a documented default credential (the login request "
+            "returned an authenticated session/cookie) - directly observed.",
+            "Log in with the same creds and pivot: admin of this app is usually a foothold "
+            "to secrets / RCE (pipelines, datasources, object storage, realms)."]
+    return CONFIRMED, ["recce observed this exposure directly (see the finding output)."]
+
+
 def _v_ssti(host, port, vuln):
     return CONFIRMED, ["recce injected a template expression and the engine evaluated it (7*7 -> 49 "
                        "next to our canary) - that IS code execution in the template context, "
@@ -778,6 +825,17 @@ _RECIPES: list[dict] = [
      "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
      "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
      "fn": _v_asrep},
+    {"id": "web-app-unauth",
+     "match": r"jenkins script console|keycloak admin console|grafana.*(traversal|file read)|"
+              r"elasticsearch readable|vault reachable|kibana status endpoint|"
+              r"default [\w /]*credential",
+     "name": "Exposed application (unauthenticated access / default credentials)",
+     "pre": ["The application endpoint is reachable",
+             "No authentication enforced, or a documented default credential was accepted"],
+     "finish": "Log in / re-read with the command in the finding, then pivot per the "
+               "evidence (RCE, file read, data dump, or account takeover).",
+     "fp": "The endpoint actually required valid credentials (recce would not have raised it).",
+     "fn": _v_web_app},
     {"id": "web-exposure", "match": r"exposed (git|\.git|svn|\.env|\.svn|\.ds_store|aws|backup)|"
                                     r"\.env file|\.git/config|mod_status exposed|mod_info exposed|"
                                     r"actuator|heapdump|gateway actuator|backup/source file|phpinfo|"

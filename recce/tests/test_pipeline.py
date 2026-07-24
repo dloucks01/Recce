@@ -3291,6 +3291,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(prod, "WordPress")
         self.assertEqual(ver, "6.4.2")
 
+
     def test_ssti_js_secret_and_wordpress_enum(self):
         from recce import web
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
@@ -3372,6 +3373,148 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(r["id"], "web-exposure")
         self.assertEqual(r["fn"](Host(ip="1.1.1.1"), None, v)[0], proofs.CONFIRMED)
         self.assertEqual(poc.recipe_key_for(v.title), "web")
+
+
+class WebTier1Test(unittest.TestCase):
+    """Tier-1 niche-app signatures: fingerprints, unauth exposure paths, form/JSON
+    default-credential logins, and the prove-engine verdicts for each."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body=b"", extra=None):
+                self.send_response(code)
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+            def do_POST(self):
+                import json as _j
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(length) if length else b""
+                if self.path == "/login":                       # Grafana form login
+                    try:
+                        d = _j.loads(raw or b"{}")
+                    except ValueError:
+                        d = {}
+                    if d.get("user") == "admin" and d.get("password") == "admin":
+                        return self._send(200, b'{"message":"Logged in"}',
+                                          extra={"Set-Cookie": "grafana_session=1; Path=/"})
+                    return self._send(401, b'{"message":"Invalid username or password"}')
+                if self.path == "/api/v1/login":                # MinIO console login
+                    if b"minioadmin" in raw:
+                        return self._send(204, b"", extra={"Set-Cookie": "token=x; Path=/"})
+                    return self._send(401, b"bad creds")
+                return self._send(404, b"nope")
+
+            def do_GET(self):
+                import base64
+                p = self.path
+                if p == "/script":                              # Jenkins script console
+                    return self._send(200, b"<h1>Script Console</h1><form>"
+                                           b"<textarea name='script'></textarea></form>")
+                if p == "/admin/master/console/":               # Keycloak admin console
+                    return self._send(200, b'<html><script>var authServerUrl="/auth";'
+                                           b' kc-context</script>Keycloak Administration</html>')
+                if p.endswith("etc/passwd"):                    # Grafana CVE-2021-43798
+                    return self._send(200, b"root:x:0:0:root:/root:/bin/bash\n")
+                if p == "/v1/sys/seal-status":                  # Vault
+                    return self._send(200, b'{"type":"shamir","sealed":false,'
+                                           b'"version":"1.12.0","initialized":true}')
+                if p.startswith("/_cat/indices"):               # Elasticsearch
+                    return self._send(200, b'[{"health":"green","index":"users","docs.count":"42"}]')
+                if p == "/api/status":                          # Kibana
+                    return self._send(200, b'{"name":"kibana","version":{"number":"7.10.0"}}')
+                if p == "/api/whoami":                           # RabbitMQ mgmt (Basic)
+                    auth = self.headers.get("Authorization", "")
+                    if auth.startswith("Basic "):
+                        try:
+                            u, _, pw = base64.b64decode(auth[6:]).decode().partition(":")
+                        except Exception:
+                            u = pw = ""
+                        if (u, pw) == ("guest", "guest"):
+                            return self._send(200, b'{"name":"guest","tags":["administrator"]}')
+                    return self._send(401, b"auth", extra={"WWW-Authenticate": 'Basic realm="RabbitMQ Management"'})
+                if p == "/":
+                    return self._send(200, b"<html><head><title>Grafana</title></head>"
+                                           b"<body>grafana MinIO Console</body></html>")
+                return self._send(404, b"nope")
+
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def _port(self):
+        return Port(portid=self.port, service="http", state="open")
+
+    def test_fingerprints(self):
+        from recce import web
+        fp = web.fingerprint({}, "grafana MinIO Console")
+        self.assertIn("Grafana", fp["tech"])
+        self.assertIn("MinIO", fp["tech"])
+        es = web.fingerprint({}, '{"cluster_name":"docker-cluster"} You Know, for Search')
+        self.assertIn("Elasticsearch", es["tech"])
+        prod, ver = web.product_version({}, '{"cluster_name":"x","version":{"number":"7.10.2"}}')
+        self.assertEqual((prod, ver), ("Elasticsearch", "7.10.2"))
+
+    def test_unauth_exposure_paths(self):
+        from recce import web
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        sids = {v.script_id for v in findings}
+        self.assertIn("web-jenkins-script", sids)     # critical - unauth Groovy RCE
+        self.assertIn("web-keycloak-console", sids)   # admin console reachable
+        self.assertIn("web-grafana-lfi", sids)        # CVE-2021-43798 file read
+        self.assertIn("web-vault-status", sids)       # Vault reachable
+        self.assertIn("web-elastic-open", sids)       # unauth ES data read
+        self.assertIn("web-kibana", sids)             # Kibana version
+        jenk = next(v for v in findings if v.script_id == "web-jenkins-script")
+        self.assertEqual(jenk.severity, "critical")
+
+    def test_form_and_basic_default_creds(self):
+        from recce import web
+        base = web.url_for("127.0.0.1", self._port())
+        # Form/JSON logins (opt-in): Grafana admin/admin + MinIO minioadmin.
+        forms = web._form_login_defaults("127.0.0.1", self._port(), base, ["Grafana", "MinIO"])
+        titles = " ".join(v.title for v in forms)
+        self.assertIn("Grafana", titles)
+        self.assertIn("MinIO", titles)
+        self.assertTrue(all(v.severity == "critical" for v in forms))
+        # HTTP Basic default guest/guest against the RabbitMQ mgmt path.
+        basic = web._basic_auth_defaults("127.0.0.1", self._port(), base, ["/api/whoami"])
+        self.assertTrue(any("guest:guest" in v.output for v in basic))
+
+    def test_creds_flag_gates_form_login(self):
+        from recce import web
+        # Without creds=True the form-login probe never runs.
+        _, f0 = web.scan_endpoint("127.0.0.1", self._port(), active=True, creds=False)
+        self.assertNotIn("web-default-creds", {v.script_id for v in f0})
+        _, f1 = web.scan_endpoint("127.0.0.1", self._port(), active=True, creds=True)
+        self.assertIn("web-default-creds", {v.script_id for v in f1})
+
+    def test_prove_confirms_tier1(self):
+        from recce import web, proofs
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        h.vulns = findings
+        recs = proofs.verify_host(h)
+        vuln_ids = {r["vuln"] for r in recs}
+        self.assertIn("Exposed application (unauthenticated access / default credentials)", vuln_ids)
+        # The Tier-1 app findings adjudicate CONFIRMED.
+        app = [r for r in recs if "unauthenticated access" in r["vuln"]]
+        self.assertTrue(app and all(r["verdict"] == proofs.CONFIRMED for r in app))
 
 
 class PocRecipeTest(unittest.TestCase):

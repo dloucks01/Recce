@@ -98,6 +98,12 @@ _TECH_BODY = [
     (re.compile(r"jenkins|X-Jenkins", re.I), "Jenkins"),
     (re.compile(r"grafana", re.I), "Grafana"),
     (re.compile(r"phpMyAdmin", re.I), "phpMyAdmin"),
+    (re.compile(r"kc-context|/realms/|Keycloak", re.I), "Keycloak"),
+    (re.compile(r'"cluster_name"|lucene_version|You Know, for Search', re.I), "Elasticsearch"),
+    (re.compile(r"kbn-name|kbnConfig|Kibana", re.I), "Kibana"),
+    (re.compile(r"MinIO Console|minio-", re.I), "MinIO"),
+    (re.compile(r"RabbitMQ Management|rabbitmqadmin", re.I), "RabbitMQ"),
+    (re.compile(r"Vault v[0-9]|x-vault-|api_addr", re.I), "HashiCorp Vault"),
 ]
 _COOKIE_TECH = {"phpsessid": "PHP", "jsessionid": "Java/Servlet", "asp.net_sessionid": "ASP.NET",
                 "laravel_session": "Laravel", "ci_session": "CodeIgniter", "django": "Django"}
@@ -138,6 +144,12 @@ def product_version(headers: dict, body: str) -> tuple[str, str]:
         return "Atlassian Confluence", (m.group(1) if m else "")
     if "gitlab" in (headers.get("x-gitlab-meta", "") + body[:2000]).lower():
         return "GitLab", ""
+    # Elasticsearch root JSON: {"version":{"number":"7.10.2", ...}, "tagline":"You Know…"}
+    if '"cluster_name"' in body or "You Know, for Search" in body:
+        m = re.search(r'"number"\s*:\s*"([\d.]+)"', body)
+        return "Elasticsearch", (m.group(1) if m else "")
+    if headers.get("x-vault-version"):
+        return "HashiCorp Vault", headers["x-vault-version"]
     m = _GENERATOR.search(body)
     if m:
         g = re.match(r"([A-Za-z][A-Za-z ]+?)\s*([\d][\d.]*)?\s*$", m.group(1).strip())
@@ -255,7 +267,7 @@ def _scan_backups(ip: str, port: Port, base_url: str, auth) -> list[Vuln]:
 
 # --- opt-in default-credential probe (bounded, lockout-aware) -------------------
 _BASIC_DEFAULTS = [("admin", "admin"), ("admin", "password"), ("tomcat", "tomcat"),
-                   ("root", "root"), ("admin", "")]
+                   ("root", "root"), ("guest", "guest"), ("admin", "")]
 
 
 def _basic_auth_defaults(ip: str, port: Port, base_url: str, paths: list[str]) -> list[Vuln]:
@@ -277,6 +289,54 @@ def _basic_auth_defaults(ip: str, port: Port, base_url: str, paths: list[str]) -
                                f"{base_url}{path} accepted {user}:{pw or '<blank>'} (HTTP {a[0]}).",
                                "Change the default credentials; restrict the endpoint."))
                 break
+    return out
+
+
+# Form / JSON login apps that HTTP-Basic can't reach. Each descriptor names the login
+# endpoint, how to serialise the credentials, and a success predicate. The whole probe
+# is bounded (one attempt per documented default) and non-destructive - just a login.
+# (id, tech-label from fingerprint, path, content-type, body-template, success, creds)
+_APP_LOGINS = [
+    {"id": "Grafana", "tech": "Grafana", "path": "/login", "ctype": "json",
+     "body": '{{"user":"{u}","password":"{p}"}}',
+     "ok": lambda s, b, h: s == 200 and ("logged in" in b.lower()
+                                         or "grafana_session" in h.get("set-cookie", "")),
+     "creds": [("admin", "admin")]},
+    {"id": "MinIO", "tech": "MinIO", "path": "/api/v1/login", "ctype": "json",
+     "body": '{{"accessKey":"{u}","secretKey":"{p}"}}',
+     "ok": lambda s, b, h: s in (200, 204) and ("set-cookie" in h or "token" in b.lower()),
+     "creds": [("minioadmin", "minioadmin")]},
+]
+
+
+def _form_login_defaults(ip: str, port: Port, base_url: str, tech: list[str]) -> list[Vuln]:
+    """Try one documented default per fingerprinted form/JSON-login app (Grafana, MinIO).
+    Only runs for apps the fingerprint already matched, so it costs nothing otherwise.
+    Non-destructive: a single login POST per default, well under any lockout threshold."""
+    out: list[Vuln] = []
+    tset = {t.lower() for t in tech}
+    for app in _APP_LOGINS:
+        if app["tech"].lower() not in tset:
+            continue
+        ctype = ("application/json" if app["ctype"] == "json"
+                 else "application/x-www-form-urlencoded")
+        for user, pw in app["creds"]:
+            r = _fetch(ip, port, app["path"], method="POST",
+                       body=app["body"].format(u=user, p=pw),
+                       auth={"Content-Type": ctype})
+            if not r:
+                continue
+            try:
+                if app["ok"](r[0], r[2], r[1]):
+                    out.append(_mk(ip, port, "web-default-creds", "critical",
+                                   f"Default {app['id']} credentials accepted: {user}/{pw}",
+                                   ["CWE-1392", "CWE-287"],
+                                   f"POST {base_url}{app['path']} with {user}/{pw} "
+                                   f"authenticated (HTTP {r[0]}).",
+                                   "Change the default admin credentials immediately."))
+                    break
+            except Exception:  # noqa: BLE001 - a odd body never breaks the sweep
+                continue
     return out
 
 
@@ -343,6 +403,42 @@ _PATHS = [
     ("wp-json/wp/v2/users", "low", "web-wpusers", "WordPress user enumeration via REST API",
      ["CWE-200"], "Restrict the users REST endpoint / disable REST user listing.",
      lambda s, b: s == 200 and '"slug"' in b and b.lstrip().startswith("[")),
+    # --- niche application exposures (tier 1) ----------------------------------
+    ("script", "critical", "web-jenkins-script",
+     "Jenkins Script Console reachable unauthenticated (Groovy RCE)",
+     ["CWE-284", "CWE-94"],
+     "Enable Jenkins security + matrix auth; never expose /script anonymously.",
+     lambda s, b: s == 200 and ("Script Console" in b or "Jenkins.instance" in b
+                                or 'name="script"' in b)),
+    ("admin/master/console/", "medium", "web-keycloak-console",
+     "Keycloak admin console reachable",
+     ["CWE-284"],
+     "Restrict the admin console to trusted networks / behind a VPN.",
+     lambda s, b: s == 200 and ("Keycloak Administration" in b or "kc-context" in b
+                                or "authServerUrl" in b or "adminBaseUrl" in b)),
+    ("public/plugins/alertlist/../../../../../../../../etc/passwd", "high",
+     "web-grafana-lfi",
+     "Grafana plugin path traversal - arbitrary file read (CVE-2021-43798)",
+     ["CWE-22"],
+     "Upgrade Grafana to >= 8.3.1; restrict the plugin routes.",
+     lambda s, b: s == 200 and bool(re.search(r"root:.*:0:0:", b))),
+    ("v1/sys/seal-status", "low", "web-vault-status",
+     "HashiCorp Vault reachable (seal status / version readable)",
+     ["CWE-200"],
+     "Restrict the Vault API to trusted clients; keep audit + auth enforced.",
+     lambda s, b: s == 200 and '"sealed"' in b and '"version"' in b),
+    ("_cat/indices?format=json", "high", "web-elastic-open",
+     "Elasticsearch readable without authentication (data exposure)",
+     ["CWE-306", "CWE-284"],
+     "Enable the security realm (authentication) and bind to a trusted interface.",
+     lambda s, b: s == 200 and b.lstrip()[:1] == "["
+     and ('"health"' in b or '"index"' in b or b.strip() == "[]")),
+    ("api/status", "info", "web-kibana",
+     "Kibana status endpoint exposed (version disclosure)",
+     ["CWE-200"],
+     "Restrict Kibana; keep it patched (the version maps to known CVEs).",
+     lambda s, b: s == 200 and '"version"' in b
+     and ("kibana" in b.lower() or '"number"' in b)),
 ]
 
 _DANGEROUS_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT", "PATCH"}
@@ -942,7 +1038,9 @@ def scan_endpoint(ip: str, port: Port, active: bool = True,
         findings.extend(_scan_wordpress(ip, port, base, body, auth))
     if creds:
         findings.extend(_basic_auth_defaults(ip, port, base,
-                                             ["/", "/manager/html", "/admin", "/console"]))
+                                             ["/", "/manager/html", "/admin", "/console",
+                                              "/api/whoami", "/api/overview"]))
+        findings.extend(_form_login_defaults(ip, port, base, fp["tech"]))
     profile["findings"] = len(findings)
     return profile, findings
 
