@@ -111,6 +111,17 @@ All notable changes to recce are documented here. Dates are UTC.
   + `....//`, `%2f` and Windows `win.ini` variants, only on file-ish param names to keep
   false positives and request budget down). Both get CONFIRMED prove-engine verdicts;
   path traversal adds a `curl`/`php://filter` exploit-plan action.
+- **Discovery hardening — fewer false "host down".** The ping sweep now SYN-pings a
+  broader port set that includes the ports firewalled Windows/AD hosts most often still
+  answer (88 Kerberos, 389 LDAP, 5985 WinRM, + mail/DB ports) and retries a dropped
+  probe once more (`--max-retries` 1 → 2). More importantly, a **partial** sweep no
+  longer silently drops the non-responders: recce now **reconfirms** them with a fast
+  `-Pn` top-100-ports scan (`scanner.reconfirm_hosts`) — a host that answers on any port
+  is definitively up, so a firewalled-but-alive box that blocks ping is recovered into
+  the enumeration instead of being written off as down. Bounded (one sweep, `--open`,
+  fail-fast, skipped above `reconfirm_cap` = 1024 non-responders), and disableable with
+  `--no-reconfirm`. This complements the existing 0-response → auto-`-Pn` fallback, the
+  0-port congestion-adaptive re-scan, and the UDP liveness probe.
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a

@@ -387,6 +387,8 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.version_intensity = args.version_intensity
     profile.ping_discovery = not g("no_discovery", False)
     profile.assume_up = not profile.ping_discovery   # -Pn: fail-fast on dead IPs
+    if g("no_reconfirm", False):
+        profile.reconfirm = False
 
 
 def _split_userdomain(username: str, domain: str | None) -> tuple[str, str]:
@@ -568,6 +570,33 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     return host, issues
 
 
+def _reconfirm_missed(missed, profile, paths):
+    """Fast -Pn top-ports re-probe of hosts that missed the ping sweep. A host that
+    answers on ANY port is definitively up, so this recovers firewalled-but-alive boxes
+    before they're written off as down. Returns ({ip: up_reason}, issue|None)."""
+    if not missed or not profile.reconfirm:
+        return {}, None
+    if len(missed) > profile.reconfirm_cap:
+        print(f"    ({len(missed)} non-responders exceed the reconfirm cap "
+              f"{profile.reconfirm_cap}; skipping the re-probe - re-run with -Pn or "
+              "--fast to sweep them all.)")
+        return {}, None
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
+        tf.write("\n".join(missed))
+        tfile = tf.name
+    rx = os.path.join(paths["raw"], "reconfirm.xml")
+    print(f"[*] Reconfirming {len(missed)} non-responder(s) with a fast -Pn top-ports "
+          "probe (catches firewalled-but-alive hosts) ...")
+    _, iss = scanner.reconfirm_hosts(tfile, rx, profile)
+    try:
+        os.unlink(tfile)
+    except OSError:
+        pass
+    recovered = {h.ip: (h.up_reason or "reconfirm: open port")
+                 for h in np.parse_nmap_xml(rx) if h.open_ports}
+    return recovered, iss
+
+
 def _discover(args, profile, store, paths):
     try:
         hosts, subnet_map = load_targets(args.targets)
@@ -642,9 +671,25 @@ def _discover(args, profile, store, paths):
                 profile.ping_discovery = False
                 live_ips = hosts
             elif len(live_ips) < len(hosts):
-                missed = len(hosts) - len(live_ips)
-                print(f"    ({missed} didn't answer. If you expect more live hosts, "
-                      "re-run with -Pn - firewalled hosts often block ping.)")
+                # Partial sweep: DON'T drop the non-responders on faith - a live host
+                # behind a default-drop firewall blocks ping yet still answers a port
+                # scan. Re-probe them; promote any that show an open port.
+                responded = set(live_ips)
+                missed = [ip for ip in hosts if ip not in responded]
+                recovered, riss = _reconfirm_missed(missed, profile, paths)
+                if riss:
+                    _record_issues(store, paths, "(reconfirm)",
+                                   [_mkissue(riss, "reconfirm")])
+                if recovered:
+                    live_ips = list(live_ips) + [ip for ip in missed if ip in recovered]
+                    disc_reasons.update(recovered)
+                    print(f"    [+] Reconfirm recovered {len(recovered)} host(s) that "
+                          "blocked ping but answered a port scan.")
+                still = len(hosts) - len(live_ips)
+                if still:
+                    print(f"    ({still} still didn't answer. If you expect more live "
+                          "hosts, re-run with -Pn - some firewalls drop everything "
+                          "unsolicited.)")
         else:
             live_ips = hosts
             print(f"[*] -Pn: skipping discovery, scanning all {len(hosts)} target(s) "
@@ -3997,6 +4042,10 @@ def _add_discovery(pp) -> None:
                    help="skip the UDP liveness ping sent to a -Pn host that stays "
                         "silent on TCP (the ping tells a firewalled-but-alive host "
                         "apart from a dead one; needs root for raw UDP)")
+    g.add_argument("--no-reconfirm", action="store_true",
+                   help="after a partial ping sweep, DON'T re-probe the non-responders "
+                        "with a fast -Pn top-ports scan (that re-probe recovers "
+                        "firewalled hosts that block ping but answer a port scan)")
     g.add_argument("--reliable", action="store_true",
                    help="rate-limited / lossy network: drop the --min-rate floor, "
                         "retry dropped probes more, let nmap's congestion control "

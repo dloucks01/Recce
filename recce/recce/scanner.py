@@ -55,6 +55,12 @@ class ScanProfile:
                                       # sweep+verify, send a UDP ping to common
                                       # services: a reply / ICMP-unreach proves it's
                                       # up, so a firewalled host isn't ruled dead
+    reconfirm: bool = True            # after a PARTIAL ping sweep, re-probe the hosts
+                                      # that DIDN'T answer with a fast -Pn top-ports
+                                      # scan: any open port proves the host is up, so a
+                                      # firewalled-but-alive box isn't written off down
+    reconfirm_cap: int = 1024         # skip that re-probe when more than this many
+                                      # hosts missed discovery (huge scope -> use -Pn)
 
 
 PROFILES: dict[str, ScanProfile] = {
@@ -269,8 +275,11 @@ def discover_hosts(targets_file: str, out_xml: str) -> tuple[str, ScanIssue | No
     """Ping-sweep the targets; return (xml path, issue|None) listing live hosts."""
     cmd = [
         "nmap", "-sn", "-PE", "-PP",
-        "-PS21,22,23,25,80,135,139,443,445,3389,3306,8080",
-        "-PA80,443,3389", "-n", "--max-retries", "1", "--host-timeout", "3m",
+        # SYN-ping a broad port set - incl. the ports firewalled Windows/AD hosts most
+        # often still answer (88 Kerberos, 389 LDAP, 5985 WinRM) so they aren't ruled
+        # down. --max-retries 2 (not 1) so a single dropped probe doesn't lose a host.
+        "-PS21,22,23,25,53,80,88,110,135,139,143,389,443,445,993,995,1433,3306,3389,5985,8080",
+        "-PA80,443,3389", "-n", "--max-retries", "2", "--host-timeout", "3m",
         "-iL", targets_file, "-oX", out_xml,
     ]
     # nmap's --host-timeout bounds each host, but add a wall-clock backstop scaled
@@ -398,6 +407,32 @@ def udp_liveness_probe(ip: str, out_xml: str,
                     f"-T{profile.timing}", "--max-retries", "2", *to_args,
                     ip, "-oX", out_xml], timeout=kill)
     return out_xml, _issue_from(outcome, out_xml, "udp-liveness", profile.host_timeout)
+
+
+def reconfirm_hosts(targets_file: str, out_xml: str,
+                    profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Re-probe hosts that MISSED the ping sweep with a fast -Pn top-ports scan.
+
+    A ping sweep (even the broad one above) can miss a live host behind a default-drop
+    firewall that silences ICMP *and* every ping port. An actual TCP port scan is a
+    stronger liveness test: a host that answers on ANY port is definitively up. This
+    catches the firewalled-but-alive box before it's written off as down - without
+    full-scanning every dead IP (top 100 ports, --open, fail-fast, one bounded sweep
+    over all the missed IPs). Callers cap the input size (profile.reconfirm_cap)."""
+    scan_type = "-sS" if _is_root() else "-sT"
+    cmd = ["nmap", scan_type, "-Pn", "-n", "--open", "--top-ports", "100",
+           f"-T{profile.timing}", "--max-retries", "2", "--host-timeout", "2m",
+           "-iL", targets_file, "-oX", out_xml]
+    try:
+        with open(targets_file) as fh:
+            ntargets = sum(1 for ln in fh if ln.strip())
+    except OSError:
+        ntargets = 256
+    kill = int(min(5400, max(300, ntargets * 1.5 + 180)))
+    outcome = _run(cmd, timeout=kill)
+    if outcome.missing:
+        return out_xml, ScanIssue("error", "reconfirm: nmap not found on PATH")
+    return out_xml, _issue_from(outcome, out_xml, "reconfirm", None)
 
 
 def _masscan_ports(ip: str, out_xml: str,

@@ -7675,5 +7675,90 @@ class MongodbTest(unittest.TestCase):
             self.assertEqual(cli.main(["mongodb", "-o", out, "--no-probe"]), 0)
 
 
+class DiscoveryReconfirmTest(unittest.TestCase):
+    """False-negative hardening: the discovery probe set, and the reconfirm re-probe
+    that recovers firewalled hosts which block ping but answer a port scan."""
+
+    def test_discovery_command_probes_ad_ports_and_retries(self):
+        from recce import scanner
+        seen = {}
+        orig = scanner._run
+        scanner._run = lambda cmd, timeout=None: (seen.__setitem__("cmd", cmd),
+                                                  scanner.RunOutcome(returncode=0))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                tf = os.path.join(d, "t.txt")
+                with open(tf, "w") as _f:
+                    _f.write("10.0.0.1\n10.0.0.2\n")
+                scanner.discover_hosts(tf, os.path.join(d, "disc.xml"))
+        finally:
+            scanner._run = orig
+        cmd = " ".join(seen["cmd"])
+        self.assertIn("-sn", seen["cmd"])
+        for p in ("88", "389", "5985"):                 # AD/Windows ports firewalls allow
+            self.assertIn(p, cmd)
+        # A single dropped probe shouldn't lose a host -> at least 2 retries.
+        self.assertIn("--max-retries", seen["cmd"])
+        self.assertEqual(seen["cmd"][seen["cmd"].index("--max-retries") + 1], "2")
+
+    def test_reconfirm_command_is_bounded_pn_topports(self):
+        from recce import scanner
+        seen = {}
+        orig = scanner._run
+        scanner._run = lambda cmd, timeout=None: (seen.__setitem__("cmd", cmd),
+                                                  scanner.RunOutcome(returncode=0))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                tf = os.path.join(d, "m.txt")
+                with open(tf, "w") as _f:
+                    _f.write("10.0.0.5\n")
+                scanner.reconfirm_hosts(tf, os.path.join(d, "rc.xml"),
+                                        scanner.PROFILES["standard"])
+        finally:
+            scanner._run = orig
+        cmd = seen["cmd"]
+        self.assertIn("-Pn", cmd)                       # scan even if ping said down
+        self.assertIn("--open", cmd)                    # only report hosts with open ports
+        self.assertIn("--top-ports", cmd)
+        self.assertEqual(cmd[cmd.index("--top-ports") + 1], "100")
+
+    def test_reconfirm_promotes_firewalled_host(self):
+        from recce import cli, scanner
+        orig_rc, orig_parse = scanner.reconfirm_hosts, cli.np.parse_nmap_xml
+        # 10.0.0.50 blocked ping but answers on 445; 10.0.0.51 is genuinely dead.
+        cli.np.parse_nmap_xml = lambda path: [
+            Host(ip="10.0.0.50", ports=[Port(portid=445, state="open")],
+                 up_reason="syn-ack")]
+        scanner.reconfirm_hosts = lambda tf, out, profile: (out, None)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                prof = scanner.ScanProfile()
+                recovered, _ = cli._reconfirm_missed(["10.0.0.50", "10.0.0.51"],
+                                                     prof, {"raw": d})
+        finally:
+            scanner.reconfirm_hosts, cli.np.parse_nmap_xml = orig_rc, orig_parse
+        self.assertIn("10.0.0.50", recovered)           # recovered (open port = up)
+        self.assertNotIn("10.0.0.51", recovered)        # stays down (no open port)
+
+    def test_reconfirm_respects_cap_and_optout(self):
+        from recce import cli, scanner
+        calls = {"n": 0}
+        orig = scanner.reconfirm_hosts
+        scanner.reconfirm_hosts = lambda tf, out, profile: (
+            calls.__setitem__("n", calls["n"] + 1), (out, None))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                # Over the cap -> skipped, nmap never invoked.
+                prof = scanner.ScanProfile(reconfirm_cap=1)
+                rec, _ = cli._reconfirm_missed(["a", "b", "c"], prof, {"raw": d})
+                self.assertEqual((rec, calls["n"]), ({}, 0))
+                # Opted out -> skipped.
+                prof2 = scanner.ScanProfile(reconfirm=False)
+                rec2, _ = cli._reconfirm_missed(["a"], prof2, {"raw": d})
+                self.assertEqual((rec2, calls["n"]), ({}, 0))
+        finally:
+            scanner.reconfirm_hosts = orig
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
