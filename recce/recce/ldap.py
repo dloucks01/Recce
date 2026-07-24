@@ -24,6 +24,7 @@ workbook tab. Airgapped-safe; degrades cleanly when the port doesn't speak LDAP.
 from __future__ import annotations
 
 import socket
+import struct
 
 from .models import Host, Port
 
@@ -538,49 +539,95 @@ def _paged_search(sock, base: str, filt: bytes, attrs: list[str], timeout: float
 _SASL_IN_PROGRESS = 14
 
 
-def _ntlm_bind(sock, user: str, domain: str, nthash: bytes, timeout: float) -> int | None:
-    """SASL GSS-SPNEGO NTLM bind (pass-the-hash): send NEGOTIATE, read the CHALLENGE
-    from serverSaslCreds, reply with the NTLMv2 AUTHENTICATE. Returns the final LDAP
-    resultCode (0 = success), or None on a malformed exchange."""
+class _SealedStream:
+    """Wraps a socket so that, after a sealed NTLM bind, every LDAP PDU is transparently
+    NTLM sign+seal wrapped on send and unwrapped on recv (each SASL buffer is a 4-byte
+    big-endian length prefix + token). Presents the same recv/sendall/settimeout/close
+    the BER reader uses, so the search code is unchanged."""
+
+    def __init__(self, sock, ctx, timeout: float):
+        self._sock, self._ctx, self._timeout = sock, ctx, timeout
+        self._buf = b""
+
+    def settimeout(self, t):
+        self._sock.settimeout(t)
+
+    def sendall(self, data: bytes):
+        wrapped = self._ctx.wrap(data)
+        self._sock.sendall(struct.pack(">I", len(wrapped)) + wrapped)
+
+    def recv(self, n: int) -> bytes:
+        while len(self._buf) < n:
+            hdr = _recvn(self._sock, 4)
+            if len(hdr) < 4:
+                break
+            frame = _recvn(self._sock, struct.unpack(">I", hdr)[0])
+            if not frame:
+                break
+            self._buf += self._ctx.unwrap(frame)
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+    def close(self):
+        self._sock.close()
+
+
+def _ntlm_bind(sock, user: str, domain: str, nthash: bytes, timeout: float,
+               seal: bool):
+    """SASL GSS-SPNEGO NTLM bind (pass-the-hash): NEGOTIATE -> CHALLENGE -> AUTHENTICATE.
+    When `seal`, negotiates sign+seal and returns (resultCode, SecurityContext) so the
+    caller can wrap the post-bind traffic (satisfies a signing-required DC on 389).
+    Returns (resultCode, ctx_or_None)."""
     from . import ntlm
-    sock.sendall(build_sasl_bind(1, "GSS-SPNEGO", ntlm.type1()))
+    flags = ntlm._SEAL_FLAGS if seal else ntlm._TYPE1_FLAGS
+    sock.sendall(build_sasl_bind(1, "GSS-SPNEGO", ntlm.type1(flags)))
     resp = _read_message(sock, timeout)
     if result_code(resp) != _SASL_IN_PROGRESS:
-        return result_code(resp)                    # rejected outright / no NTLM
+        return result_code(resp), None              # rejected outright / no NTLM
     chal = ntlm.parse_type2(sasl_creds(resp))
     if chal is None:
-        return None
-    sock.sendall(build_sasl_bind(2, "GSS-SPNEGO",
-                                 ntlm.type3(user, domain, nthash, chal)))
-    return result_code(_read_message(sock, timeout))
+        return None, None
+    if seal:
+        type3, ctx = ntlm.type3_sealed(user, domain, nthash, chal)
+    else:
+        type3, ctx = ntlm.type3(user, domain, nthash, chal), None
+    sock.sendall(build_sasl_bind(2, "GSS-SPNEGO", type3))
+    return result_code(_read_message(sock, timeout)), ctx
 
 
-def _authenticate(sock, creds: dict, timeout: float) -> tuple[bool, str]:
+def _authenticate(sock, creds: dict, timeout: float, seal: bool) -> tuple[bool, str, object]:
     """Bind with the supplied credential. Pass-the-hash (creds['hash']) uses an NTLM
-    SASL bind; otherwise a simple bind with the password. Returns (ok, method)."""
+    SASL bind (sign+seal on plaintext 389); otherwise a simple bind with the password.
+    Returns (ok, method, security_context_or_None)."""
     from . import ntlm
     if creds.get("hash"):
-        rc = _ntlm_bind(sock, creds.get("user", ""), creds.get("domain", ""),
-                        ntlm.normalize_nt_hash(creds["hash"]), timeout)
-        return rc == 0, "NTLM (pass-the-hash)"
+        rc, ctx = _ntlm_bind(sock, creds.get("user", ""), creds.get("domain", ""),
+                             ntlm.normalize_nt_hash(creds["hash"]), timeout, seal)
+        method = "NTLM sealed (pass-the-hash)" if ctx else "NTLM (pass-the-hash)"
+        return rc == 0, method, ctx
     sock.sendall(build_bind_request(1, _bind_dn(creds), creds.get("secret", "")))
-    return result_code(_read_message(sock, timeout)) == 0, "simple bind"
+    return result_code(_read_message(sock, timeout)) == 0, "simple bind", None
 
 
 def enum_authenticated(ip: str, port: int, base: str, creds: dict,
                        timeout: float = _TIMEOUT) -> dict:
     """Authenticated LDAP enumeration over the stdlib client: bind with creds (simple
-    bind with a password, or an NTLM SASL bind for pass-the-hash), then paged-search
-    users + computers + the domain object. {users, computers, domain, error}."""
+    bind with a password, or an NTLM SASL bind for pass-the-hash - sign+sealed on
+    plaintext 389 so a signing-required DC accepts it), then paged-search users +
+    computers + the domain object. {users, computers, domain, error}."""
     sock = _open(ip, port, timeout)
     if sock is None:
         return {"error": "connect failed"}
     try:
         sock.settimeout(timeout)
-        ok, method = _authenticate(sock, creds, timeout)
+        # Seal an NTLM bind on plaintext 389 (LDAPS already protects the channel).
+        seal = bool(creds.get("hash")) and not _is_tls_port(port)
+        ok, method, ctx = _authenticate(sock, creds, timeout, seal)
         if not ok:
             return {"error": f"authenticated bind rejected ({method})",
                     "bind_dn": _bind_dn(creds), "bind_method": method}
+        if ctx is not None:                          # seal all post-bind LDAP traffic
+            sock = _SealedStream(sock, ctx, timeout)
         users = _paged_search(sock, base,
                               f_and(f_equal("objectCategory", "person"),
                                     f_equal("objectClass", "user")),
@@ -807,7 +854,8 @@ TESTING_NARRATIVE = [
      "captured pre-auth and pre-filled into the follow-on ldapsearch / netexec commands."),
     ("4. Authenticated enumeration (with -u/-p/-d, or --hash for pass-the-hash)",
      "The same stdlib client binds with the supplied credential - a simple bind with a "
-     "password, or an NTLM SASL (GSS-SPNEGO) bind for pass-the-hash - and PAGES the "
+     "password, or an NTLM SASL (GSS-SPNEGO) bind for pass-the-hash (sign+sealed on "
+     "plaintext 389, so a signing-required DC accepts it) - and PAGES the "
      "directory (past AD's MaxPageSize) for users, computers and the domain object, "
      "deriving kerberoastable / AS-REP-roastable / delegation / privileged accounts from "
      "the userAccountControl bits - in-house, no nxc/bloodhound hand-off. The accounts "

@@ -4389,7 +4389,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_creds(lp)
     lp.add_argument("--hash", metavar="NThash",
                     help="NTLM hash for pass-the-hash (with -u/-d): an NTLM SASL bind "
-                         "authenticates the enumeration without the plaintext password")
+                         "authenticates the enumeration without the plaintext password; "
+                         "on plaintext 389 it is sign+sealed so a signing-required DC "
+                         "accepts it (LDAPS 636 needs no sealing)")
     lp.add_argument("-o", "--output-dir", default="engagement")
     lp.add_argument("--title", default="Recce Engagement")
     lp.set_defaults(func=cmd_ldap)
