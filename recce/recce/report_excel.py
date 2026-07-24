@@ -99,7 +99,8 @@ TAB_COLORS = {
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
     "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND, "MSSQL": _TAB_FIND,
     "SMB": _TAB_FIND, "FTP": _TAB_FIND, "Docker": _TAB_FIND,
-    "Kubernetes": _TAB_FIND, "LDAP": _TAB_FIND, "Raw NSE": _TAB_RAW,
+    "Kubernetes": _TAB_FIND, "LDAP": _TAB_FIND,
+    "SNMP": _TAB_FIND, "MongoDB": _TAB_FIND, "Raw NSE": _TAB_RAW,
 }
 
 
@@ -1026,6 +1027,14 @@ def _build_guide(wb, meta: dict) -> None:
                  "detection, cleartext-389 / relay surface - and, with -u/-p/-d, a "
                  "paged authenticated enum (users/SPNs/delegation -> AD Quick Wins). "
                  "Run `recce ldap`."),
+        ("SNMP", "SNMP over UDP (stdlib BER v2c client): community-string guessing, "
+                 "sysDescr/sysName, and a walk of the LanMgr user table, running "
+                 "processes and installed software (local accounts -> Users & "
+                 "Accounts). Read-only. Run `recce snmp`."),
+        ("MongoDB", "MongoDB wire protocol (stdlib OP_MSG/BSON client): hello + "
+                    "buildInfo fingerprint, then listDatabases to prove whether the "
+                    "instance answers privileged commands with no authentication. "
+                    "Run `recce mongodb`."),
         # --- Active Directory cluster (kept contiguous) ---
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
@@ -1085,6 +1094,10 @@ def _build_guide(wb, meta: dict) -> None:
                              "Secrets / all cluster secrets)."),
         ("ldap", "LDAP: anonymous bind + RootDSE (domain/forest/DC/functional level) "
                  "and anonymous directory-read detection; flags cleartext 389."),
+        ("snmp", "SNMP: community-string guessing over UDP + a read-only walk of "
+                 "users / processes / installed software (local accounts -> spray)."),
+        ("mongodb / mongo", "MongoDB: fingerprint + prove unauthenticated "
+                            "listDatabases (no-auth exposure)."),
         ("ad <sharphound> <certipy> -u U -p P -d DOM",
          "Import SharpHound + Certipy (ADCS): AD vulns, ESC findings, and the "
          "shortest paths from your account to Domain Admin - commands pre-filled."),
@@ -1250,7 +1263,7 @@ def _build_runbook(wb, meta: dict) -> None:
         "Capture terminal-style PROOF screenshots of executed actions (RCE output, "
         "write-proof, data mining) into engagement/screenshots/ for the walkthroughs.")
 
-    section("5d. Additional services - SMB / FTP / Docker / Kubernetes / LDAP",
+    section("5d. Additional services - SMB / FTP / Docker / Kubernetes / LDAP / SNMP / MongoDB",
             "Deep, per-service offensive enumeration. Each probes with recce's own "
             "stdlib code (no creds needed to start), folds findings into the main "
             "totals, and fills its own tab. Run the ones your enum turned up.")
@@ -1275,6 +1288,15 @@ def _build_runbook(wb, meta: dict) -> None:
         "pass-the-hash via an NTLM SASL bind) it PAGES an authenticated enum (users / "
         "computers / domain) in-house and derives kerberoastable / AS-REP / delegation / "
         "privileged accounts straight into Users & Accounts + AD Quick Wins. Read-only.")
+    cmd("snmp -o eng   [--no-probe]",
+        "SNMP: guesses community strings over UDP 161, reads sysDescr / sysName, and "
+        "walks the LanMgr user table, running processes and installed software - local "
+        "accounts flow into Users & Accounts. Flags read-write communities by name. "
+        "Read-only (never sends a SET).")
+    cmd("mongodb -o eng   [--no-probe]",
+        "MongoDB: speaks the wire protocol (OP_MSG/BSON), fingerprints with hello + "
+        "buildInfo, then proves whether listDatabases answers with NO authentication - "
+        "a CONFIRMED no-auth instance is full read/write to every database.")
 
     section("6. Act on the findings - turn CONFIRMED findings into a plan",
             "Once findings are proven (Verification tab), stage the exploitation and "
@@ -2090,6 +2112,102 @@ def _build_ldap(wb, analysis: dict) -> None:
     sh.set_col(2, 120)
 
 
+def _build_snmp(wb, analysis: dict) -> None:
+    """SNMP sheet: per-agent community/RW posture, exposed users, findings, runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import snmp as _snmp
+    sh = wb.add_sheet("SNMP")
+    sh.write([("SNMP - offensive UDP enumeration", "title")])
+    sh.write([("recce speaks SNMP v2c directly (stdlib BER over UDP): it guesses "
+               "community strings, reads sysDescr/sysName, and walks the LanMgr user "
+               "table, running processes and installed software. Local accounts flow "
+               "into Users & Accounts. Read-only - it never sends a SET.", "sub")])
+    sh.write([""])
+    sh.write([("How SNMP is tested", "title")])
+    for phase, text in _snmp.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Agents", "title")])
+    sh.write([(h, "bold") for h in
+              ("IP:Port", "Community", "Access", "System", "Users")])
+    for t in tgts:
+        comm = t.get("community")
+        commcell = (comm, "sev_medium") if comm else "(no answer)"
+        access = ("READ-WRITE", "sev_high") if t.get("rw_likely") else \
+            ("read-only" if comm else "")
+        sh.write([f"{t['ip']}:{t['port']}", commcell, access,
+                  t.get("sys_name", ""),
+                  "" if not t.get("users") else str(t.get("users"))])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_mongodb(wb, analysis: dict) -> None:
+    """MongoDB sheet: per-instance auth posture, version, exposed databases,
+    findings, runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import mongodb as _mongo
+    sh = wb.add_sheet("MongoDB")
+    sh.write([("MongoDB - offensive enumeration", "title")])
+    sh.write([("recce speaks the MongoDB wire protocol directly (stdlib OP_MSG/BSON): "
+               "hello + buildInfo to fingerprint, then listDatabases to prove whether "
+               "the instance answers privileged commands without authentication. "
+               "Read-only - it never writes or drops.", "sub")])
+    sh.write([""])
+    sh.write([("How MongoDB is tested", "title")])
+    for phase, text in _mongo.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Instances", "title")])
+    sh.write([(h, "bold") for h in
+              ("IP:Port", "Auth", "Version", "Databases")])
+    for t in tgts:
+        if t.get("unauth"):
+            authcell = ("NO AUTH", "sev_critical")
+        elif t.get("version"):
+            authcell = ("auth required", "sev_medium")
+        else:
+            authcell = "?"
+        sh.write([f"{t['ip']}:{t['port']}", authcell, t.get("version", ""),
+                  "" if not t.get("databases") else str(t.get("databases"))])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
 # --- public entry points --------------------------------------------------------
 
 def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
@@ -2132,7 +2250,8 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
       * Checklist <-> Services  - host <-> its open ports (the working pair).
       * Services <-> Vulnerabilities <-> Verification - port -> finding -> is-it-real.
       * Vulnerabilities -> Services by Product - "who else runs this?" pivot.
-      * Databases + MSSQL/SMB/FTP/Docker/Kubernetes/LDAP - the per-service deep-dive band.
+      * Databases + MSSQL/SMB/FTP/Docker/Kubernetes/LDAP/SNMP/MongoDB - the per-service
+        deep-dive band.
       * Active Directory <-> AD Quick Wins <-> AD Findings/Paths <-> Users & Accounts.
     """
     pre = [_spec_checklist(hosts), _spec_services(hosts), _spec_web(hosts),
@@ -2181,7 +2300,8 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     # Service deep-dive band (Databases is the last of `pre`, immediately before).
     for key, title in (("mssql", "MSSQL"), ("smb", "SMB"), ("ftp", "FTP"),
                        ("docker", "Docker"), ("kubernetes", "Kubernetes"),
-                       ("ldap", "LDAP")):
+                       ("ldap", "LDAP"), ("snmp", "SNMP"),
+                       ("mongodb", "MongoDB")):
         if _mod(key):
             nav.append(title)
     # AD cluster, kept contiguous.
@@ -2250,6 +2370,8 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     _build_docker(wb, meta.get("docker") or {})
     _build_kubernetes(wb, meta.get("kubernetes") or {})
     _build_ldap(wb, meta.get("ldap") or {})
+    _build_snmp(wb, meta.get("snmp") or {})
+    _build_mongodb(wb, meta.get("mongodb") or {})
     # AD cluster, kept contiguous: inventory -> quick wins -> import findings/paths
     # -> users & accounts.
     _build_active_directory(wb, hosts, domains)

@@ -6952,5 +6952,328 @@ class DeployTest(unittest.TestCase):
             deploy.deploy_one = orig
 
 
+class SnmpTest(unittest.TestCase):
+    """Deep SNMP module: BER/OID round-trip, a mock UDP agent (community brute +
+    GETNEXT walk), findings, account harvesting, prove verdicts, `recce snmp`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import threading
+        from recce import snmp as S
+
+        # MIB: exact-match GETs + a couple of walkable subtrees. Values are the
+        # already-BER-encoded value bytes (what sits after the OID in a varbind).
+        cls.mib = {
+            "1.3.6.1.2.1.1.1.0": S._octet("Windows Server 2019 x64"),   # sysDescr
+            "1.3.6.1.2.1.1.5.0": S._octet("DC01"),                       # sysName
+            "1.3.6.1.4.1.77.1.2.25.1": S._octet("Administrator"),        # LanMgr users
+            "1.3.6.1.4.1.77.1.2.25.2": S._octet("Guest"),
+            "1.3.6.1.4.1.77.1.2.25.3": S._octet("svc_backup"),
+            "1.3.6.1.2.1.25.4.2.1.2.1": S._octet("services.exe"),        # a process
+        }
+        cls._sorted = sorted(cls.mib, key=lambda o: [int(x) for x in o.split(".")])
+
+        def _tuple(o):
+            return [int(x) for x in o.split(".")]
+
+        def _get_response(community, rid, oid, value_bytes):
+            varbind = S._tlv(0x30, S.encode_oid(oid) + value_bytes)
+            pdu = S._tlv(0xA2, S._int(rid) + S._int(0) + S._int(0)
+                         + S._tlv(0x30, varbind))
+            return S._tlv(0x30, S._int(1) + S._octet(community) + pdu)
+
+        def _parse_request(data):
+            _, msg, _ = S._parse_tlv(data, 0)
+            _, _ver, i = S._parse_tlv(msg, 0)
+            _, comm, i = S._parse_tlv(msg, i)
+            pdu_tag, pdu, _ = S._parse_tlv(msg, i)
+            _, rid_b, j = S._parse_tlv(pdu, 0)
+            rid = int.from_bytes(rid_b, "big")
+            _, _err, j = S._parse_tlv(pdu, j)
+            _, _eidx, j = S._parse_tlv(pdu, j)
+            _, vbs, _ = S._parse_tlv(pdu, j)
+            _, vb, _ = S._parse_tlv(vbs, 0)
+            _, oid_b, _ = S._parse_tlv(vb, 0)
+            return comm.decode(), rid, pdu_tag, S.decode_oid(oid_b)
+
+        END_OF_MIB = b"\x82\x00"                   # endOfMibView -> walk stops
+
+        def _answer(community, rid, pdu_tag, oid):
+            if community != "public":               # only this community answers
+                return None
+            if pdu_tag == 0xA0:                      # GetRequest (exact)
+                val = cls.mib.get(oid)
+                return _get_response(community, rid, oid,
+                                     val if val is not None else END_OF_MIB)
+            # GetNextRequest: the numerically-next OID in the MIB.
+            want = _tuple(oid)
+            for cand in cls._sorted:
+                if _tuple(cand) > want:
+                    return _get_response(community, rid, cand, cls.mib[cand])
+            return _get_response(community, rid, oid, END_OF_MIB)
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        cls.port = sock.getsockname()[1]
+        cls.sock = sock
+        cls._stop = False
+
+        def serve():
+            while not cls._stop:
+                try:
+                    sock.settimeout(0.3)
+                    data, addr = sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    comm, rid, tag, oid = _parse_request(data)
+                    resp = _answer(comm, rid, tag, oid)
+                    if resp is not None:
+                        sock.sendto(resp, addr)
+                except (IndexError, ValueError):
+                    pass
+
+        cls._thread = threading.Thread(target=serve, daemon=True)
+        cls._thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop = True
+        cls._thread.join(timeout=2)
+        cls.sock.close()
+
+    def test_ber_and_oid_roundtrip(self):
+        from recce import snmp as S
+        for oid in ("1.3.6.1.2.1.1.1.0", "1.3.6.1.4.1.77.1.2.25.3",
+                    "1.3.6.1.2.1.25.4.2.1.2.1"):
+            _tag, body, _ = S._parse_tlv(S.encode_oid(oid), 0)
+            self.assertEqual(S.decode_oid(body), oid)
+        # A well-formed GetResponse parses back to (error_status, [(oid, value)]).
+        err, vbs = S.parse_response(_self_response())
+        self.assertEqual(err, 0)
+        self.assertEqual(vbs, [("1.3.6.1.2.1.1.1.0", "x")])
+
+    def test_probe_brutes_community_and_walks(self):
+        from recce import snmp as S
+        pr = S.probe("127.0.0.1", self.port, timeout=1.0, known_open=True)
+        self.assertIsNotNone(pr)
+        self.assertEqual(pr["community"], "public")
+        self.assertEqual(pr["sys_descr"], "Windows Server 2019 x64")
+        self.assertEqual(pr["sys_name"], "DC01")
+        self.assertEqual(pr["users"], ["Administrator", "Guest", "svc_backup"])
+        self.assertEqual(pr["processes"], ["services.exe"])
+
+    def test_findings_accounts_and_prove(self):
+        from recce import snmp as S, proofs
+        pr = S.probe("127.0.0.1", self.port, timeout=1.0, known_open=True)
+        h = Host(ip="127.0.0.1", ports=[Port(portid=161, service="snmp", state="open")])
+        fs = S.findings([h], {("127.0.0.1", 161): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("guessable community string", titles)
+        self.assertIn("local user accounts", titles)
+        self.assertIn("process / software inventory", titles)
+        # Enumerated users become Account rows.
+        accts = S.accounts_from_probe("127.0.0.1", pr)
+        names = {a.name for a in accts}
+        self.assertEqual(names, {"Administrator", "Guest", "svc_backup"})
+        self.assertTrue(all(a.source == "snmp" for a in accts))
+        # Prove engine CONFIRMs the community exposure (directly observed).
+        h.vulns = S.findings_to_vulns(fs)["127.0.0.1"]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)
+
+    def test_cmd_snmp_end_to_end(self):
+        from recce import cli, xlsx, snmp as S
+        from recce.store import Store
+        orig_targets, orig_is = S.snmp_targets, S.is_snmp
+        # Point the single target at the mock agent's ephemeral port, and teach is_snmp
+        # to recognise that port so findings() matches the probe.
+        S.snmp_targets = lambda hosts: [{"ip": "127.0.0.1", "hostname": "",
+                                         "port": self.port, "known_open": True}]
+        S.is_snmp = lambda p: p.portid == self.port or orig_is(p)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="snmp")]))
+                st.close()
+                rc = cli.main(["snmp", "-o", out])
+                self.assertEqual(rc, 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("SNMP", sheets)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                self.assertTrue([v for v in h.vulns if v.source == "snmp"])
+                # Enumerated accounts persisted onto the host.
+                self.assertTrue([a for a in h.accounts if a.source == "snmp"])
+        finally:
+            S.snmp_targets, S.is_snmp = orig_targets, orig_is
+
+    def test_no_answer_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.8", ports=[Port(portid=22, service="ssh")]))
+            st.close()
+            self.assertEqual(cli.main(["snmp", "-o", out, "--no-probe"]), 0)
+
+
+def _self_response():
+    """Tiny well-formed GetResponse so a bare parse_response smoke-check has input."""
+    from recce import snmp as S
+    varbind = S._tlv(0x30, S.encode_oid("1.3.6.1.2.1.1.1.0") + S._octet("x"))
+    pdu = S._tlv(0xA2, S._int(1) + S._int(0) + S._int(0) + S._tlv(0x30, varbind))
+    return S._tlv(0x30, S._int(1) + S._octet("public") + pdu)
+
+
+class MongodbTest(unittest.TestCase):
+    """Deep MongoDB module: BSON round-trip, a mock wire-protocol server (hello /
+    buildInfo / listDatabases), unauth detection, findings, prove, `recce mongodb`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import threading
+        import struct
+        from recce import mongodb as M
+
+        def e_double(name, v):
+            return b"\x01" + M._cstr(name) + struct.pack("<d", v)
+
+        def e_bool(name, v):
+            return b"\x08" + M._cstr(name) + bytes([1 if v else 0])
+
+        def e_doc(name, doc):
+            return b"\x03" + M._cstr(name) + doc
+
+        def e_array(name, docs):
+            inner = M.bson_doc(*[e_doc(str(i), d) for i, d in enumerate(docs)])
+            return b"\x04" + M._cstr(name) + inner
+
+        hello = M.bson_doc(e_bool("isWritablePrimary", True),
+                           M._e_int32("maxWireVersion", 17),
+                           e_double("ok", 1.0))
+        build = M.bson_doc(M._e_str("version", "6.0.1"), e_double("ok", 1.0))
+        dbs = e_array("databases", [
+            M.bson_doc(M._e_str("name", "admin"), e_double("sizeOnDisk", 4096.0)),
+            M.bson_doc(M._e_str("name", "config"), e_double("sizeOnDisk", 8192.0)),
+            M.bson_doc(M._e_str("name", "loot"), e_double("sizeOnDisk", 999.0)),
+        ])
+        listdbs = M.bson_doc(dbs, e_double("totalSize", 12288.0), e_double("ok", 1.0))
+        cls._replies = {"hello": hello, "buildInfo": build, "listDatabases": listdbs}
+
+        replies = cls._replies
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                while True:
+                    hdr = M._recvn(sock, 16)
+                    if len(hdr) < 16:
+                        return
+                    length, rid = struct.unpack("<i", hdr[:4])[0], \
+                        struct.unpack("<i", hdr[4:8])[0]
+                    body = M._recvn(sock, length - 16)
+                    msg = hdr + body
+                    try:
+                        doc, _ = M.bson_parse(msg, 16 + 4 + 1)
+                    except (IndexError, ValueError, struct.error):
+                        return
+                    cmd = next(iter(doc), "")
+                    reply = replies.get(cmd)
+                    if reply is None:
+                        reply = M.bson_doc(M._e_str("errmsg", "no such command"),
+                                           e_double("ok", 0.0))
+                    sock.sendall(M.op_msg(rid, reply))
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_bson_roundtrip(self):
+        from recce import mongodb as M
+        doc = M.bson_doc(M._e_int32("a", 7), M._e_str("b", "hi"))
+        parsed, _ = M.bson_parse(doc, 0)
+        self.assertEqual(parsed, {"a": 7, "b": "hi"})
+
+    def test_probe_detects_unauth(self):
+        from recce import mongodb as M
+        pr = M.probe("127.0.0.1", self.port, timeout=3.0)
+        self.assertIsNotNone(pr)
+        self.assertEqual(pr["version"], "6.0.1")
+        self.assertTrue(pr["unauth"])
+        self.assertEqual([d["name"] for d in pr["databases"]],
+                         ["admin", "config", "loot"])
+
+    def test_findings_and_prove(self):
+        from recce import mongodb as M, proofs
+        pr = M.probe("127.0.0.1", self.port, timeout=3.0)
+        h = Host(ip="10.0.7.7",
+                 ports=[Port(portid=27017, service="mongodb", state="open")])
+        fs = M.findings([h], {("10.0.7.7", 27017): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("MongoDB exposed without authentication", titles)
+        crit = [f for f in fs if f["severity"] == "critical"]
+        self.assertTrue(crit)
+        h.vulns = M.findings_to_vulns(fs)["10.0.7.7"]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)
+
+    def test_cmd_mongodb_end_to_end(self):
+        from recce import cli, xlsx, mongodb as M
+        from recce.store import Store
+        orig = M.is_mongodb
+        M.is_mongodb = lambda p: (p.state == "open"
+                                  and (p.portid == self.port or orig(p)))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="mongodb")]))
+                st.close()
+                rc = cli.main(["mongodb", "-o", out])
+                self.assertEqual(rc, 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("MongoDB", sheets)
+                vtxt = "\n".join(" ".join(map(str, r))
+                                 for r in sheets["Vulnerabilities"])
+                self.assertIn("MongoDB", vtxt)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                self.assertTrue([v for v in h.vulns if v.source == "mongodb"])
+        finally:
+            M.is_mongodb = orig
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.9", ports=[Port(portid=22, service="ssh")]))
+            st.close()
+            self.assertEqual(cli.main(["mongodb", "-o", out, "--no-probe"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

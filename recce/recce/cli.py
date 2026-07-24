@@ -319,6 +319,13 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["ldap"] = json.loads(ldap_blob)
         except ValueError:
             pass
+    for _mk in ("snmp", "mongodb"):
+        _blob = store.get_meta(_mk)
+        if _blob:
+            try:
+                meta[_mk] = json.loads(_blob)
+            except ValueError:
+                pass
     credentials = store.all_credentials()   # one table scan, shared by both reports
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
@@ -3475,6 +3482,99 @@ def _ldap_shot(args, ip, command, output):
     return path
 
 
+def cmd_snmp(args: argparse.Namespace) -> int:
+    """Deep SNMP enumeration: brute common community strings over UDP 161, then read
+    the system group + walk Windows users / processes / software. Read-only - recce
+    never sends a SET (a read-write community is flagged by name, not exercised)."""
+    from . import snmp
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = snmp.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No SNMP-responsive hosts. (SNMP is UDP 161; recce probes it directly, "
+              "so target the hosts you expect to run it.)")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} SNMP endpoint(s):")
+    for t in tgts:
+        c = t.get("community")
+        state = (f"community '{c}'" + ("  [RW-likely]" if t.get("rw_likely") else "")
+                 if c else "no readable community")
+        name = f"  {t.get('sys_name')}" if t.get("sys_name") else ""
+        users = f"  {t.get('users')} users" if t.get("users") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{name}{users}")
+
+    by_ip = _fold_service_findings(store, hosts, analysis, "snmp",
+                                   snmp.findings_to_vulns, "SNMP")
+    # analyze() attached SNMP Account rows in place; persist hosts that gained them
+    # but produced no SNMP vuln (rare) so the accounts still land.
+    host_by_ip = {h.ip: h for h in hosts}
+    for t in tgts:
+        if t.get("users") and t["ip"] not in by_ip and t["ip"] in host_by_ip:
+            store.upsert_host(host_by_ip[t["ip"]], merge=False)
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> SNMP sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_mongodb(args: argparse.Namespace) -> int:
+    """Deep MongoDB enumeration: speak the wire protocol (stdlib OP_MSG/BSON), read the
+    version, and test whether listDatabases works WITHOUT authentication - an exposed
+    instance is a CONFIRMED critical data exposure. Read-only."""
+    from . import mongodb
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose MongoDB.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = mongodb.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No MongoDB endpoints in the datastore (no port 27017-27019). Run "
+              "`enum` against the database hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} MongoDB endpoint(s):")
+    for t in tgts:
+        if t.get("unauth"):
+            state = f"EXPOSED (unauth, {t.get('databases', 0)} db)"
+        else:
+            state = "auth required" if t.get("version") else "probed"
+        ver = f"  {t.get('version', '')}" if t.get("version") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
+
+    _fold_service_findings(store, hosts, analysis, "mongodb",
+                           mongodb.findings_to_vulns, "MongoDB")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> MongoDB sheet written; findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3554,12 +3654,15 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     an applicable open port have actually had the module run. 'Run' = the host appears
     in the module's stored analysis targets, or it carries a finding from that source.
     Ordered highest-impact first so `status` surfaces the critical exposures."""
-    from . import mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap
+    from . import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
+                   snmp as _snmp, mongodb as _mongo)
     mods = [
+        ("MongoDB", "mongodb", _mongo.is_mongodb, "recce mongodb"),
         ("Docker", "docker", docker.is_docker, "recce docker"),
         ("Kubernetes", "kubernetes", k8s.is_k8s, "recce k8s"),
         ("MSSQL", "mssql", mssql.is_mssql, "recce mssql -u USER -p PASS -d DOM"),
         ("LDAP", "ldap", _ldap.is_ldap, "recce ldap"),
+        ("SNMP", "snmp", _snmp.is_snmp, "recce snmp"),
         ("SMB", "smb", smb.is_smb, "recce smb"),
         ("FTP", "ftp", ftp.is_ftp, "recce ftp"),
     ]
@@ -4396,6 +4499,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     lp.add_argument("--title", default="Recce Engagement")
     lp.set_defaults(func=cmd_ldap)
 
+    # SNMP enumeration (UDP 161).
+    sp = sub.add_parser("snmp",
+                        help="SNMP: brute common community strings (UDP 161) and walk "
+                             "the system group + Windows users / processes / software")
+    sp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "hosts in the datastore - recce probes UDP 161 directly)")
+    sp.add_argument("--no-probe", action="store_true",
+                    help="skip the live community brute/walk; just write the commands")
+    sp.add_argument("-o", "--output-dir", default="engagement")
+    sp.add_argument("--title", default="Recce Engagement")
+    sp.set_defaults(func=cmd_snmp)
+
+    # MongoDB enumeration.
+    mp = sub.add_parser("mongodb", aliases=["mongo"],
+                        help="MongoDB: unauthenticated wire-protocol probe (27017-19) -> "
+                             "CONFIRM listDatabases without auth = critical data exposure")
+    mp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "MongoDB hosts in the datastore)")
+    mp.add_argument("--no-probe", action="store_true",
+                    help="skip the live probe; just write the commands")
+    mp.add_argument("-o", "--output-dir", default="engagement")
+    mp.add_argument("--title", default="Recce Engagement")
+    mp.set_defaults(func=cmd_mongodb)
+
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
     r.add_argument("--title", default="Recce Engagement")
@@ -4453,6 +4582,9 @@ Docker API (2375/2376)?      recce docker -o eng   (CONFIRM unauth API = root RC
 Kubernetes cluster?          recce k8s -o eng   (kubelet / kube-apiserver / etcd)
 LDAP / AD directory?         recce ldap -o eng   (anon bind + RootDSE + anon read;
                              add -u/-p/-d or --hash <NT> for authenticated / PtH enum)
+SNMP (161/udp)?              recce snmp -o eng   (community guessing + read-only walk
+                             of users / processes / software -> spray list)
+MongoDB (27017-19)?          recce mongodb -o eng   (CONFIRM unauth listDatabases)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.

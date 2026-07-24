@@ -854,11 +854,57 @@ and the write-ups, and populate a dedicated **Kubernetes** tab.
 python -m recce k8s -o eng          # probe kubelet / apiserver / etcd, CONFIRM exposure
 ```
 
+## SNMP (`recce snmp`)
+
+A hand-rolled SNMP **v2c** client on a raw UDP socket (BER/ASN.1 with OID base-128
+encoding and GETNEXT walking — no pysnmp), so it runs on a stock airgapped Kali.
+Credential-free and **read-only**: recce never sends a SET, so a read-write community
+is flagged by *name* (private/write/manager/secret) but never exercised.
+
+- **Community guessing** — GET `sysDescr` with a list of common community strings
+  (public/private/community/…); the first that answers is a readable community.
+- **System group** — `sysDescr` / `sysName` identify the host pre-auth.
+- **Walks** — the Windows **LanManager user table** (local accounts → a spray list),
+  **running processes** and **installed software** (AV/EDR + unpatched builds), and
+  interface descriptions.
+
+Enumerated accounts become `Account` rows in **Users & Accounts**. Each read *is* the
+proof — findings (guessable community, exposed users, process/software inventory) feed
+the main totals, the Vulnerabilities sheet and the write-ups, populate a dedicated
+**SNMP** tab, and are adjudicated **CONFIRMED** by the prove engine. SNMP discovery is
+itself a GET, so no prior UDP scan is required — recce probes 161 directly.
+
+```bash
+python -m recce snmp -o eng          # guess the community, walk users/processes/software
+python -m recce snmp --no-probe -o eng   # just write the commands (no live probe)
+```
+
+## MongoDB (`recce mongodb` / `recce mongo`)
+
+A hand-rolled MongoDB **wire-protocol** client (OP_MSG opcode 2013 with a minimal
+BSON encoder/decoder — no pymongo). Credential-free and read-only.
+
+- **hello / buildInfo** — fingerprint the version and replica-set role.
+- **`listDatabases` without authentication** — the discriminator. If the instance
+  returns the database list, it is exposed unauthenticated (**full read/write to every
+  database**) → a **critical** finding. If it errors "not authorized", auth is
+  enforced and recce reports it reachable-but-locked (no finding). An end-of-life
+  build raises a medium.
+
+The successful unauthenticated `listDatabases` *is* the proof — findings feed the main
+totals, the Vulnerabilities sheet and the write-ups, populate a dedicated **MongoDB**
+tab, and are adjudicated **CONFIRMED** by the prove engine (with a `mongodump` next
+step in the exploit plan).
+
+```bash
+python -m recce mongodb -o eng       # fingerprint + CONFIRM unauthenticated listDatabases
+```
+
 ## Output (`<output-dir>/`)
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Docker** (exposed Engine API) · **Kubernetes** (kubelet/API/etcd exposure) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Docker** (exposed Engine API) · **Kubernetes** (kubelet/API/etcd exposure) · **LDAP** (AD directory enum) · **SNMP** (community walk + users/software) · **MongoDB** (unauthenticated exposure) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |

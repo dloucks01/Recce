@@ -170,6 +170,8 @@ _SOURCE_TOOL = {
     "docker": "Docker Engine API enum (recce stdlib HTTP probe)",
     "kubernetes": "Kubernetes enum (recce stdlib kubelet/API/etcd probe)",
     "ldap": "LDAP / AD enum (recce stdlib BER/ASN.1 client)",
+    "snmp": "SNMP enum (recce stdlib BER v2c UDP client)",
+    "mongodb": "MongoDB enum (recce stdlib OP_MSG/BSON wire client)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.
