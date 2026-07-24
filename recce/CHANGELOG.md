@@ -33,9 +33,17 @@ All notable changes to recce are documented here. Dates are UTC.
     module (NTLMSSP Type 1/2/3 with an NTLMv2 response, and a pure-Python MD4 since
     modern OpenSSL drops it) drives an LDAP SASL **GSS-SPNEGO** bind, so the whole
     authenticated enumeration above runs from an NT hash with no plaintext password.
-    The NTLMv2 crypto is validated against the MS-NLMP 4.2.4 worked example. (The bind
-    authenticates only — it does not sign subsequent traffic, so use LDAPS where a DC
-    enforces LDAP signing on 389.)
+    The NTLMv2 crypto is validated against the MS-NLMP 4.2.4 worked example.
+  - **Full NTLM sign+seal on plaintext 389.** When the pass-the-hash bind runs on
+    cleartext 389, recce now negotiates SIGN+SEAL with key exchange and wraps every
+    post-bind LDAP PDU in an NTLM signature + RC4-sealed payload — so a DC that
+    enforces *LDAP signing / channel binding* accepts the enumeration without TLS.
+    Adds a pure-stdlib RC4, the MS-NLMP session-key / sign-key / seal-key derivation,
+    and a `SecurityContext` that wraps/unwraps the SASL security layer transparently
+    (the search code is unchanged). RC4 is checked against known-answer vectors and
+    the whole sealed channel is exercised end-to-end against a mock DC that recovers
+    the session key from the client's Type 3 and seals its own replies. LDAPS remains
+    the path when you'd rather let TLS carry it (no sealing then).
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a

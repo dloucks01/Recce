@@ -4033,6 +4033,45 @@ class NtlmTest(unittest.TestCase):
         # NTProofStr is the first 16 bytes of the NtChallengeResponse.
         self.assertEqual(resp[:16].hex(), "68cd0ab851e51c96aabc927bebef6a1c")
 
+    def test_rc4_known_answer_vectors(self):
+        from recce import ntlm as N
+        self.assertEqual(N.rc4k(b"Key", b"Plaintext").hex(), "bbf316e8d940af0ad3")
+        self.assertEqual(N.rc4k(b"Wiki", b"pedia").hex(), "1021bf0420")
+        self.assertEqual(N.rc4k(b"Secret", b"Attack at dawn").hex(),
+                         "45a01f645fc35b383552544b9bf5")
+
+    def test_seal_wrap_signature_format_and_roundtrip(self):
+        import hmac
+        import hashlib
+        import struct
+        from recce import ntlm as N
+        exported = bytes(range(16))
+        ctx = N.SecurityContext(exported)
+        token = ctx.wrap(b"hello ldap")
+        # NTLMSSP_MESSAGE_SIGNATURE: version 0x00000001 + sealed checksum(8) + seq(4).
+        self.assertEqual(token[:4], b"\x01\x00\x00\x00")
+        self.assertEqual(token[12:16], b"\x00\x00\x00\x00")     # first message: seq 0
+        # A peer with the same key decrypts (message first, then its checksum).
+        seal = N.RC4(N._derive_key(exported, N._C2S_SEAL))
+        msg = seal.update(token[16:])
+        chk = seal.update(token[4:12])
+        want = hmac.new(N._derive_key(exported, N._C2S_SIGN),
+                        struct.pack("<I", 0) + msg, hashlib.md5).digest()[:8]
+        self.assertEqual(msg, b"hello ldap")
+        self.assertEqual(chk, want)
+        # unwrap reverses a server-sealed token and verifies the signature.
+        s_seal = N.RC4(N._derive_key(exported, N._S2C_SEAL))
+        pt = b"server reply"
+        sealed = s_seal.update(pt)
+        schk = s_seal.update(hmac.new(N._derive_key(exported, N._S2C_SIGN),
+                                      struct.pack("<I", 0) + pt, hashlib.md5).digest()[:8])
+        stoken = b"\x01\x00\x00\x00" + schk + struct.pack("<I", 0) + sealed
+        self.assertEqual(ctx.unwrap(stoken), pt)
+        # A tampered signature is rejected.
+        with self.assertRaises(ValueError):
+            ctx2 = N.SecurityContext(exported)
+            ctx2.unwrap(b"\x01\x00\x00\x00" + b"\x00" * 8 + struct.pack("<I", 0) + sealed)
+
     def test_message_structure_and_hash_normalize(self):
         from recce import ntlm as N
         self.assertEqual(N.type1()[:8], N._SIG)
@@ -4229,8 +4268,76 @@ class LdapTest(unittest.TestCase):
         finally:
             srv.shutdown()
 
-    def test_ntlm_pass_the_hash_bind(self):
-        import struct
+    @staticmethod
+    def _serve_sealed_dc(user, domain, nthash, responses):
+        """A mock DC that runs the sealed NTLM bind, derives the session key from the
+        client's Type 3, then unseals the client's LDAP requests and seals its own
+        responses - so the whole sign+seal channel is exercised end to end. `responses`
+        is one plaintext LDAP response blob per client search request (in order)."""
+        import socketserver
+        import struct as _s
+        import threading
+        import hmac as _h
+        import hashlib as _hl
+        from recce import ldap as L, ntlm as N
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+
+        def type2():
+            ti = b""
+            return (N._SIG + _s.pack("<I", 2) + _s.pack("<HHI", 0, 0, 48)
+                    + _s.pack("<I", N._SEAL_FLAGS) + bytes.fromhex("0123456789abcdef")
+                    + b"\x00" * 8 + _s.pack("<HHI", len(ti), len(ti), 48) + ti)
+
+        def bind_resp(mid, rc, creds=b""):
+            op = L._enum(rc) + L._octet("") + L._octet("")
+            if creds:
+                op += tlv(0x87, creds)
+            return tlv(0x30, L._int(mid) + tlv(0x61, op))
+
+        def field(msg, i):
+            ln = _s.unpack("<H", msg[12 + i * 8:14 + i * 8])[0]
+            off = _s.unpack("<I", msg[16 + i * 8:20 + i * 8])[0]
+            return msg[off:off + ln]
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                L._read_message(sock, 5.0)                         # bind1 (Type 1)
+                sock.sendall(bind_resp(1, 14, type2()))           # saslBindInProgress
+                bind2 = L._read_message(sock, 5.0)                # bind2 (Type 3)
+                t3 = bind2[bind2.find(N._SIG):]
+                nt_proof = field(t3, 1)[:16]
+                enc_sk = field(t3, 5)
+                kek = N._session_base_key(user, domain, nthash, nt_proof)
+                exported = N.rc4k(kek, enc_sk)                    # recover ExportedSessionKey
+                sock.sendall(bind_resp(2, 0))                     # bind success
+                c_seal = N.RC4(N._derive_key(exported, N._C2S_SEAL))
+                s_seal = N.RC4(N._derive_key(exported, N._S2C_SEAL))
+                s_sign = N._derive_key(exported, N._S2C_SIGN)
+                seq = 0
+                for plain in responses:
+                    hdr = L._recvn(sock, 4)
+                    if len(hdr) < 4:
+                        return
+                    frame = L._recvn(sock, _s.unpack(">I", hdr)[0])
+                    sig, sealed = frame[:16], frame[16:]
+                    c_seal.update(sealed)                         # unseal request (stream sync)
+                    c_seal.update(sig[4:12])                      # + its checksum
+                    ct = s_seal.update(plain)                     # seal the response
+                    chk = _h.new(s_sign, _s.pack("<I", seq) + plain, _hl.md5).digest()[:8]
+                    sct = s_seal.update(chk)
+                    token = b"\x01\x00\x00\x00" + sct + _s.pack("<I", seq) + ct
+                    seq += 1
+                    sock.sendall(_s.pack(">I", len(token)) + token)
+
+        srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, srv.server_address[1]
+
+    def test_ntlm_sealed_pth_end_to_end(self):
         from recce import ldap as L, ntlm as N
         from recce.models import Host
 
@@ -4247,40 +4354,24 @@ class LdapTest(unittest.TestCase):
         def sdone(mid):
             return tlv(0x30, L._int(mid) + tlv(0x65, L._enum(0) + L._octet("")
                        + L._octet("")))
-
-        def type2_msg():
-            ti = b""
-            return (N._SIG + struct.pack("<I", 2) + struct.pack("<HHI", 0, 0, 48)
-                    + struct.pack("<I", N.NEGOTIATE_UNICODE
-                                  | N.NEGOTIATE_EXTENDED_SESSIONSECURITY)
-                    + bytes.fromhex("0123456789abcdef") + b"\x00" * 8
-                    + struct.pack("<HHI", len(ti), len(ti), 48) + ti)
-
-        def sasl_inprogress(mid=1):
-            # BindResponse resultCode=14 (saslBindInProgress) + serverSaslCreds [7]=Type2
-            op = (L._enum(14) + L._octet("") + L._octet("") + tlv(0x87, type2_msg()))
-            return tlv(0x30, L._int(mid) + tlv(0x61, op))
-
-        def bind_ok(mid=2):
-            return tlv(0x30, L._int(mid) + tlv(0x61, L._enum(0) + L._octet("")
-                       + L._octet("")))
-        # NEGOTIATE -> CHALLENGE, AUTHENTICATE -> success, then the searches.
-        enum_script = [
-            sasl_inprogress(1), bind_ok(2),
+        # One sealed response blob per client search request: users, computers, domain.
+        responses = [
             entry(10, "CN=svc", [("sAMAccountName", ["svc_web"]),
                                  ("servicePrincipalName", ["HTTP/web"]),
                                  ("userAccountControl", ["512"])]) + sdone(10),
             sdone(1000),
             entry(9000, "DC=corp,DC=local", [("lockoutThreshold", ["5"])]) + sdone(9000),
         ]
-        srv, port = self._serve_scripts([enum_script])
+        nthash = N.nt_hash("Password")
+        srv, port = self._serve_sealed_dc("alice", "corp.local", nthash, responses)
         try:
-            nt = N.nt_hash("Password").hex()
             en = L.enum_authenticated("127.0.0.1", port, "DC=corp,DC=local",
                                       {"user": "alice", "domain": "corp.local",
-                                       "secret": "", "hash": nt})
+                                       "secret": "", "hash": nthash.hex()})
             self.assertIsNone(en["error"])
-            self.assertEqual(en["bind_method"], "NTLM (pass-the-hash)")
+            # Plaintext 389 + a hash -> the bind is sign+sealed, and the sealed search
+            # traffic round-trips (the DC could read our requests, we read its replies).
+            self.assertEqual(en["bind_method"], "NTLM sealed (pass-the-hash)")
             self.assertEqual([u.get("sAMAccountName") for u in en["users"]], [["svc_web"]])
             h = Host(ip="10.0.10.10")
             L.apply_enum(h, "corp.local", "10.0.10.10", 389, en)
