@@ -957,6 +957,19 @@ scan never disappears silently. Service detection runs at higher intensity in
 the `enum` phase (it feeds the offline vuln DB); the `vulns` phase only does a
 light version probe since enum already has the versions.
 
+**No false "host down" / "no ports open".** The discovery sweep SYN-pings a broad
+port set including the ports firewalled Windows/AD hosts still answer (Kerberos 88,
+LDAP 389, WinRM 5985) and retries dropped probes. Live hosts that block ping are
+still caught four ways: a **partial** sweep **reconfirms** every non-responder with a
+fast `-Pn` top-ports scan (any open port = up — recovers firewalled boxes;
+`--no-reconfirm` to skip); a **zero-response** sweep auto-falls back to `-Pn` (scan
+everything as up); a host that comes back with **0 ports** is re-scanned with
+congestion-adaptive timing (no `--min-rate` floor, more retries) before "no ports" is
+trusted; and a `-Pn` host still silent on TCP gets a **UDP liveness ping**, so a
+firewalled-but-alive box is confirmed up, never ruled dead. A host is only ever shown
+as confirmed-up on a **real reply** (or an open port) — a silent host stays UNKNOWN,
+never marked down.
+
 ## Command & option reference
 
 Every command takes targets as a single IP, several IPs, a range
