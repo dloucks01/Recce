@@ -313,6 +313,14 @@ def _congested(outcome: RunOutcome) -> bool:
     return any(m in blob for m in _DROP_MARKERS)
 
 
+def port_scope_label(profile: ScanProfile) -> tuple[str, bool]:
+    """(human label, is_full) for the TCP port scope this profile scans. `is_full`
+    is False for a top-N scan, so callers can loudly flag a PARTIAL sweep."""
+    if profile.all_ports:
+        return "all 65535 TCP ports", True
+    return f"top {profile.top_ports} TCP ports", False
+
+
 def _portscan_cmd(ip: str, out_xml: str, profile: ScanProfile,
                   reliable: bool) -> tuple[list, int | None]:
     scan_type = "-sS" if _is_root() else "-sT"

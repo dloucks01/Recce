@@ -7818,6 +7818,23 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         self.assertTrue(h.open_ports)                    # scan result preserved
         self.assertEqual(h.up_reason, "syn-ack")         # real reply reason kept
 
+    def test_port_scope_label_and_all_ports_override(self):
+        from recce import cli, scanner
+        # standard = full sweep; quick = partial (top-N).
+        self.assertEqual(scanner.port_scope_label(scanner.PROFILES["standard"]),
+                         ("all 65535 TCP ports", True))
+        label, is_full = scanner.port_scope_label(scanner.PROFILES["quick"])
+        self.assertFalse(is_full)
+        self.assertIn("top 200", label)
+        # --all-ports forces a full sweep even on the quick profile.
+        prof = scanner.ScanProfile(all_ports=False, top_ports=200)
+        cli._apply_profile_overrides(prof, SimpleNamespace(all_ports=True))
+        self.assertTrue(prof.all_ports)
+        # A stray --top-ports followed by --all-ports still ends up full (order wins).
+        prof2 = scanner.ScanProfile()
+        cli._apply_profile_overrides(prof2, SimpleNamespace(top_ports=100, all_ports=True))
+        self.assertTrue(prof2.all_ports)
+
     def test_targets_up_implies_pn(self):
         # --targets-up forces -Pn semantics so discovery can never drop a provided host.
         from recce import cli, scanner

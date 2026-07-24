@@ -948,6 +948,15 @@ Override with `--all-ports`, `--top-ports`, `--no-ad`, `--no-os`, `--min-rate`,
 `--udp-top`, `--version-all`/`--version-intensity N` (service detection), and
 `--host-timeout N` (minutes). (Vuln scanning is its own `vulns` phase, safe-by-default.)
 
+**Full port scan is the default and it's stated up front.** `standard`/`thorough`
+sweep all 65535 TCP ports (`-p-`); recce prints the port scope when the enum phase
+starts and records it (echoed by `status`). A reduced scan — `quick`, `--top-ports N`,
+or `--fast` — prints a loud `PARTIAL, NOT a full scan` warning so it can't be mistaken
+for complete. `--all-ports` forces the full sweep and **overrides the profile** (applied
+last), so `recce enum --profile quick --all-ports` still scans everything. A host whose
+full sweep hits `--host-timeout` is flagged as an INCOMPLETE (partial) port list rather
+than trusted as empty.
+
 **Reliability.** Every scan has a per-host time ceiling (`--host-timeout`): nmap
 gives up on a stuck host and moves on rather than hanging the run, and a hard
 subprocess timeout backstops a truly wedged nmap. Anything that **errors or
