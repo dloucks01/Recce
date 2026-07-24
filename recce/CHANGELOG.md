@@ -98,6 +98,19 @@ All notable changes to recce are documented here. Dates are UTC.
   anti-CSRF fields are never fuzzed; per-endpoint injection budget is bounded. Findings
   land as `web-sqli` (CWE-89) with a CONFIRMED prove-engine verdict and a pre-filled
   `sqlmap` exploit-plan action.
+- **Cookie hardening + open-redirect + path-traversal checks.** `_fetch` now preserves
+  every `Set-Cookie` (repeats were being collapsed), and a new per-cookie analysis
+  (`_cookie_findings`) flags missing **HttpOnly**/**Secure** (kept), missing **SameSite**
+  (or `SameSite=None` without `Secure`), a **session cookie set over cleartext HTTP**
+  (token exposed on the wire), a missing **`__Host-`/`__Secure-` prefix**, and an
+  **over-broad parent `Domain`** scope (CWE-1004/614/1275/319). Two new active param
+  checks join the `--crawl` sweep (GET params **and** form fields, via the shared
+  injection transport): **open redirect** (`web-openredirect`, CWE-601 — a parameter
+  reflected into a `3xx Location` pointing at an attacker host, read-only, no auto-follow)
+  and **generic path traversal / local file read** (`web-lfi`, CWE-22 — `../…/etc/passwd`
+  + `....//`, `%2f` and Windows `win.ini` variants, only on file-ish param names to keep
+  false positives and request budget down). Both get CONFIRMED prove-engine verdicts;
+  path traversal adds a `curl`/`php://filter` exploit-plan action.
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a

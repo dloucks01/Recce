@@ -491,6 +491,28 @@ def _v_web_app(host, port, vuln):
     return CONFIRMED, ["recce observed this exposure directly (see the finding output)."]
 
 
+def _v_lfi(host, port, vuln):
+    return CONFIRMED, [
+        "recce injected a traversal sequence and the response came back with the target "
+        "file's contents (root:...:0:0: for /etc/passwd, or a win.ini section) - the app "
+        "builds a file path from our input (directly observed).",
+        "Read app secrets next within ROE: config/.env, source files, cloud-cred files, "
+        "or /proc/self/environ; a PHP wrapper (php://filter) often escalates to code.",
+        "FP only if the file content was static page text - recce matched the file's own "
+        "signature, so that's unlikely."]
+
+
+def _v_open_redirect(host, port, vuln):
+    return CONFIRMED, [
+        "recce set the parameter to an attacker host and the server answered a 3xx whose "
+        "Location pointed at that host (directly observed - the redirect target is "
+        "attacker-controlled).",
+        "Weaponise within ROE: use it for phishing landing pages, or to smuggle a token/"
+        "code through an OAuth redirect_uri where the app trusts this endpoint.",
+        "FP only if the app hard-limits the final destination despite the reflected "
+        "Location (rare) - judge business impact, not existence."]
+
+
 def _v_sqli(host, port, vuln):
     # recce injected SQL and observed the database respond (an error, a boolean
     # differential, or a controlled time delay) - a direct observation -> CONFIRMED.
@@ -872,6 +894,23 @@ _RECIPES: list[dict] = [
      "fp": "It's an observation - the probe already fetched it. The only nuance is whether the exposed "
            "content is actually sensitive.",
      "fn": _v_web_exposure},
+    {"id": "web-lfi",
+     "match": r"path traversal / local file read|local file (read|inclusion)|\blfi\b",
+     "name": "Path traversal / local file read",
+     "pre": ["A parameter names a file/path", "recce read a system file's contents back"],
+     "finish": "curl --path-as-is '<url>?<param>=../../../../etc/passwd' to re-read; then "
+               "pull app secrets / source (recce already proved the read).",
+     "fp": "The returned content was static page text (recce matched the file's own signature).",
+     "fn": _v_lfi},
+    {"id": "web-openredirect",
+     "match": r"open redirect via ",
+     "name": "Open redirect",
+     "pre": ["A parameter is reflected into the redirect target",
+             "recce observed a 3xx Location pointing at an attacker host"],
+     "finish": "re-issue the request with the param set to your host; use for phishing / "
+               "OAuth token smuggling within ROE.",
+     "fp": "The app hard-limits the final destination despite the reflected Location (rare).",
+     "fn": _v_open_redirect},
     {"id": "web-sqli",
      "match": r"sql injection in |\bsqli\b|error-based, (mysql|postgresql|mssql|oracle|sqlite)",
      "name": "SQL injection",

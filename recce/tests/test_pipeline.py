@@ -3646,6 +3646,134 @@ class WebSqliTest(unittest.TestCase):
         self.assertEqual(proofs.recipe_for(fs[0])["id"], "web-sqli")
 
 
+class WebCookieRedirectLfiTest(unittest.TestCase):
+    """Cookie hardening (SameSite / prefix / cleartext / broad Domain), open redirect,
+    and generic path traversal - detection, FP-safety, and prove verdicts."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        from urllib.parse import urlparse, parse_qs
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                u = urlparse(self.path)
+                qs = parse_qs(u.query, keep_blank_values=True)
+                if u.path == "/download":                   # path traversal
+                    f = qs.get("file", [""])[0]
+                    if "etc/passwd" in f:
+                        return self._send(200, b"root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1")
+                    if "win.ini" in f:
+                        return self._send(200, b"[fonts]\n[extensions]\n")
+                    return self._send(200, b"<html>file: readme contents</html>")
+                if u.path == "/go":                          # open redirect (reflects target)
+                    nxt = qs.get("next", [""])[0]
+                    if nxt.startswith(("http://", "https://", "//", "/\\")):
+                        return self._send(302, b"", {"Location": nxt})
+                    return self._send(200, b"<html>home</html>")
+                if u.path == "/safe":                        # redirects, but to a FIXED path
+                    return self._send(302, b"", {"Location": "/dashboard"})
+                if u.path == "/":
+                    return self._send(200,
+                        b"<html><body><a href='/download?file=readme'>d</a>"
+                        b"<a href='/go?next=/home'>g</a></body></html>",
+                        {"Set-Cookie": "sessionid=abc123; Path=/"})   # weak session cookie
+                return self._send(404, b"no")
+
+            def _send(self, code, body=b"", extra=None):
+                self.send_response(code)
+                self.send_header("Content-Type", "text/html")
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def _port(self):
+        return Port(portid=self.port, service="http", state="open")
+
+    # --- cookies (unit) ---------------------------------------------------------
+    def test_cookie_hardening_checks(self):
+        from recce import web
+        tls = Port(portid=443, service="https", state="open")
+        titles = {v.title.split(":")[0] for v in
+                  web._cookie_findings("1.1.1.1", tls, "sessionid=x; Path=/")}
+        self.assertIn("Cookie without HttpOnly", titles)
+        self.assertIn("Cookie without Secure (served over HTTPS)", titles)
+        self.assertIn("Cookie without SameSite (CSRF / cross-site surface)", titles)
+        # SameSite=None without Secure -> medium.
+        none = web._cookie_findings("1.1.1.1", tls, "sid=x; HttpOnly; SameSite=None")
+        self.assertTrue(any(v.title.startswith("Cookie SameSite=None without Secure")
+                            and v.severity == "medium" for v in none))
+        # A session cookie over cleartext HTTP is called out as wire-exposed.
+        http = Port(portid=80, service="http", state="open")
+        clear = web._cookie_findings("1.1.1.1", http, "authtoken=x; Path=/")
+        self.assertTrue(any("cleartext HTTP" in v.title for v in clear))
+        # Broad parent-domain scope.
+        dom = web._cookie_findings("1.1.1.1", tls, "id=x; Domain=.example.com; Secure; "
+                                                   "HttpOnly; SameSite=Lax")
+        self.assertTrue(any("broad parent Domain" in v.title for v in dom))
+
+    def test_cookie_findings_surface_in_scan_endpoint(self):
+        from recce import web
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        self.assertIn("web-cookie", {v.script_id for v in findings})
+
+    # --- open redirect ----------------------------------------------------------
+    def test_open_redirect_detected(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/go", "next", None)
+        fs = web._open_redirect_via("127.0.0.1", self._port(), "param 'next' on /go", send)
+        self.assertTrue(fs and fs[0].script_id == "web-openredirect")
+
+    def test_open_redirect_no_fp_on_fixed_target(self):
+        from recce import web
+        # /safe always redirects to /dashboard regardless of input -> not open.
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/safe", "next", None)
+        self.assertEqual(web._open_redirect_via("127.0.0.1", self._port(),
+                                                "param 'next' on /safe", send), [])
+
+    # --- path traversal ---------------------------------------------------------
+    def test_traversal_detected_on_fileish_param(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/download", "file", None)
+        fs = web._traversal_via("127.0.0.1", self._port(), "param 'file' on /download",
+                                "file", send)
+        self.assertTrue(fs and fs[0].script_id == "web-lfi")
+        self.assertEqual(fs[0].severity, "high")
+
+    def test_traversal_skips_non_fileish_param(self):
+        from recce import web
+        # A param that doesn't look like a file/path is not traversal-tested (budget/FP).
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/download", "q", None)
+        self.assertEqual(web._traversal_via("127.0.0.1", self._port(),
+                                            "param 'q' on /download", "q", send), [])
+
+    # --- integration + prove ----------------------------------------------------
+    def test_scan_crawl_finds_redirect_and_lfi(self):
+        from recce import web, proofs
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        web.scan_crawl(h)
+        sids = {v.script_id for v in h.vulns}
+        self.assertIn("web-openredirect", sids)
+        self.assertIn("web-lfi", sids)
+        recs = {r["vuln"]: r["verdict"] for r in proofs.verify_host(h)}
+        self.assertEqual(recs.get("Path traversal / local file read"), proofs.CONFIRMED)
+        self.assertEqual(recs.get("Open redirect"), proofs.CONFIRMED)
+
+
 class PocRecipeTest(unittest.TestCase):
     def test_finding_text_selects_the_right_recipe(self):
         from recce import poc
