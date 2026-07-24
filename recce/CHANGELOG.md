@@ -83,6 +83,21 @@ All notable changes to recce are documented here. Dates are UTC.
   now covers the **RabbitMQ** management API. Each finding gets a CONFIRMED prove-engine
   verdict with app-specific escalation and an exploit-plan action (Jenkins RCE, Grafana
   file read, Elasticsearch dump, default-cred login).
+- **SQL injection detection + form-field fuzzing (`web --crawl`).** The crawler now
+  fuzzes **form fields** (POST/GET bodies), not just URL query params — a shared
+  injection transport (`_make_sender`) drives both the existing reflection/SSTI canary
+  and a new **SQLi engine** against every discovered input. The engine confirms three
+  ways, all with **non-destructive payloads** (quote-break + `AND`/sleep inside the
+  SELECT/WHERE context — never a stacked `DROP`/`UPDATE`/`DELETE`): **error-based** (a
+  DBMS error — MySQL/PostgreSQL/MSSQL/Oracle/SQLite — that appears only after the
+  quote-break), **boolean-based blind** (a TRUE payload matches the baseline while a
+  FALSE one diverges, re-tested to reproduce, and skipped entirely on highly dynamic
+  pages to avoid false positives), and **time-based blind** (opt-in via `--sqli-time`;
+  a deliberate DB sleep whose delay scales with the sleep argument). Destructive-looking
+  forms (`action` matching delete/remove/logout/…) are never submitted; password and
+  anti-CSRF fields are never fuzzed; per-endpoint injection budget is bounded. Findings
+  land as `web-sqli` (CWE-89) with a CONFIRMED prove-engine verdict and a pre-filled
+  `sqlmap` exploit-plan action.
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a

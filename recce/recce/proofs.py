@@ -491,6 +491,28 @@ def _v_web_app(host, port, vuln):
     return CONFIRMED, ["recce observed this exposure directly (see the finding output)."]
 
 
+def _v_sqli(host, port, vuln):
+    # recce injected SQL and observed the database respond (an error, a boolean
+    # differential, or a controlled time delay) - a direct observation -> CONFIRMED.
+    t = (vuln.title or "").lower()
+    if "error-based" in t:
+        how = ("a database error surfaced the moment recce broke out of the quote - the "
+               "app concatenates our input into the query")
+    elif "time-based" in t:
+        how = ("recce's sleep payload delayed the response and the delay scaled with the "
+               "sleep argument - our injected SQL controls execution")
+    else:
+        how = ("a TRUE condition returned the baseline page and a FALSE one returned a "
+               "different page, reproducibly - the app evaluates our injected boolean")
+    return CONFIRMED, [
+        f"recce actively confirmed the injection: {how} (directly observed).",
+        "Weaponise within ROE with sqlmap, pre-filled: sqlmap -u '<url>' "
+        "-p '<param>' --batch --dbs   (add --data for POST forms); then --dump the "
+        "interesting tables.",
+        "FP only if the differential/error was environmental - recce re-tested to rule "
+        "that out before raising this."]
+
+
 def _v_ssti(host, port, vuln):
     return CONFIRMED, ["recce injected a template expression and the engine evaluated it (7*7 -> 49 "
                        "next to our canary) - that IS code execution in the template context, "
@@ -850,6 +872,15 @@ _RECIPES: list[dict] = [
      "fp": "It's an observation - the probe already fetched it. The only nuance is whether the exposed "
            "content is actually sensitive.",
      "fn": _v_web_exposure},
+    {"id": "web-sqli",
+     "match": r"sql injection in |\bsqli\b|error-based, (mysql|postgresql|mssql|oracle|sqlite)",
+     "name": "SQL injection",
+     "pre": ["A parameter/field reaches a SQL query unsanitised",
+             "recce observed the database respond to injected SQL"],
+     "finish": "sqlmap -u '<url>' -p '<param>' --batch --dbs  (add --data for POST), then "
+               "--dump the sensitive tables - recce already proved the injection.",
+     "fp": "The error/differential/delay was environmental (recce re-tested to exclude that).",
+     "fn": _v_sqli},
     {"id": "web-ssti", "match": r"server-side template injection|\bssti\b|template engine (executed|evaluated)",
      "name": "Server-Side Template Injection (SSTI)",
      "pre": ["User input is rendered by a server-side template engine"],

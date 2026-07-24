@@ -339,7 +339,14 @@ airgapped, none need internet):
    (unauth index read), **Kibana**, plus exposed `.git`/`.env`, Spring Actuator
    and Tomcat Manager. With `--creds` it runs a bounded, lockout-aware
    **default-credential** probe (HTTP Basic + form/JSON logins: Grafana
-   `admin/admin`, MinIO `minioadmin`, RabbitMQ `guest/guest`).
+   `admin/admin`, MinIO `minioadmin`, RabbitMQ `guest/guest`). With `--crawl`
+   it same-origin crawls each site and fuzzes **discovered GET params and form
+   fields** for reflection/SSTI and **SQL injection** — error-based (MySQL/
+   PostgreSQL/MSSQL/Oracle/SQLite error signatures), boolean-based blind
+   (true≈baseline vs false-diverges, re-tested, skipped on dynamic pages), and
+   opt-in time-based blind (`--sqli-time`). Payloads are non-destructive
+   (quote-break + `AND`/sleep, never stacked `DROP`/`UPDATE`/`DELETE`);
+   destructive-looking forms and password/anti-CSRF fields are never touched.
 4. **`searchsploit` (Exploit-DB, offline)** maps every service's product+version
    to known public exploits on a dedicated **Exploits** sheet (EDB-ID, type,
    title, CVEs, local path).
