@@ -357,6 +357,10 @@ def _apply_profile_overrides(profile, args) -> None:
     if g("top_ports"):
         profile.all_ports = False
         profile.top_ports = args.top_ports
+    # --all-ports is the explicit, profile-overriding "full 65535-port sweep" and is
+    # applied last so it wins over a quick profile or a lingering --top-ports.
+    if g("all_ports"):
+        profile.all_ports = True
     if g("no_ad"):
         profile.ad_enrich = False
     if g("no_os"):
@@ -749,6 +753,15 @@ def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
     # --no-probes disables our active stdlib layer (banner grabs); the free passive
     # layers (servicefp mining + curated port map) still run.
     active_probe = not getattr(args, "no_probes", False)
+    # Announce the port scope so a full sweep is verifiable - and loudly flag a PARTIAL
+    # (top-N) one so it's never mistaken for a complete scan. Recorded for the report.
+    scope_label, is_full = scanner.port_scope_label(profile)
+    store.set_meta("port_scope", scope_label)
+    if is_full:
+        print(f"[*] Port scope: {scope_label} per host (full sweep).")
+    else:
+        print(f"[!] Port scope: {scope_label} per host - PARTIAL, NOT a full scan. "
+              "Pass --all-ports (or --profile standard) for all 65535 ports.")
     print(f"[*] Enumerating {len(live_ips)} host(s) with {workers} worker(s) "
           f"(ports + services) ...")
     completed = 0
@@ -3882,6 +3895,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         if any(v.severity in ("critical", "high") for v in h.vulns)
         and not tracking.get(tr.host_key(h.ip), (False, ""))[0]
     ]
+    scope = store.get_meta("port_scope")
+    if scope:
+        full = "65535" in scope
+        print(f"\n  {'·' if full else '!!'} Port scope: {scope}"
+              + ("" if full else " - PARTIAL (not a full scan; re-run with --all-ports)"))
     incomplete = [h for h in hosts if getattr(h, "incomplete_scan", False)]
     if incomplete:
         print("\n  !! INCOMPLETE port sweeps (host-timeout) - these port lists are "
@@ -4074,8 +4092,13 @@ def _add_discovery(pp) -> None:
     g = pp.add_argument_group("scan tuning (optional)")
     g.add_argument("--exclude", nargs="*", help="hosts/CIDRs to exclude")
     g.add_argument("--masscan", action="store_true", help="use masscan for port sweep")
-    g.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
-    g.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
+    g.add_argument("--all-ports", action="store_true",
+                   help="force the full 65535-port TCP sweep, overriding the profile "
+                        "and any --top-ports (the `standard`/`thorough` profiles already "
+                        "do this; use it to force a full scan under `quick`/`--fast`)")
+    g.add_argument("--top-ports", type=int,
+                   help="scan only the top-N TCP ports (PARTIAL - faster but can miss a "
+                        "service on an unusual port; recce prints a warning)")
     g.add_argument("--min-rate", type=int, help="nmap --min-rate override")
     g.add_argument("--max-retries", type=int, metavar="N",
                    help="nmap --max-retries on the port sweep (default 3; raise for "

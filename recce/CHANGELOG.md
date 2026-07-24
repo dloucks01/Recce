@@ -132,6 +132,15 @@ All notable changes to recce are documented here. Dates are UTC.
   enriches it. Pre-seeding persists immediately to SQLite, so even a hard-killed run
   keeps every target (rebuildable with `recce report`). Use it when you have a complete
   IP/hostname list you trust.
+- **Full-port scan is explicit and partial coverage is flagged.** A full 65535-port TCP
+  sweep is already the default (the `standard`/`thorough` profiles), but a reduced scan
+  could be mistaken for complete. recce now prints the **port scope** at the start of the
+  enum phase — a full sweep is stated plainly, and a top-N scan (`quick` profile /
+  `--top-ports` / `--fast`) prints a loud `PARTIAL, NOT a full scan` warning pointing at
+  `--all-ports`. The scope is recorded and echoed by `status`; `--all-ports` now
+  explicitly overrides the profile (applied last, so it wins over `quick`/`--top-ports`)
+  to force a full sweep on demand. Combined with the existing host-timeout truncation
+  flagging, a scan is never silently narrower than it looks.
 
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a
