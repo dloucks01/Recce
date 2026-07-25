@@ -1,7 +1,7 @@
 """Deep MongoDB enumeration (stdlib only).
 
 MongoDB wire protocol (OP_MSG, opcode 2013) with a minimal BSON encoder/decoder,
-hand-rolled on a raw socket - no pymongo. Credential-free and READ-ONLY.
+hand-rolled on a raw socket - no pymongo. Airgapped, stdlib only.
 
   * **hello / buildInfo:** version, replica-set role (always answerable).
   * **listDatabases WITHOUT authentication:** the discriminator. If it returns the
@@ -10,7 +10,8 @@ hand-rolled on a raw socket - no pymongo. Credential-free and READ-ONLY.
     enforced (recce reports it reachable-but-locked, not a finding).
 
 Positive findings fold into the severity totals, the Vulnerabilities sheet, the
-write-ups, a dedicated **MongoDB** tab, and the prove engine. Airgapped-safe.
+write-ups, a dedicated **MongoDB** tab, and the prove engine. Safety posture: see
+SECURITY.md.
 """
 from __future__ import annotations
 

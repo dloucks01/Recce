@@ -2,8 +2,9 @@
 
 Modelled on recce/smb.py and recce/ftp.py. A hand-rolled BER/ASN.1 LDAP client on
 a raw socket - no python-ldap, no ldap3 - so it runs on a stock airgapped Kali.
+Safety posture: see SECURITY.md.
 
-Credential-free, read-only. Against a Directory port (389/636/3268/3269) recce:
+Against a Directory port (389/636/3268/3269) recce:
 
   * attempts an **anonymous simple bind** (name "", password "") - RFC 4513 - to see
     whether the server hands out an anonymous session at all;
@@ -380,7 +381,7 @@ def _first(d: dict, key: str, default: str = "") -> str:
 
 def probe(ip: str, port: int = _DEFAULT_PORT, timeout: float = _TIMEOUT) -> dict | None:
     """Anonymous bind + RootDSE + anonymous naming-context read. No credentials.
-    Returns None if the port didn't answer LDAP. Never writes to the directory."""
+    Returns None if the port didn't answer LDAP."""
     if _is_tls_port(port):
         return _probe_tls(ip, port, timeout)
     try:

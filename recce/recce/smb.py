@@ -16,8 +16,9 @@ Modelled on recce/mssql.py. Two layers:
 Everything positive becomes a finding that folds into the main severity totals,
 the Vulnerabilities sheet, the write-ups, and a dedicated **SMB** workbook tab -
 and each finding carries the exact existing-tool command to prove or abuse it.
-Airgapped-safe, stdlib only for the probe; the live layer shells out to the same
-tools `credenum` already uses and degrades cleanly when they're absent.
+Airgapped, stdlib only for the probe; the live layer shells out to the same
+tools `credenum` already uses and degrades cleanly when they're absent. Safety
+posture: see SECURITY.md.
 """
 from __future__ import annotations
 

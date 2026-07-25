@@ -5,9 +5,9 @@ client-certificate enforcement) is a full host compromise: anyone who can reach 
 can create a container that bind-mounts the host root and runs as root, i.e. instant
 root-level RCE on the Docker host. recce reads the API unauthenticated - /version,
 /info, /containers/json, /images/json - and, if it answers, reports a CONFIRMED
-critical finding (the successful unauthenticated read IS the proof; recce does NOT
-create a container). Everything folds into the main totals and a dedicated Docker
-tab. Airgapped-safe, stdlib only.
+critical finding (the successful unauthenticated read IS the proof). Everything folds
+into the main totals and a dedicated Docker tab. Airgapped, stdlib only. Safety
+posture: see SECURITY.md.
 """
 from __future__ import annotations
 

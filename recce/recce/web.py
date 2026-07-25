@@ -1,13 +1,13 @@
-"""Web-facing service enumeration + deep, non-intrusive checks (stdlib only).
+"""Web-facing service enumeration + deep checks (stdlib only).
 
 Identifies every HTTP/HTTPS endpoint recce found - on ANY port, not just 80/443 -
-fingerprints its tech stack, and runs a bounded set of high-signal, non-destructive
-checks: exposed VCS/config files (.git/.env), server-status / Spring actuator,
-directory listing, dangerous HTTP methods, weak cookie flags, and (via probes) the
-security-header / TLS analysis. Everything positive becomes a Vuln, so web findings
-flow into the Vulnerabilities / Verification / Exploitation sheets like anything
-else. Heavier scanning is bridged to the Kali tools (whatweb / nikto / nuclei /
-gobuster / wpscan / sslscan). Airgapped-safe: only touches the target, stdlib only.
+fingerprints its tech stack, and runs a bounded set of high-signal checks: exposed
+VCS/config files (.git/.env), server-status / Spring actuator, directory listing,
+dangerous HTTP methods, weak cookie flags, and (via probes) the security-header / TLS
+analysis. Everything positive becomes a Vuln, so web findings flow into the
+Vulnerabilities / Verification / Exploitation sheets like anything else. Heavier
+scanning is bridged to the Kali tools (whatweb / nikto / nuclei / gobuster / wpscan /
+sslscan). Airgapped, stdlib only. Safety posture: see SECURITY.md.
 """
 
 from __future__ import annotations

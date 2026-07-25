@@ -1,8 +1,7 @@
 """Deep SNMP enumeration (stdlib only).
 
 SNMP v2c over UDP 161, hand-rolled on a raw socket - BER/ASN.1 with OID encoding, no
-pysnmp. Credential-free and READ-ONLY: recce never sends a SET (so a read-write
-community is flagged by name, never exercised).
+pysnmp. Airgapped, stdlib only.
 
   * **Community brute:** GET sysDescr with a list of common community strings
     (public/private/...) - the first that answers is a readable community.
@@ -11,7 +10,7 @@ community is flagged by name, never exercised).
 
 Every positive folds into the severity totals, the Vulnerabilities sheet, the
 write-ups, a dedicated **SNMP** tab, and the enumerated Windows users become Account
-objects that populate Users & Accounts. Airgapped-safe; degrades cleanly.
+objects that populate Users & Accounts. Safety posture: see SECURITY.md.
 """
 from __future__ import annotations
 

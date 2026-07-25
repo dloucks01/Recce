@@ -882,9 +882,9 @@ python -m recce k8s -o eng          # probe kubelet / apiserver / etcd, CONFIRM 
 ## SNMP (`recce snmp`)
 
 A hand-rolled SNMP **v2c** client on a raw UDP socket (BER/ASN.1 with OID base-128
-encoding and GETNEXT walking — no pysnmp), so it runs on a stock airgapped Kali.
-Credential-free and **read-only**: recce never sends a SET, so a read-write community
-is flagged by *name* (private/write/manager/secret) but never exercised.
+encoding and GETNEXT walking — no pysnmp), so it runs on a stock airgapped Kali. A
+read-write community is flagged by *name* (private/write/manager/secret). Safety
+posture: see [SECURITY.md](SECURITY.md).
 
 - **Community guessing** — GET `sysDescr` with a list of common community strings
   (public/private/community/…); the first that answers is a readable community.
@@ -907,7 +907,7 @@ python -m recce snmp --no-probe -o eng   # just write the commands (no live prob
 ## MongoDB (`recce mongodb` / `recce mongo`)
 
 A hand-rolled MongoDB **wire-protocol** client (OP_MSG opcode 2013 with a minimal
-BSON encoder/decoder — no pymongo). Credential-free and read-only.
+BSON encoder/decoder — no pymongo). Airgapped, stdlib only.
 
 - **hello / buildInfo** — fingerprint the version and replica-set role.
 - **`listDatabases` without authentication** — the discriminator. If the instance
