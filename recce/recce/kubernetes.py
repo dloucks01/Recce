@@ -12,9 +12,9 @@ Stdlib-only HTTP(S) probes of the cluster's most dangerous network exposures:
   * **etcd** (2379): the cluster's backing store; unauthenticated read = every Secret
     (all service-account tokens, TLS keys) in plaintext.
 
-Each positive read is the proof (recce only READS - it never execs or writes), folds
-into the main severity totals, the Vulnerabilities sheet and the write-ups, and lands
-on a dedicated Kubernetes tab. Airgapped-safe, stdlib only.
+Each positive read is the proof, folds into the main severity totals, the
+Vulnerabilities sheet and the write-ups, and lands on a dedicated Kubernetes tab.
+Airgapped, stdlib only. Safety posture: see SECURITY.md.
 """
 from __future__ import annotations
 

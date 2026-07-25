@@ -17,8 +17,9 @@ nxc mssql, MSSQLPwner, SQLRecon) does, folded into recce's model:
     CLR / Agent).
 
 recce does the pre-auth probing itself and generates the full, credential-filled
-runbook + chain (copy-paste ready); it references EXISTING tools (nxc / impacket /
-mssqlpwner) for the authenticated actions and generates no exploit code.
+runbook + chain (copy-paste ready); it references existing tools (nxc / impacket /
+mssqlpwner) for the authenticated actions. Airgapped, stdlib only for the pre-auth
+probe. Safety posture: see SECURITY.md.
 """
 from __future__ import annotations
 

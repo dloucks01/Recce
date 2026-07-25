@@ -13,7 +13,7 @@ Modelled on recce/smb.py. Two layers:
 
 Everything positive becomes a finding that folds into the main severity totals,
 the Vulnerabilities sheet, the write-ups, and a dedicated **FTP** workbook tab.
-Airgapped-safe; the write proof uses stdlib `ftplib` and degrades cleanly.
+Airgapped, stdlib only (the write proof uses `ftplib`). Safety posture: see SECURITY.md.
 """
 from __future__ import annotations
 
