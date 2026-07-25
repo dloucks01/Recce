@@ -22,6 +22,11 @@ paths from your account to Domain Admin.
 > `python3 -m recce`, and a **Start Here** tab inside every workbook that
 > explains each sheet.
 
+> ⚖️ **Authorized use only.** recce is for security work you have written
+> permission to perform. Its safety controls, the intrusive actions that are
+> opt-in/flag-gated, and your responsibilities as an operator are all documented
+> in **[SECURITY.md](SECURITY.md)** — read it before your first engagement.
+
 ## Why this over raw nmap / AutoRecon?
 
 Existing tools scan well but leave you with per-host output files. `recce`
