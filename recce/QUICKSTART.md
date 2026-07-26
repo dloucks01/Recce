@@ -233,8 +233,9 @@ work on **just that subset** of what's already enumerated — e.g.
 | File | What it is |
 |---|---|
 | **`enumeration.xlsx`** | the tracking workbook you work out of |
-| **`report.html`** | self-contained client-ready page — **At a glance** dashboard, a **Network map** (draws directly, prints to PDF), **Key information**, **Users & accounts**, **Credentials** (masked), an expanded **exec summary**, a **How findings are scored** legend, findings with confidence + evidence, the attack path, and a **read-only coverage checklist**. Open it in a browser; use **Print → Save as PDF** for a PDF. |
+| **`report.html`** | self-contained client-ready page — **At a glance** dashboard, a **Network map** (draws directly, prints to PDF), an **AD architecture** diagram (tier-0 view built from the BloodHound import, when present), **Key information**, **Users & accounts**, **Credentials** (masked), an expanded **exec summary**, a **How findings are scored** legend, findings with confidence + evidence, the attack path, and a **read-only coverage checklist**. Open it in a browser; use **Print → Save as PDF** for a PDF. |
 | `architecture.mmd` / `.dot` | the network map as Mermaid + Graphviz sources (optional — the diagram already renders inside `report.html`) |
+| `ad-architecture.svg` | the tier-0 AD diagram as a standalone image you can open directly in a browser (written only after an `ad`/BloodHound import) |
 | `enumeration.md` / `services.csv` | notes-friendly + flat pivot data |
 | `writeups/*.docx` | per-finding Word write-ups + a combined report (after `writeups`) |
 | `exploit-plan/*` | runnable msf `.rc` + per-host plans (after `exploitplan`) |

@@ -426,6 +426,30 @@ def _network_map(hosts, domains):
         '</section>')
 
 
+def _ad_architecture(ad_arch):
+    """The tier-0 Active Directory architecture recce derived from a BloodHound /
+    SharpHound collection, rendered as a directly-viewable inline SVG."""
+    arch = (ad_arch or {}).get("architecture") if isinstance(ad_arch, dict) else None
+    if not arch or not arch.get("nodes"):
+        return ""
+    n = len(arch.get("nodes") or {})
+    return (
+        '<section><h2>AD architecture <span class="tag">from BloodHound</span></h2>'
+        '<p class="basis">The <b>tier-0</b> slice of Active Directory that recce built '
+        'from the SharpHound collection: the domain(s), the high-value groups '
+        '(Domain Admins, Administrators, …), the Domain Controllers, and the '
+        'privileged principals that are members of those groups — with the '
+        'membership, control (ACL / DCSync) and domain-trust edges between them. It '
+        'is a curated view, not the whole BloodHound graph: only tier-0 objects and '
+        'the edges that reach them are drawn, so the picture stays legible.</p>'
+        f'<div class="netmap">{nm.ad_svg(arch)}</div>'
+        '<p class="basis">This diagram renders here directly (and prints to PDF). '
+        f'Derived from {escape(str(n))} tier-0 object(s) in the collection. Full '
+        'privilege-escalation routes are in the attack-path and AD findings '
+        'sections.</p>'
+        '</section>')
+
+
 def _attack_path(hosts):
     steps = ap.build(hosts)
     if not steps:
@@ -661,7 +685,7 @@ def _hosts_table(hosts):
 
 def build_html(hosts: list[Host], out_path: str, *, title: str = "",
                domains=None, credentials=None, generated: str = "",
-               tracking=None) -> str:
+               tracking=None, ad_bloodhound=None) -> str:
     """Write a self-contained HTML report. Returns the path."""
     creds = cr.stack(hosts, credentials or [])
     title = title or "Penetration Test Report"
@@ -673,6 +697,7 @@ def build_html(hosts: list[Host], out_path: str, *, title: str = "",
         _exec_summary(hosts, domains, creds),
         _dashboard(hosts),
         _network_map(hosts, domains),
+        _ad_architecture(ad_bloodhound),
         _key_info(hosts, domains),
         _scoring_legend(),
         _findings_table(hosts),

@@ -6153,6 +6153,70 @@ class BloodHoundTest(unittest.TestCase):
         self.assertTrue(any(p["length"] == 1 and s["label"] == "DCSync"
                             for p in paths for s in p["steps"]))
 
+    def test_architecture_is_curated_tier0(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            arch = bh.architecture(bh.load_graph(d))
+        by_rid = {s.split("-")[-1]: v for s, v in arch["nodes"].items()}
+        # Domain object on top (tier 0); Domain Admins is a high-value group (tier 1).
+        self.assertEqual(by_rid[self.BASE.split("-")[-1]]["tier"], 0)
+        self.assertEqual(by_rid["512"]["tier"], 1)
+        self.assertTrue(by_rid["512"]["hv"])
+        # BOB is pulled in: it can DCSync the domain and controls HELPDESK (tier 2).
+        self.assertIn("1001", by_rid)
+        self.assertEqual(by_rid["1001"]["tier"], 2)
+        # Only tier-0-relevant objects are kept — SVC/ALICE (no tier-0 edge) are out.
+        self.assertNotIn("1002", by_rid)               # ALICE
+        self.assertNotIn("1003", by_rid)               # SVC
+        # The membership + control + DCSync edges are present.
+        rid_edges = {(s.split("-")[-1], l, dd.split("-")[-1]) for s, l, dd in arch["edges"]}
+        self.assertIn(("1105", "MemberOf", "512"), rid_edges)
+        self.assertIn(("1001", "GenericAll", "1105"), rid_edges)
+        self.assertTrue(any(l == "DCSync" for _s, l, _d in arch["edges"]))
+        self.assertFalse(arch["truncated"])
+
+    def test_architecture_truncates_large_graph(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            g = bh.load_graph(d)
+            arch = bh.architecture(g, max_nodes=2)
+        self.assertTrue(arch["truncated"])
+        self.assertLessEqual(len(arch["nodes"]), 2)
+
+    def test_architecture_persisted_in_analysis(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            analysis = bh.analyze(d)
+        self.assertIn("architecture", analysis)
+        self.assertTrue(analysis["architecture"]["nodes"])
+        # Must round-trip through JSON (it lives in the ad_bloodhound meta blob).
+        import json as _json
+        _json.loads(_json.dumps(analysis))
+
+    def test_architecture_embedded_in_html_report(self):
+        from recce import bloodhound as bh
+        from recce import report_html
+        from recce.models import Host
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            analysis = bh.analyze(d)
+            host = Host(ip="10.0.0.10", subnet="10.0.0.0/24", state="up",
+                        up_reason="syn-ack", roles=["Domain Controller"])
+            p = os.path.join(d, "r.html")
+            report_html.build_html([host], p, title="AD", ad_bloodhound=analysis)
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("AD architecture", html)
+        self.assertIn("from BloodHound", html)
+        self.assertIn("<svg", html)
+        self.assertIn("DOMAIN ADMINS", html)
+        self.assertNotIn("xmlns", html)                # inline SVG stays self-contained
+        for bad in ("src=", "<link", "<script"):
+            self.assertNotIn(bad, html)
+
     def test_kerberos_actions_with_hash(self):
         from recce import bloodhound as bh
         with tempfile.TemporaryDirectory() as d:
