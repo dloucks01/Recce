@@ -8366,6 +8366,126 @@ class NfsTest(unittest.TestCase):
         self.assertIsNone(N._parse_reply(body, 0x9999))          # wrong xid
 
 
+class KerberosTest(unittest.TestCase):
+    """Credential-less AD roasting: DER round-trip, a mock KDC (AS-REP for a
+    pre-auth-disabled user, KRB-ERROR otherwise), roast/enum classification,
+    findings, prove, `recce kerberos`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import struct
+        import threading
+        from recce import kerberos as K
+
+        def asrep():
+            cipher = bytes(range(40))                   # 16 checksum + 24 edata
+            enc = K._seq(K._ctx(0, K._int(23)), K._ctx(2, K._tlv(0x04, cipher)))
+            return K._tlv(0x6B, K._seq(
+                K._ctx(3, K._gstr("CORP.LOCAL")),
+                K._ctx(4, K._principal(1, ["svc_roast"])),
+                K._ctx(6, enc)))
+
+        def krberr(code):
+            return K._tlv(0x7E, K._seq(K._ctx(6, K._int(code))))
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(3.0)
+                hdr = K._recvn(sock, 4, 3.0)
+                if hdr is None:
+                    return
+                n = struct.unpack(">I", hdr)[0]
+                req = K._recvn(sock, n, 3.0) or b""
+                if b"svc_roast" in req:
+                    resp = asrep()
+                elif b"jdoe" in req:
+                    resp = krberr(K.KDC_ERR_PREAUTH_REQUIRED)     # 25 = valid
+                else:
+                    resp = krberr(K.KDC_ERR_PRINCIPAL_UNKNOWN)    # 6 = unknown
+                sock.sendall(struct.pack(">I", len(resp)) + resp)
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls._orig_port = K._PORT
+        K._PORT = cls.port                              # roast connects here, not 88
+
+    @classmethod
+    def tearDownClass(cls):
+        from recce import kerberos as K
+        K._PORT = cls._orig_port
+        cls.srv.shutdown()
+
+    def test_der_roundtrip(self):
+        from recce import kerberos as K
+        err = K._tlv(0x7E, K._seq(K._ctx(6, K._int(25))))
+        self.assertEqual(K.parse_response(err), {"type": "error", "code": 25})
+        cipher = bytes(range(40))
+        enc = K._seq(K._ctx(0, K._int(23)), K._ctx(2, K._tlv(0x04, cipher)))
+        rep = K._tlv(0x6B, K._seq(K._ctx(3, K._gstr("CORP.LOCAL")),
+                                  K._ctx(4, K._principal(1, ["jdoe"])),
+                                  K._ctx(6, enc)))
+        r = K.parse_response(rep)
+        self.assertEqual((r["type"], r["user"], r["etype"]), ("asrep", "jdoe", 23))
+        self.assertTrue(K.asrep_hash("jdoe", "CORP.LOCAL", 23, cipher)
+                        .startswith("$krb5asrep$23$jdoe@CORP.LOCAL:"))
+
+    def test_roast_classification(self):
+        from recce import kerberos as K
+        self.assertEqual(K.roast_user("127.0.0.1", "CORP.LOCAL", "svc_roast")["state"],
+                         "roastable")
+        self.assertEqual(K.roast_user("127.0.0.1", "CORP.LOCAL", "jdoe")["state"],
+                         "valid")
+        self.assertEqual(K.roast_user("127.0.0.1", "CORP.LOCAL", "ghost")["state"],
+                         "unknown_user")
+
+    def test_findings_and_prove(self):
+        from recce import kerberos as K, proofs
+        analysis = K.analyze(
+            [Host(ip="127.0.0.1", state="up", up_reason="syn-ack",
+                  ports=[Port(portid=self.port, state="open", service="kerberos")])],
+            users=["svc_roast", "jdoe", "ghost"], realm="CORP.LOCAL",
+            dc_ip="127.0.0.1", privileged={"svc_roast"})
+        titles = " ".join(f["title"] for f in analysis["findings"])
+        self.assertIn("AS-REP roastable account", titles)
+        self.assertIn("Kerberos username enumeration", titles)
+        h = Host(ip="127.0.0.1",
+                 ports=[Port(portid=88, service="kerberos", state="open")])
+        h.vulns = K.findings_to_vulns(analysis["findings"])["127.0.0.1"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_cmd_kerberos_end_to_end(self):
+        from recce import cli, xlsx, kerberos as K
+        from recce.models import Account
+        from recce.store import Store
+        orig = K.is_kerberos
+        K.is_kerberos = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(
+                    ip="127.0.0.1", state="up", up_reason="syn-ack",
+                    ports=[Port(portid=self.port, state="open", service="kerberos")],
+                    accounts=[Account(ip="127.0.0.1", source="ldap", kind="user",
+                                      name="svc_roast"),
+                              Account(ip="127.0.0.1", source="ldap", kind="user",
+                                      name="jdoe")]))
+                st.close()
+                rc = cli.main(["kerberos", "-d", "CORP.LOCAL", "-o", out])
+                self.assertEqual(rc, 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("Kerberos", sheets)
+                vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+                self.assertIn("roastable", vtxt.lower())
+        finally:
+            K.is_kerberos = orig
+
+
 class DiscoveryReconfirmTest(unittest.TestCase):
     """False-negative hardening: the discovery probe set, and the reconfirm re-probe
     that recovers firewalled hosts which block ping but answer a port scan."""

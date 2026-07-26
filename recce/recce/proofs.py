@@ -352,6 +352,23 @@ def _v_elasticsearch(host, port, vuln):
         "FP only if security was actually enforced (it would have returned 401)."]
 
 
+def _v_kerberos(host, port, vuln):
+    b = _blob(vuln)
+    if "username enumeration" in b:
+        return CONFIRMED, [
+            "recce sent pre-auth-less AS-REQs and the DC distinguished valid from "
+            "invalid usernames (PREAUTH_REQUIRED vs PRINCIPAL_UNKNOWN) - directly "
+            "observed, no logon attempted.",
+            "impacket-GetNPUsers <domain>/ -no-pass -usersfile users.txt to re-confirm.",
+            "FP only if the DC actually returned the same error for every name."]
+    return CONFIRMED, [
+        "recce requested an AS-REP with no pre-authentication and the DC returned one - "
+        "the account has DONT_REQ_PREAUTH set and the crackable hash is captured "
+        "(directly observed, no credential).",
+        "hashcat -m 18200 asrep.hash rockyou.txt to recover the plaintext (within ROE).",
+        "FP only if the account actually required pre-auth (no AS-REP would be issued)."]
+
+
 def _v_rsync(host, port, vuln):
     b = _blob(vuln)
     if "enumerable" in b or "modules enumerable" in b:
@@ -907,6 +924,15 @@ _RECIPES: list[dict] = [
                "already read the export list).",
      "fp": "The export is actually restricted to specific hosts.",
      "fn": _v_nfs},
+    {"id": "asrep-roast",
+     "match": r"as-rep roastable account|kerberos username enumeration|"
+              r"pre-auth disabled",
+     "name": "AS-REP roastable account / Kerberos user enumeration",
+     "pre": ["DC (88) reachable", "AS-REP returned / username validated with no credential"],
+     "finish": "hashcat -m 18200 asrep.hash rockyou.txt (roast), or GetNPUsers -no-pass "
+               "(enum) - recce already captured the reply.",
+     "fp": "The account actually required pre-auth (no AS-REP would be issued).",
+     "fn": _v_kerberos},
     {"id": "ftp-backdoor",
      "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
      "name": "Backdoored / RCE FTP build",
