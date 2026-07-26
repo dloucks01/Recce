@@ -45,6 +45,32 @@ All notable changes to recce are documented here. Dates are UTC.
   origin host). Credential **secrets are masked** in this shareable HTML — the full
   values for spraying stay on the workbook's Credentials tab.
 
+### Fixed
+- **Code audit — false-finding and crash fixes.**
+  - `parser`: a patched host whose NSE script prints `State: NOT VULNERABLE` no
+    longer becomes a false high-severity finding (the substring `VULNERABLE` inside
+    `NOT VULNERABLE` was matching); confirmed-vulnerable RCE families (ms17-010,
+    ms08-067, …) with no embedded CVSS now rate **critical** instead of a generic high.
+  - `vulndb`: the OpenSSH *regreSSHion* (CVE-2024-6387) signature used `eq: 9.8p1` —
+    which is the **patched** build — flagging fixed hosts and missing 9.4–9.7; it is
+    now a proper `8.5p1 ≤ x < 9.8p1` range. OS-gated signatures (BlueKeep) now resolve
+    an NT version from nmap's Windows product-name strings ("Windows 7", "2008 R2"),
+    so they actually fire.
+  - `web`: default-HTTP-Basic-credential detection no longer treats a 301/302 redirect
+    as a confirmed credical — only a 200 counts as proof.
+  - `ldap`: `result_code(None)` no longer raises an uncaught `TypeError` (crashing the
+    authenticated/pass-the-hash enum) when a server closes the socket or sends a short
+    frame.
+  - `report_html`: `ssh-key` credentials are now masked in the shareable HTML (they
+    previously rendered the full key path/material).
+  - `bloodhound`: SharpHound SID case is normalised on graph **edges** as well as
+    nodes, so lowercase/hand-built collections no longer produce zero attack paths.
+  - `cli`: `review --service IP:PORT` no longer crashes on a missing/non-numeric port
+    and now resolves the real protocol (a UDP service tick was silently a no-op).
+  - Robustness: `mongodb` reply parsing honours the reply opcode (fingerprints legacy
+    OP_REPLY servers) and survives hostile BSON array keys; `snmp` decodes signed
+    INTEGERs correctly; `store` keeps the newer NTLM facts on merge.
+
 ### Changed
 - **Split the HTML report into a findings page and an architecture & assets page.**
   `report.html` now stays focused on the assessment (exec summary, dashboard, scoring
