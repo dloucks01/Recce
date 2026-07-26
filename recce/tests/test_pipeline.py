@@ -7979,6 +7979,210 @@ class MongodbTest(unittest.TestCase):
             self.assertEqual(cli.main(["mongodb", "-o", out, "--no-probe"]), 0)
 
 
+class RedisTest(unittest.TestCase):
+    """Deep Redis module: RESP parse, a mock RESP server (PING/INFO/CONFIG), unauth
+    detection, findings, prove, `recce redis`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import threading
+
+        def bulk(s):
+            b = s.encode()
+            return b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n"
+
+        def arr(*items):
+            out = b"*" + str(len(items)).encode() + b"\r\n"
+            return out + b"".join(bulk(i) for i in items)
+
+        info = ("# Server\r\nredis_version:5.0.7\r\nos:Linux\r\nredis_mode:standalone\r\n"
+                "# Keyspace\r\ndb0:keys=42,expires=0\r\n")
+        cfg = {"dir": "/var/lib/redis", "dbfilename": "dump.rdb",
+               "requirepass": "", "protected-mode": "no"}
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(3.0)
+                buf = b""
+                while True:
+                    try:
+                        chunk = sock.recv(4096)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    buf += chunk
+                    # Parse each complete command (array of bulk strings) we have.
+                    while True:
+                        try:
+                            val, n = __import__("recce.redis", fromlist=["_parse"])._parse(buf, 0)
+                        except Exception:
+                            break
+                        buf = buf[n:]
+                        args = val if isinstance(val, list) else [val]
+                        cmd = (args[0] or "").upper() if args else ""
+                        if cmd == "PING":
+                            sock.sendall(b"+PONG\r\n")
+                        elif cmd == "INFO":
+                            sock.sendall(bulk(info))
+                        elif cmd == "CONFIG" and len(args) >= 3:
+                            sock.sendall(arr(args[2], cfg.get(args[2], "")))
+                        else:
+                            sock.sendall(b"-ERR unknown\r\n")
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_resp_parse_types(self):
+        from recce import redis as R
+        self.assertEqual(R._parse(b"+OK\r\n")[0], "OK")
+        self.assertEqual(R._parse(b":7\r\n")[0], 7)
+        self.assertEqual(R._parse(b"$3\r\nabc\r\n")[0], "abc")
+        self.assertEqual(R._parse(b"*2\r\n$1\r\na\r\n$1\r\nb\r\n")[0], ["a", "b"])
+        self.assertIsInstance(R._parse(b"-NOAUTH x\r\n")[0], R._Err)
+        with self.assertRaises(R._Incomplete):
+            R._parse(b"$5\r\nab")
+
+    def test_probe_detects_unauth(self):
+        from recce import redis as R
+        pr = R.probe("127.0.0.1", self.port, timeout=3.0)
+        self.assertTrue(pr["reachable"])
+        self.assertTrue(pr["unauth"])
+        self.assertEqual(pr["version"], "5.0.7")
+        self.assertEqual(pr["keys"], 42)
+        self.assertEqual(pr["dir"], "/var/lib/redis")
+
+    def test_findings_and_prove(self):
+        from recce import redis as R, proofs
+        pr = R.probe("127.0.0.1", self.port, timeout=3.0)
+        h = Host(ip="10.0.9.9", ports=[Port(portid=6379, service="redis", state="open")])
+        fs = R.findings([h], {("10.0.9.9", 6379): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("Redis exposed without authentication", titles)
+        self.assertIn("Redis end-of-life", titles)          # 5.0.7 < 6.0
+        h.vulns = R.findings_to_vulns(fs)["10.0.9.9"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_cmd_redis_end_to_end(self):
+        from recce import cli, xlsx, redis as R
+        from recce.store import Store
+        orig = R.is_redis
+        R.is_redis = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="redis")]))
+                st.close()
+                self.assertEqual(cli.main(["redis", "-o", out]), 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("Redis", sheets)
+                vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+                self.assertIn("Redis", vtxt)
+        finally:
+            R.is_redis = orig
+
+
+class ElasticsearchTest(unittest.TestCase):
+    """Deep Elasticsearch module: a mock HTTP API (/ banner + /_cat/indices), unauth
+    detection, findings, prove, `recce elasticsearch`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import json as _json
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, obj):
+                body = _json.dumps(obj).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if self.path == "/":
+                    self._send({"name": "es01", "cluster_name": "prod",
+                                "version": {"number": "6.8.0", "lucene_version": "7.7.0"},
+                                "tagline": "You Know, for Search"})
+                elif self.path.startswith("/_cat/indices"):
+                    self._send([{"index": "logs-2024", "docs.count": "1500"},
+                                {"index": "users", "docs.count": "40"},
+                                {"index": ".kibana", "docs.count": "3"}])
+                elif self.path.startswith("/_cluster/health"):
+                    self._send({"status": "green"})
+                else:
+                    self._send({})
+
+        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_probe_detects_unauth(self):
+        from recce import elasticsearch as E
+        pr = E.probe("127.0.0.1", self.port, timeout=3.0)
+        self.assertTrue(pr["reachable"])
+        self.assertTrue(pr["unauth"])
+        self.assertEqual(pr["version"], "6.8.0")
+        self.assertIn("logs-2024", pr["indices"])
+        self.assertEqual(pr["docs"], 1543)
+        self.assertEqual(pr["status"], "green")
+
+    def test_findings_and_prove(self):
+        from recce import elasticsearch as E, proofs
+        pr = E.probe("127.0.0.1", self.port, timeout=3.0)
+        h = Host(ip="10.0.9.8", ports=[Port(portid=9200, service="http", state="open")])
+        fs = E.findings([h], {("10.0.9.8", 9200): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("Elasticsearch exposed without authentication", titles)
+        self.assertIn("Elasticsearch end-of-life", titles)     # 6.8 < 7
+        h.vulns = E.findings_to_vulns(fs)["10.0.9.8"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_cmd_elasticsearch_end_to_end(self):
+        from recce import cli, xlsx, elasticsearch as E
+        from recce.store import Store
+        orig = E.is_elasticsearch
+        E.is_elasticsearch = lambda p: (p.state == "open"
+                                        and (p.portid == self.port or orig(p)))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="http")]))
+                st.close()
+                self.assertEqual(cli.main(["elasticsearch", "-o", out]), 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("Elasticsearch", sheets)
+                vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+                self.assertIn("Elasticsearch", vtxt)
+        finally:
+            E.is_elasticsearch = orig
+
+
 class DiscoveryReconfirmTest(unittest.TestCase):
     """False-negative hardening: the discovery probe set, and the reconfirm re-probe
     that recovers firewalled hosts which block ping but answer a port scan."""

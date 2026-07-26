@@ -100,7 +100,8 @@ TAB_COLORS = {
     "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND, "MSSQL": _TAB_FIND,
     "SMB": _TAB_FIND, "FTP": _TAB_FIND, "Docker": _TAB_FIND,
     "Kubernetes": _TAB_FIND, "LDAP": _TAB_FIND,
-    "SNMP": _TAB_FIND, "MongoDB": _TAB_FIND, "Raw NSE": _TAB_RAW,
+    "SNMP": _TAB_FIND, "MongoDB": _TAB_FIND, "Redis": _TAB_FIND,
+    "Elasticsearch": _TAB_FIND, "Raw NSE": _TAB_RAW,
 }
 
 
@@ -1292,7 +1293,8 @@ def _build_runbook(wb, meta: dict) -> None:
         "Capture terminal-style PROOF screenshots of executed actions (RCE output, "
         "write-proof, data mining) into engagement/screenshots/ for the walkthroughs.")
 
-    section("5d. Additional services - SMB / FTP / Docker / Kubernetes / LDAP / SNMP / MongoDB",
+    section("5d. Additional services - SMB / FTP / Docker / Kubernetes / LDAP / SNMP / "
+            "MongoDB / Redis / Elasticsearch",
             "Deep, per-service offensive enumeration. Each probes with recce's own "
             "stdlib code (no creds needed to start), folds findings into the main "
             "totals, and fills its own tab. Run the ones your enum turned up.")
@@ -1326,6 +1328,14 @@ def _build_runbook(wb, meta: dict) -> None:
         "MongoDB: speaks the wire protocol (OP_MSG/BSON), fingerprints with hello + "
         "buildInfo, then proves whether listDatabases answers with NO authentication - "
         "a CONFIRMED no-auth instance is full read/write to every database.")
+    cmd("redis -o eng   [--no-probe]",
+        "Redis: speaks RESP, fingerprints with PING + INFO, then proves whether INFO "
+        "answers with NO authentication - a CONFIRMED no-auth instance is full "
+        "read/write plus a CONFIG+SAVE file-write -> RCE primitive.")
+    cmd("elasticsearch -o eng   [--no-probe]",
+        "Elasticsearch: GETs the HTTP API, fingerprints via /, then proves whether "
+        "/_cat/indices answers with NO authentication - a CONFIRMED no-auth cluster is "
+        "unauthenticated read/write to every document.")
 
     section("6. Act on the findings - turn CONFIRMED findings into a plan",
             "Once findings are proven (Verification tab), stage the exploitation and "
@@ -2240,6 +2250,101 @@ def _build_mongodb(wb, analysis: dict) -> None:
     sh.set_col(2, 120)
 
 
+def _build_redis(wb, analysis: dict) -> None:
+    """Redis sheet: per-instance auth posture, version, key count, findings, runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import redis as _redis
+    sh = wb.add_sheet("Redis")
+    sh.write([("Redis - offensive enumeration", "title")])
+    sh.write([("recce speaks the Redis wire protocol directly (stdlib RESP): PING + "
+               "INFO to fingerprint, then INFO with no credential to prove whether the "
+               "instance answers without authentication. On an exposed instance it "
+               "reads (never sets) CONFIG dir/dbfilename/requirepass - the file-write "
+               "-> RCE preconditions. Read-only.", "sub")])
+    sh.write([""])
+    sh.write([("How Redis is tested", "title")])
+    for phase, text in _redis.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Instances", "title")])
+    sh.write([(h, "bold") for h in ("IP:Port", "Auth", "Version", "Keys")])
+    for t in tgts:
+        if t.get("unauth"):
+            authcell = ("NO AUTH", "sev_critical")
+        elif t.get("auth_required"):
+            authcell = ("auth required", "sev_medium")
+        else:
+            authcell = "?"
+        sh.write([f"{t['ip']}:{t['port']}", authcell, t.get("version", ""),
+                  "" if not t.get("keys") else str(t.get("keys"))])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_elasticsearch(wb, analysis: dict) -> None:
+    """Elasticsearch sheet: per-cluster auth posture, version, index count, findings."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import elasticsearch as _es
+    sh = wb.add_sheet("Elasticsearch")
+    sh.write([("Elasticsearch - offensive enumeration", "title")])
+    sh.write([("recce GETs the Elasticsearch HTTP API directly (stdlib http.client): / "
+               "to fingerprint the cluster/version, then /_cat/indices with no "
+               "credential to prove whether the cluster is exposed unauthenticated. "
+               "Read-only - only GETs, never indexes/updates/deletes.", "sub")])
+    sh.write([""])
+    sh.write([("How Elasticsearch is tested", "title")])
+    for phase, text in _es.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Clusters", "title")])
+    sh.write([(h, "bold") for h in ("IP:Port", "Auth", "Version", "Indices")])
+    for t in tgts:
+        if t.get("unauth"):
+            authcell = ("NO AUTH", "sev_critical")
+        elif t.get("secured"):
+            authcell = ("security enforced", "sev_medium")
+        else:
+            authcell = "?"
+        sh.write([f"{t['ip']}:{t['port']}", authcell, t.get("version", ""),
+                  "" if not t.get("indices") else str(t.get("indices"))])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
 # --- public entry points --------------------------------------------------------
 
 def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
@@ -2404,6 +2509,8 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     _build_ldap(wb, meta.get("ldap") or {})
     _build_snmp(wb, meta.get("snmp") or {})
     _build_mongodb(wb, meta.get("mongodb") or {})
+    _build_redis(wb, meta.get("redis") or {})
+    _build_elasticsearch(wb, meta.get("elasticsearch") or {})
     # AD cluster, kept contiguous: inventory -> quick wins -> import findings/paths
     # -> users & accounts.
     _build_active_directory(wb, hosts, domains)

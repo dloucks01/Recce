@@ -5,6 +5,22 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Redis deep module (`recce redis`).** Speaks the Redis wire protocol (RESP)
+  directly on a raw socket — no redis-py. Sends PING + INFO, and uses INFO-without-auth
+  as the discriminator: if the server stats come back with no credential the instance
+  is **exposed unauthenticated** (CONFIRMED critical — full read/write plus the CONFIG
+  `dir`/`dbfilename` + SAVE file-write → RCE primitive, which recce reads but never
+  sets). A `-NOAUTH` reply is reported reachable-but-locked (not a finding). Old/EOL
+  builds (< 6.0, pre-ACL) are flagged. Feeds the severity totals, a dedicated **Redis**
+  tab, the prove engine, and `sweep`. Read-only.
+- **Elasticsearch deep module (`recce elasticsearch` / `es`).** Talks to the ES HTTP
+  API (9200/9201) with stdlib `http.client`. Fingerprints via `GET /`, then uses
+  `GET /_cat/indices`-without-auth as the discriminator: if the index list comes back
+  the cluster is **exposed unauthenticated** (CONFIRMED critical data exposure — every
+  document readable/writable), recording index names + total document count. A
+  401/security_exception is reported reachable-but-locked. Old/EOL builds (< 7.x, with
+  the historical scripting-sandbox RCEs) are flagged. Feeds the severity totals, a
+  dedicated **Elasticsearch** tab, the prove engine, and `sweep`. Read-only (GETs only).
 - **Access + risk overlay on the AD architecture diagram.** Tier-0 objects recce
   **already holds** (usernames from captured credentials, or an accessed DC) get a
   bold border + ✓; nodes an attacker can **seize directly** get a risk dot (DCSync =

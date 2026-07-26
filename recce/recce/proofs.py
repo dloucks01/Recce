@@ -317,6 +317,41 @@ def _v_mongodb(host, port, vuln):
         "FP only if the server actually required auth (it would have returned an error)."]
 
 
+def _v_redis(host, port, vuln):
+    # recce read INFO over RESP with no AUTH, so the no-auth exposure is directly
+    # observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "end-of-life" in b or "legacy" in b:
+        return CONFIRMED, [
+            "recce read the running Redis version via INFO and it predates the 6.0 ACL "
+            "line / is end-of-life (directly observed).",
+            "redis-cli -h <ip> -p <port> INFO server to re-read the version.",
+            "FP only if a vendor backported fixes to this build in place."]
+    return CONFIRMED, [
+        "recce sent INFO over the Redis wire protocol with no authentication and the "
+        "server returned its stats (directly observed).",
+        "redis-cli -h <ip> -p <port> INFO ; KEYS '*'  then the CONFIG SET dir + "
+        "dbfilename + SAVE file-write chain for RCE (within ROE).",
+        "FP only if the server actually required auth (it would have returned -NOAUTH)."]
+
+
+def _v_elasticsearch(host, port, vuln):
+    # recce GET /_cat/indices returned the index list with no credential -> CONFIRMED.
+    b = _blob(vuln)
+    if "end-of-life" in b or "legacy" in b:
+        return CONFIRMED, [
+            "recce read the running Elasticsearch version from the / banner and it is "
+            "past end-of-life (directly observed).",
+            "curl -s http://<ip>:<port>/ to re-read the version number.",
+            "FP only if a vendor backported fixes to this build in place."]
+    return CONFIRMED, [
+        "recce GET /_cat/indices with no credential and the cluster returned the index "
+        "list (directly observed).",
+        "curl -s http://<ip>:<port>/_cat/indices then _search / elasticdump to pull "
+        "documents (within ROE).",
+        "FP only if security was actually enforced (it would have returned 401)."]
+
+
 def _v_ftp_backdoor(host, port, vuln):
     # A banner-matched trojaned/backdoored FTP build. The banner is strong evidence
     # but backdoor presence is only truly proven by triggering it, so LIKELY with the
@@ -795,6 +830,24 @@ _RECIPES: list[dict] = [
                "then mongodump --host <ip> --port <port> --out loot/  (recce already read it).",
      "fp": "The server actually enforced auth and returned an error.",
      "fn": _v_mongodb},
+    {"id": "redis-unauth",
+     "match": r"redis exposed without authentication|redis.*(no auth|unauth)|"
+              r"redis end-of-life|redis.*legacy build",
+     "name": "Redis exposed without authentication",
+     "pre": ["Redis (6379/6380) reachable", "INFO answered with no credential"],
+     "finish": "redis-cli -h <ip> -p <port> INFO ; KEYS '*'  then the CONFIG SET dir + "
+               "SAVE file-write chain for RCE (recce already read it).",
+     "fp": "The server actually enforced auth (-NOAUTH).",
+     "fn": _v_redis},
+    {"id": "elasticsearch-unauth",
+     "match": r"elasticsearch exposed without authentication|elasticsearch.*(no auth|unauth)|"
+              r"elasticsearch end-of-life|elasticsearch.*legacy build",
+     "name": "Elasticsearch exposed without authentication",
+     "pre": ["Elasticsearch (9200/9201) reachable", "/_cat/indices answered with no credential"],
+     "finish": "curl -s http://<ip>:<port>/_cat/indices then _search / elasticdump to "
+               "pull documents (recce already listed them).",
+     "fp": "The cluster actually enforced security (401).",
+     "fn": _v_elasticsearch},
     {"id": "ftp-backdoor",
      "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
      "name": "Backdoored / RCE FTP build",
