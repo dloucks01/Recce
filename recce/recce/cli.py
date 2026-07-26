@@ -271,9 +271,18 @@ def _safe_refresh(store: Store, paths: dict[str, str], title: str) -> bool:
         return False
 
 
+# When `sweep` chains several deep-module commands, each one would otherwise
+# regenerate the whole workbook on the way out (N rebuilds for N modules). This flag
+# lets sweep suppress those intermediate rebuilds and regenerate exactly once at the
+# end - the datastore is the source of truth, so nothing is lost by deferring.
+_DEFER_REPORTS = False
+
+
 def _generate_reports(store: Store, paths: dict[str, str], title: str,
                       quiet: bool = False) -> None:
     """Regenerate all reports from the datastore (the source of truth)."""
+    if _DEFER_REPORTS:
+        return
     hosts = store.all_hosts()
     tracking = store.get_tracking()
     domains = _resolve_domains(store, hosts)
@@ -1352,6 +1361,93 @@ def cmd_scan(args: argparse.Namespace) -> int:
         store.close()
     print("\n[+] Done.")
     return 0
+
+
+def _sweep_defaults(args: argparse.Namespace) -> None:
+    """Fill in every attribute the deep-module handlers read that the `sweep` parser
+    doesn't define, so each runs its credential-free path without an AttributeError.
+    Anything the user *did* pass (creds, --no-probe) is left untouched."""
+    defaults = {
+        "no_probe": False, "no_run": True, "prove_write": False, "no_active": False,
+        "cookie": None, "header": None, "creds": False, "crawl": False,
+        "sqli_time": False, "username": None, "password": None, "domain": None,
+        "dc_ip": None, "local_auth": False, "lhost": "<LHOST>", "data": False,
+        "exec_cmd": None, "method": None, "link_depth": 1, "no_links": False,
+        "perms": False, "relay": None,
+    }
+    for k, v in defaults.items():
+        if not hasattr(args, k):
+            setattr(args, k, v)
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """Run every applicable credential-free deep-enum module in one shot, instead of
+    typing each of `web`/`smb`/`ftp`/`ldap`/`snmp`/`mongodb`/`docker`/`kubernetes`/
+    `mssql` by hand after `enum`. Each module self-skips when the datastore has no
+    matching service, so running them all is cheap; the workbook is rebuilt once at
+    the end. Any creds you pass (-u/-p/-d) flow through to the modules that use them.
+    """
+    global _DEFER_REPORTS
+    print(BANNER)
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    _sweep_defaults(args)
+
+    # (name, handler). Order is foothold-ish: web + protocol posture first, then the
+    # heavier database/service dives. Every one no-ops cleanly with no matching hosts.
+    modules = [
+        ("web", cmd_web), ("smb", cmd_smb), ("ftp", cmd_ftp), ("ldap", cmd_ldap),
+        ("snmp", cmd_snmp), ("mongodb", cmd_mongodb), ("docker", cmd_docker),
+        ("kubernetes", cmd_kubernetes), ("mssql", cmd_mssql),
+    ]
+    skip = {s.strip().lower() for s in (getattr(args, "skip", None) or [])}
+    only = {s.strip().lower() for s in (getattr(args, "only_modules", None) or [])}
+    if only:
+        modules = [(n, h) for n, h in modules if n in only]
+    if skip:
+        modules = [(n, h) for n, h in modules if n not in skip]
+
+    run_vulns = getattr(args, "vulns", False)
+    ran, failed = [], []
+    _DEFER_REPORTS = True
+    try:
+        if run_vulns:
+            print("\n" + "=" * 64 + "\n[SWEEP] vulns (nmap NSE)\n" + "=" * 64)
+            try:
+                cmd_vulns(args)
+                ran.append("vulns")
+            except Exception as e:  # noqa: BLE001 - one module must not abort the sweep
+                failed.append(("vulns", e))
+                print(f"[!] vulns failed: {type(e).__name__}: {e}")
+        for name, handler in modules:
+            print("\n" + "=" * 64 + f"\n[SWEEP] {name}\n" + "=" * 64)
+            try:
+                handler(args)
+                ran.append(name)
+            except Exception as e:  # noqa: BLE001
+                failed.append((name, e))
+                print(f"[!] {name} failed: {type(e).__name__}: {e}")
+    finally:
+        _DEFER_REPORTS = False
+
+    # Single, authoritative report rebuild from everything the modules folded in.
+    store = _open_store(paths["db"])
+    if store is not None:
+        _import_excel_tracking(store, paths)
+        title = store.get_meta("engagement") or args.title
+        _generate_reports(store, paths, title)
+        store.close()
+
+    print("\n" + "=" * 64)
+    print(f"[+] Sweep complete: ran {len(ran)} module(s) "
+          f"({', '.join(ran) or 'none'}).")
+    if failed:
+        print(f"[!] {len(failed)} module(s) errored: "
+              f"{', '.join(n for n, _ in failed)} - re-run individually to debug.")
+    print("    Reports rebuilt. Next: `recce prove` then `recce attackpath`.")
+    return 1 if failed else 0
 
 
 def cmd_db(args: argparse.Namespace) -> int:
@@ -4469,6 +4565,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_vuln_opts(s)
     _add_creds(s)
     s.set_defaults(func=cmd_scan)
+
+    # One command instead of ~9: run every applicable credential-free deep module.
+    sw = sub.add_parser("sweep",
+                        help="run ALL applicable deep modules after enum in one shot "
+                             "(web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)")
+    sw.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    _add_common(sw)
+    _add_creds(sw)
+    _add_vuln_opts(sw)
+    sw.add_argument("--vulns", action="store_true",
+                    help="also run the nmap NSE vuln scan (heavier; off by default)")
+    sw.add_argument("--skip", nargs="*", metavar="MOD",
+                    help="deep modules to skip (e.g. --skip mssql docker)")
+    sw.add_argument("--only-modules", nargs="*", metavar="MOD",
+                    help="run only these deep modules (e.g. --only-modules web smb)")
+    sw.add_argument("--no-probe", action="store_true",
+                    help="passive: fold what enum already found, don't send probes")
+    sw.set_defaults(func=cmd_sweep)
 
     # Fold on-target recce-enum.sh/.ps1 output into the Priv-Esc sheet.
     ing = sub.add_parser("ingest",

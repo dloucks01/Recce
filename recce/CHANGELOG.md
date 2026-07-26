@@ -5,6 +5,22 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **`recce sweep` — one command for the whole post-`enum` deep-enum pass.** Instead of
+  typing `web`, `smb`, `ftp`, `ldap`, `snmp`, `mongodb`, `docker`, `kubernetes` and
+  `mssql` by hand after enum, `sweep` runs every applicable credential-free deep module
+  in one shot. Each self-skips when the datastore has no matching service, so running
+  them all is cheap, and the workbook is rebuilt exactly once at the end (intermediate
+  rebuilds are deferred) instead of once per module. Any creds you pass (`-u/-p/-d`)
+  flow through to the modules that use them; `--vulns` also runs the nmap NSE scan,
+  `--skip`/`--only-modules` narrow the set, `--no-probe` folds passively, and a module
+  that errors is isolated (logged, sweep continues) rather than aborting the run.
+- **Live end-to-end smoke test** (`tests/test_live_smoke.py`). Stands up real localhost
+  web / MongoDB-wire / FTP servers and drives the actual `recce` CLI against them —
+  `import` → `sweep` folds genuine findings from the live probes (MongoDB unauth
+  exposure with the version read off the wire, web cookie/dir-listing, FTP anonymous),
+  and a real nmap-backed `recce enum` discovers a live open port — proving the whole
+  scan → parse → probe → fold → report path against live sockets, not fixtures. Plus
+  `sweep` selection/deferral wiring tests against the bundled sample.
 - **`ldap` — deep LDAP / Active Directory directory enumeration (stdlib only).** A
   hand-rolled BER/ASN.1 LDAP client on a raw socket (no python-ldap / ldap3), so it
   runs on a stock airgapped Kali. Credential-free and read-only, against a Directory
