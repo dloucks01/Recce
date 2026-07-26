@@ -5,6 +5,23 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **rsync-daemon deep module (`recce rsync`).** Speaks the rsync daemon protocol
+  (TCP 873) directly — no rsync binary. Reads the `@RSYNCD` greeting, lists the modules
+  with `#list`, then probes each for anonymous access: an `@RSYNCD: OK` module is
+  **readable with no credential** (CONFIRMED — unauthenticated read, and often write, of
+  every file it exposes), while `@RSYNCD: AUTHREQD` is reported reachable-but-locked. The
+  module inventory itself is flagged as an information leak. Read-only — recce reads the
+  verdict line and never transfers a file. Feeds the totals, a dedicated **rsync** tab,
+  the prove engine, and `sweep`.
+- **NFS / mountd deep module (`recce nfs` / `showmount`).** Speaks ONC RPC (Sun RPC)
+  directly with stdlib struct/XDR — no rpcinfo/showmount binary. Calls the portmapper
+  DUMP (111) for the RPC directory, resolves mountd, and calls `MOUNTPROC_EXPORT` (the
+  `showmount -e` equivalent) to read every export and its client ACL. An export shared
+  to `*` / everyone (or with no host restriction) is flagged **world-mountable**
+  (CONFIRMED — mountable by any host: read, and via `no_root_squash` write, every file).
+  A restricted-but-enumerable export list and an open portmapper are lower-severity
+  info leaks. Read-only — recce never mounts. Feeds the totals, a dedicated **NFS** tab,
+  the prove engine, and `sweep`.
 - **Redis deep module (`recce redis`).** Speaks the Redis wire protocol (RESP)
   directly on a raw socket — no redis-py. Sends PING + INFO, and uses INFO-without-auth
   as the discriminator: if the server stats come back with no credential the instance

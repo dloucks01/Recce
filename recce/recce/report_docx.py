@@ -177,6 +177,8 @@ _SOURCE_TOOL = {
     "mongodb": "MongoDB enum (recce stdlib OP_MSG/BSON wire client)",
     "redis": "Redis enum (recce stdlib RESP wire client)",
     "elasticsearch": "Elasticsearch enum (recce stdlib HTTP API client)",
+    "rsync": "rsync-daemon enum (recce stdlib rsync protocol client)",
+    "nfs": "NFS / mountd enum (recce stdlib ONC RPC client)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.

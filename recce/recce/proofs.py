@@ -352,6 +352,47 @@ def _v_elasticsearch(host, port, vuln):
         "FP only if security was actually enforced (it would have returned 401)."]
 
 
+def _v_rsync(host, port, vuln):
+    b = _blob(vuln)
+    if "enumerable" in b or "modules enumerable" in b:
+        return CONFIRMED, [
+            "recce completed the rsync handshake and the daemon returned its module "
+            "list with no credential (directly observed).",
+            "rsync rsync://<ip>:<port>/ to re-read the module inventory.",
+            "FP only if the daemon actually required auth to list (it would not have "
+            "returned the modules)."]
+    return CONFIRMED, [
+        "recce requested the module and the daemon answered @RSYNCD: OK - anonymous "
+        "access with no credential (directly observed).",
+        "rsync --list-only rsync://<ip>:<port>/<module>/ then rsync -av ... loot/ "
+        "(within ROE).",
+        "FP only if the module actually required auth (it would have returned "
+        "AUTHREQD)."]
+
+
+def _v_nfs(host, port, vuln):
+    b = _blob(vuln)
+    if "world-mountable" in b or "shared to any host" in b:
+        return CONFIRMED, [
+            "recce read the mountd export list and an export is shared with no host "
+            "restriction / a wildcard (directly observed).",
+            "showmount -e <ip> then mount -o vers=3 <ip>:<export> /mnt (within ROE); "
+            "check for no_root_squash to escalate.",
+            "FP only if the server actually restricts the export (the ACL would name "
+            "specific hosts)."]
+    if "rpc services enumerable" in b:
+        return CONFIRMED, [
+            "recce called the portmapper DUMP and it returned the registered RPC "
+            "programs with no credential (directly observed).",
+            "rpcinfo -p <ip> to re-read the RPC directory.",
+            "FP only if rpcbind actually refused the query."]
+    return CONFIRMED, [
+        "recce called MOUNTPROC_EXPORT and mountd returned the export list with no "
+        "credential (directly observed).",
+        "showmount -e <ip> to re-read the exports.",
+        "FP only if mountd actually required auth."]
+
+
 def _v_ftp_backdoor(host, port, vuln):
     # A banner-matched trojaned/backdoored FTP build. The banner is strong evidence
     # but backdoor presence is only truly proven by triggering it, so LIKELY with the
@@ -848,6 +889,24 @@ _RECIPES: list[dict] = [
                "pull documents (recce already listed them).",
      "fp": "The cluster actually enforced security (401).",
      "fn": _v_elasticsearch},
+    {"id": "rsync-unauth",
+     "match": r"rsync module readable without authentication|"
+              r"rsync modules enumerable|rsync.*(no auth|unauth|anonymous)",
+     "name": "rsync exposed without authentication",
+     "pre": ["rsync daemon (873) reachable", "module list / module answered with no credential"],
+     "finish": "rsync --list-only rsync://<ip>:<port>/<module>/ then rsync -av ... loot/ "
+               "(recce already read the OK verdict).",
+     "fp": "The daemon actually required auth (AUTHREQD).",
+     "fn": _v_rsync},
+    {"id": "nfs-export",
+     "match": r"nfs export shared to any host|world-mountable|"
+              r"nfs exports enumerable|rpc services enumerable via portmapper",
+     "name": "NFS export exposed",
+     "pre": ["portmapper (111) / mountd reachable", "export list answered with no credential"],
+     "finish": "showmount -e <ip> then mount -o vers=3 <ip>:<export> /mnt  (recce "
+               "already read the export list).",
+     "fp": "The export is actually restricted to specific hosts.",
+     "fn": _v_nfs},
     {"id": "ftp-backdoor",
      "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
      "name": "Backdoored / RCE FTP build",
