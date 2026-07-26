@@ -161,6 +161,36 @@ All notable changes to recce are documented here. Dates are UTC.
     injection lives) stay fuzzable. `--fuzz-risky-forms` opts back into submitting
     state-changing forms on a throwaway target (file uploads are never submitted).
 
+### Added (high-fidelity decoder + probe tests)
+- **Fuzz-invariant harness for every Layer-1 decoder** (`tests/test_fuzz_decoders.py`).
+  Each pure decoder (SNMP `parse_response`, BSON `bson_parse`, LDAP `parse_search_entry`
+  / `result_code` / `_op_tag`, NTLM `parse_type2`, SMB2/SMB1 negotiate, `web.fingerprint`,
+  `parse_nmap_xml`) is hammered with every truncation, byte-flip, corrupted length field,
+  random splice and targeted structural attack (deep nesting, unterminated cstrings) of a
+  real message. A SIGALRM watchdog bounds each call so an infinite loop or non-advancing
+  offset fails the test instead of hanging the suite; each decoder is checked against its
+  *own* allowed-exception set, so any undeclared exception (the class its caller can't
+  catch) is flagged.
+- **Golden wire-vector tests** (`tests/test_wire_vectors.py`) assert the exact parsed
+  output for a real message per protocol — the other half of fidelity, catching a decoder
+  that stops mis-reads a field (offset/endianness/sign) even when it never raises.
+- **Fake-transport probe tests** (`tests/test_probe_transport.py`) stand up tiny 127.0.0.1
+  replay servers and point the real `smb`/`ftp`/`docker`/`kubernetes`/`web.scan_endpoint`
+  probes at them — no socket or parser mocking, so the exact socket→parse→findings path a
+  live target drives is exercised. Closes the loopback-server gap for the probes that had
+  none (SNMP/MongoDB/LDAP already had them); includes an integration-level regression guard
+  for the `_is_tls` plain-HTTP bug.
+- Shared fixtures live in `tests/wire_vectors.py`, so the fuzzer and the golden tests
+  mutate/parse byte-for-byte the same real message.
+
+### Fixed (high-fidelity test batch)
+- **`bson_parse` could crash a MongoDB probe with an unhandled `RecursionError`.** A
+  hostile/corrupt daemon sending a deeply nested BSON document (embedded-doc / array types)
+  recursed past Python's stack limit; `mongodb.command` catches `struct.error`/`IndexError`/
+  `ValueError` but **not** `RecursionError`, so it would escape and kill the enum phase.
+  `bson_parse` now caps nesting depth (`_MAX_BSON_DEPTH = 100`; real replies nest a few
+  levels) and stops safely. Found on the first run of the new fuzz harness.
+
 ### Fixed (audit + end-to-end run)
 - **Plain-HTTP services on odd ports were scanned as HTTPS and missed entirely.**
   `_is_tls` substring-matched the *product* name, so any product containing "http"+"s"

@@ -23,6 +23,8 @@ from .models import Host, Port
 _PORTS = (27017, 27018, 27019)
 _DEFAULT_PORT = 27017
 _TIMEOUT = 5.0
+_MAX_BSON_DEPTH = 100                                  # real replies nest a few levels;
+                                                       # anything deeper is hostile.
 
 
 def is_mongodb(port: Port) -> bool:
@@ -51,14 +53,18 @@ def bson_doc(*elements: bytes) -> bytes:
     return struct.pack("<i", len(body) + 5) + body + b"\x00"
 
 
-def bson_parse(data: bytes, i: int = 0) -> tuple[dict, int]:
+def bson_parse(data: bytes, i: int = 0, _depth: int = 0) -> tuple[dict, int]:
     """Parse a BSON document at offset i. Returns (dict, index-after-document).
     Hardened against a hostile/corrupt document: a negative or non-advancing length
-    field is rejected instead of spinning the loop forever."""
+    field is rejected instead of spinning the loop forever, and nesting is capped so
+    a maliciously deep document can't blow the Python stack with a RecursionError
+    that the caller (command) doesn't catch."""
     length = struct.unpack_from("<i", data, i)[0]
     if length < 5:                                     # a BSON doc is >= 5 bytes
         return {}, i + 4
     end = min(i + length, len(data))
+    if _depth > _MAX_BSON_DEPTH:                        # refuse hostile nesting depth
+        return {}, end
     i += 4
     out: dict = {}
     while i < end - 1:
@@ -78,9 +84,9 @@ def bson_parse(data: bytes, i: int = 0) -> tuple[dict, int]:
             out[name] = data[i:i + slen - 1].decode("utf-8", "replace")
             i += slen
         elif etype == 0x03:                            # embedded document
-            out[name], i = bson_parse(data, i)
+            out[name], i = bson_parse(data, i, _depth + 1)
         elif etype == 0x04:                            # array (doc with "0","1",... keys)
-            sub, i = bson_parse(data, i)
+            sub, i = bson_parse(data, i, _depth + 1)
             out[name] = [sub[k] for k in sorted(sub, key=lambda x: int(x))]
         elif etype == 0x05:                            # binary
             blen = struct.unpack_from("<i", data, i)[0]
