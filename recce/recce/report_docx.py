@@ -66,7 +66,7 @@ _CWE_TYPE = [
     (("CWE-327", "CWE-326", "CWE-295", "CWE-297", "CWE-298", "CWE-330", "CWE-347"),
      "Cryptographic / TLS Weakness", "Confidentiality, Integrity"),
     (("CWE-522", "CWE-312", "CWE-256", "CWE-257", "CWE-260", "CWE-200", "CWE-538",
-      "CWE-527", "CWE-532", "CWE-203", "CWE-215", "CWE-548", "CWE-615"),
+      "CWE-527", "CWE-532", "CWE-203", "CWE-204", "CWE-215", "CWE-548", "CWE-615"),
      "Information / Credential Disclosure", "Confidentiality"),
     (("CWE-693", "CWE-1021", "CWE-16", "CWE-650", "CWE-441", "CWE-284", "CWE-1004",
       "CWE-614", "CWE-942", "CWE-799", "CWE-1275"), "Security Misconfiguration", "Integrity"),
@@ -88,6 +88,7 @@ _CWE_NAME = {
     "CWE-125": "Out-of-bounds Read", "CWE-134": "Uncontrolled Format String",
     "CWE-190": "Integer Overflow", "CWE-193": "Off-by-one Error",
     "CWE-200": "Exposure of Sensitive Information", "CWE-203": "Observable Discrepancy",
+    "CWE-204": "Observable Response Discrepancy",
     "CWE-250": "Execution with Unnecessary Privileges",
     "CWE-256": "Plaintext Storage of a Password",
     "CWE-257": "Storing Passwords in a Recoverable Format",
@@ -175,6 +176,11 @@ _SOURCE_TOOL = {
     "ldap": "LDAP / AD enum (recce stdlib BER/ASN.1 client)",
     "snmp": "SNMP enum (recce stdlib BER v2c UDP client)",
     "mongodb": "MongoDB enum (recce stdlib OP_MSG/BSON wire client)",
+    "redis": "Redis enum (recce stdlib RESP wire client)",
+    "elasticsearch": "Elasticsearch enum (recce stdlib HTTP API client)",
+    "rsync": "rsync-daemon enum (recce stdlib rsync protocol client)",
+    "nfs": "NFS / mountd enum (recce stdlib ONC RPC client)",
+    "kerberos": "AD roasting (recce stdlib Kerberos AS-REP client)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.
@@ -203,6 +209,7 @@ _SERVICE_ROLE = {
     3306: "database service (MySQL)", 5432: "database service (PostgreSQL)",
     1433: "database service (Microsoft SQL Server)", 1521: "database service (Oracle)",
     27017: "database service (MongoDB)", 6379: "in-memory data store (Redis)",
+    9200: "search / analytics service (Elasticsearch)",
     161: "network-management (SNMP) service", 2049: "file-sharing (NFS) service",
 }
 

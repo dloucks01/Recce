@@ -100,7 +100,9 @@ TAB_COLORS = {
     "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND, "MSSQL": _TAB_FIND,
     "SMB": _TAB_FIND, "FTP": _TAB_FIND, "Docker": _TAB_FIND,
     "Kubernetes": _TAB_FIND, "LDAP": _TAB_FIND,
-    "SNMP": _TAB_FIND, "MongoDB": _TAB_FIND, "Raw NSE": _TAB_RAW,
+    "SNMP": _TAB_FIND, "MongoDB": _TAB_FIND, "Redis": _TAB_FIND,
+    "Elasticsearch": _TAB_FIND, "rsync": _TAB_FIND, "NFS": _TAB_FIND,
+    "Kerberos": _TAB_FIND, "Raw NSE": _TAB_RAW,
 }
 
 
@@ -1037,6 +1039,20 @@ def _build_guide(wb, meta: dict) -> None:
                     "buildInfo fingerprint, then listDatabases to prove whether the "
                     "instance answers privileged commands with no authentication. "
                     "Run `recce mongodb`."),
+        ("Redis", "Redis wire protocol (stdlib RESP client): PING + INFO, then "
+                  "INFO-without-auth to prove an unauthenticated instance (read/write "
+                  "+ CONFIG/SAVE file-write -> RCE). Run `recce redis`."),
+        ("Elasticsearch", "Elasticsearch HTTP API (stdlib client): / fingerprint, "
+                          "then /_cat/indices-without-auth to prove an exposed cluster "
+                          "(all documents readable). Run `recce elasticsearch`."),
+        ("rsync", "rsync daemon protocol (stdlib): #list the modules, then prove which "
+                  "answer @RSYNCD: OK with no credential (unauthenticated file read). "
+                  "Run `recce rsync`."),
+        ("NFS", "ONC RPC (stdlib): portmapper DUMP + mountd EXPORT (showmount -e); an "
+                "export shared to * / everyone is world-mountable. Run `recce nfs`."),
+        ("Kerberos", "Credential-less AD roasting (stdlib Kerberos): AS-REP roast "
+                     "pre-auth-disabled accounts + validate usernames via the KDC, no "
+                     "creds and no lockouts. Run `recce kerberos -d DOMAIN`."),
         # --- Active Directory cluster (kept contiguous) ---
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
@@ -1079,8 +1095,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("vulns [targets]", "Phase 2: vuln-scan open ports (safe; --aggressive for more)."),
         ("sweep", "ONE command for the whole UNAUTHENTICATED deep pass: runs every "
                   "applicable credential-free module below (web/smb/ftp/ldap/snmp/"
-                  "mongodb/docker/k8s/mssql), skipping services you don't have. Add "
-                  "--vulns for the NSE scan too."),
+                  "mongodb/redis/elasticsearch/rsync/nfs/kerberos/docker/k8s/mssql), "
+                  "skipping services you don't have. Add --vulns for the NSE scan too."),
         ("credsweep -u U -p P -d DOM",
          "ONE command for the whole AUTHENTICATED deep pass (once you have creds): "
          "credenum (netexec/impacket) + authenticated ldap/smb/mssql/ftp. Run the "
@@ -1207,8 +1223,9 @@ def _build_runbook(wb, meta: dict) -> None:
                       "authenticated.")
 
     section("2c. Deep pass - one command instead of running each module by hand",
-            "After enum, rather than typing web/smb/ftp/ldap/snmp/mongodb/docker/k8s/"
-            "mssql one at a time, run the whole pass at once. Each module self-skips "
+            "After enum, rather than typing web/smb/ftp/ldap/snmp/mongodb/redis/"
+            "elasticsearch/rsync/nfs/kerberos/docker/k8s/mssql one at a time, run the "
+            "whole pass at once. Each module self-skips "
             "when there's no matching service; the workbook rebuilds once at the end.")
     cmd("sweep -o eng", "UNAUTHENTICATED pass: every applicable credential-free module. "
                         "Add --vulns to also run the NSE vuln scan; --only-modules / "
@@ -1292,7 +1309,8 @@ def _build_runbook(wb, meta: dict) -> None:
         "Capture terminal-style PROOF screenshots of executed actions (RCE output, "
         "write-proof, data mining) into engagement/screenshots/ for the walkthroughs.")
 
-    section("5d. Additional services - SMB / FTP / Docker / Kubernetes / LDAP / SNMP / MongoDB",
+    section("5d. Additional services - SMB / FTP / Docker / Kubernetes / LDAP / SNMP / "
+            "MongoDB / Redis / Elasticsearch / rsync / NFS",
             "Deep, per-service offensive enumeration. Each probes with recce's own "
             "stdlib code (no creds needed to start), folds findings into the main "
             "totals, and fills its own tab. Run the ones your enum turned up.")
@@ -1326,6 +1344,26 @@ def _build_runbook(wb, meta: dict) -> None:
         "MongoDB: speaks the wire protocol (OP_MSG/BSON), fingerprints with hello + "
         "buildInfo, then proves whether listDatabases answers with NO authentication - "
         "a CONFIRMED no-auth instance is full read/write to every database.")
+    cmd("redis -o eng   [--no-probe]",
+        "Redis: speaks RESP, fingerprints with PING + INFO, then proves whether INFO "
+        "answers with NO authentication - a CONFIRMED no-auth instance is full "
+        "read/write plus a CONFIG+SAVE file-write -> RCE primitive.")
+    cmd("elasticsearch -o eng   [--no-probe]",
+        "Elasticsearch: GETs the HTTP API, fingerprints via /, then proves whether "
+        "/_cat/indices answers with NO authentication - a CONFIRMED no-auth cluster is "
+        "unauthenticated read/write to every document.")
+    cmd("rsync -o eng   [--no-probe]",
+        "rsync daemon: lists the modules over the rsync protocol, then proves which "
+        "answer @RSYNCD: OK with NO authentication - a CONFIRMED open module is "
+        "unauthenticated read (often write) of every file it exposes.")
+    cmd("nfs -o eng   [--no-probe]",
+        "NFS: speaks ONC RPC to the portmapper + mountd (showmount -e), then flags any "
+        "export shared to * / everyone - a CONFIRMED world-mountable export is readable "
+        "by any host (and writable via no_root_squash).")
+    cmd("kerberos -d DOMAIN -o eng   [--dc-ip IP] [--userlist f]",
+        "Credential-less AD roasting: speaks Kerberos (no impacket) to AS-REP roast "
+        "every pre-auth-disabled account (capture a crackable hash with NO credential) "
+        "and validate usernames via the KDC - no logon, no lockouts.")
 
     section("6. Act on the findings - turn CONFIRMED findings into a plan",
             "Once findings are proven (Verification tab), stage the exploitation and "
@@ -2240,6 +2278,247 @@ def _build_mongodb(wb, analysis: dict) -> None:
     sh.set_col(2, 120)
 
 
+def _build_redis(wb, analysis: dict) -> None:
+    """Redis sheet: per-instance auth posture, version, key count, findings, runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import redis as _redis
+    sh = wb.add_sheet("Redis")
+    sh.write([("Redis - offensive enumeration", "title")])
+    sh.write([("recce speaks the Redis wire protocol directly (stdlib RESP): PING + "
+               "INFO to fingerprint, then INFO with no credential to prove whether the "
+               "instance answers without authentication. On an exposed instance it "
+               "reads (never sets) CONFIG dir/dbfilename/requirepass - the file-write "
+               "-> RCE preconditions. Read-only.", "sub")])
+    sh.write([""])
+    sh.write([("How Redis is tested", "title")])
+    for phase, text in _redis.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Instances", "title")])
+    sh.write([(h, "bold") for h in ("IP:Port", "Auth", "Version", "Keys")])
+    for t in tgts:
+        if t.get("unauth"):
+            authcell = ("NO AUTH", "sev_critical")
+        elif t.get("auth_required"):
+            authcell = ("auth required", "sev_medium")
+        else:
+            authcell = "?"
+        sh.write([f"{t['ip']}:{t['port']}", authcell, t.get("version", ""),
+                  "" if not t.get("keys") else str(t.get("keys"))])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_elasticsearch(wb, analysis: dict) -> None:
+    """Elasticsearch sheet: per-cluster auth posture, version, index count, findings."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import elasticsearch as _es
+    sh = wb.add_sheet("Elasticsearch")
+    sh.write([("Elasticsearch - offensive enumeration", "title")])
+    sh.write([("recce GETs the Elasticsearch HTTP API directly (stdlib http.client): / "
+               "to fingerprint the cluster/version, then /_cat/indices with no "
+               "credential to prove whether the cluster is exposed unauthenticated. "
+               "Read-only - only GETs, never indexes/updates/deletes.", "sub")])
+    sh.write([""])
+    sh.write([("How Elasticsearch is tested", "title")])
+    for phase, text in _es.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Clusters", "title")])
+    sh.write([(h, "bold") for h in ("IP:Port", "Auth", "Version", "Indices")])
+    for t in tgts:
+        if t.get("unauth"):
+            authcell = ("NO AUTH", "sev_critical")
+        elif t.get("secured"):
+            authcell = ("security enforced", "sev_medium")
+        else:
+            authcell = "?"
+        sh.write([f"{t['ip']}:{t['port']}", authcell, t.get("version", ""),
+                  "" if not t.get("indices") else str(t.get("indices"))])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_rsync(wb, analysis: dict) -> None:
+    """rsync sheet: per-daemon module list, anonymous-access verdict, findings."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import rsync as _rsync
+    sh = wb.add_sheet("rsync")
+    sh.write([("rsync daemon - offensive enumeration", "title")])
+    sh.write([("recce speaks the rsync daemon protocol directly (stdlib): it lists the "
+               "modules with #list, then for each opens a fresh connection and reads "
+               "the @RSYNCD: OK / AUTHREQD verdict - proving which modules are readable "
+               "with no credential. Read-only - it never transfers a file.", "sub")])
+    sh.write([""])
+    sh.write([("How rsync is tested", "title")])
+    for phase, text in _rsync.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Modules", "title")])
+    sh.write([(h, "bold") for h in ("Host:Port", "Module", "Access", "Comment")])
+    for t in tgts:
+        pr = (analysis.get("probes") or {}).get(f"{t['ip']}:{t['port']}") or {}
+        mods = pr.get("modules") or []
+        if not mods:
+            sh.write([f"{t['ip']}:{t['port']}", "(none listed)", "", ""])
+        for m in mods:
+            acc = m.get("access")
+            cell = ("OPEN (no auth)", "sev_high") if acc == "open" else \
+                (("auth required", "sev_medium") if acc == "auth" else "?")
+            sh.write([f"{t['ip']}:{t['port']}", m.get("name", ""), cell,
+                      m.get("comment", "")])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_nfs(wb, analysis: dict) -> None:
+    """NFS sheet: per-host export list, world-mountable flag, findings."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import nfs as _nfs
+    sh = wb.add_sheet("NFS")
+    sh.write([("NFS / mountd - offensive enumeration", "title")])
+    sh.write([("recce speaks ONC RPC directly (stdlib): the portmapper DUMP on 111 "
+               "lists the RPC services, then MOUNTPROC_EXPORT reads every export and "
+               "its client ACL (the showmount -e equivalent). An export shared to * / "
+               "everyone is mountable by any host. Read-only - it never mounts.", "sub")])
+    sh.write([""])
+    sh.write([("How NFS is tested", "title")])
+    for phase, text in _nfs.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Exports", "title")])
+    sh.write([(h, "bold") for h in ("Host", "Export", "Shared to", "Exposure")])
+    for t in tgts:
+        pr = (analysis.get("probes") or {}).get(t["ip"]) or {}
+        exports = pr.get("exports") or []
+        if not exports:
+            sh.write([t["ip"], "(none listed)", "", ""])
+        for e in exports:
+            groups = e.get("groups") or []
+            world = _nfs._is_world(groups)
+            shared = ", ".join(groups) if groups else "(everyone)"
+            cell = ("WORLD-mountable", "sev_high") if world else ("restricted", "sev_low")
+            sh.write([t["ip"], e.get("dir", ""), shared, cell])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_kerberos(wb, analysis: dict) -> None:
+    """Kerberos sheet: per-user AS-REP roast / validation results + findings."""
+    analysis = analysis or {}
+    results = analysis.get("results") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not results and not fs:
+        return
+    from . import kerberos as _krb
+    sh = wb.add_sheet("Kerberos")
+    sh.write([("Kerberos - credential-less AD roasting", "title")])
+    sh.write([("recce speaks Kerberos directly (stdlib ASN.1 DER, no impacket): for "
+               "each candidate user it sends a pre-auth-less AS-REQ to the DC. An "
+               "AS-REP back means pre-auth is disabled - recce captures a crackable "
+               "$krb5asrep$ hash with NO credential; a PREAUTH_REQUIRED error confirms "
+               "a valid username. It only requests tickets - no logon, no lockouts.",
+               "sub")])
+    sh.write([""])
+    sh.write([("How Kerberos is tested", "title")])
+    for phase, text in _krb.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([(f"DC {analysis.get('dc_ip', '')}  realm {analysis.get('realm', '')}",
+               "bold")])
+    sh.write([(h, "bold") for h in ("Username", "Result", "etype")])
+    _state = {"roastable": ("AS-REP ROASTABLE", "sev_high"),
+              "valid": ("valid (pre-auth)", "sev_low"),
+              "locked": ("valid (locked/expired)", "sev_medium"),
+              "unknown_user": "does not exist", "error": "error", "no_reply": "no reply"}
+    for r in results:
+        cell = _state.get(r["state"], r["state"])
+        sh.write([r["user"], cell, str(r.get("etype", "")) if r.get("etype") else ""])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 24)
+    sh.set_col(2, 120)
+
+
 # --- public entry points --------------------------------------------------------
 
 def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
@@ -2333,7 +2612,9 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     for key, title in (("mssql", "MSSQL"), ("smb", "SMB"), ("ftp", "FTP"),
                        ("docker", "Docker"), ("kubernetes", "Kubernetes"),
                        ("ldap", "LDAP"), ("snmp", "SNMP"),
-                       ("mongodb", "MongoDB")):
+                       ("mongodb", "MongoDB"), ("redis", "Redis"),
+                       ("elasticsearch", "Elasticsearch"), ("rsync", "rsync"),
+                       ("nfs", "NFS"), ("kerberos", "Kerberos")):
         if _mod(key):
             nav.append(title)
     # AD cluster, kept contiguous.
@@ -2404,6 +2685,11 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     _build_ldap(wb, meta.get("ldap") or {})
     _build_snmp(wb, meta.get("snmp") or {})
     _build_mongodb(wb, meta.get("mongodb") or {})
+    _build_redis(wb, meta.get("redis") or {})
+    _build_elasticsearch(wb, meta.get("elasticsearch") or {})
+    _build_rsync(wb, meta.get("rsync") or {})
+    _build_nfs(wb, meta.get("nfs") or {})
+    _build_kerberos(wb, meta.get("kerberos") or {})
     # AD cluster, kept contiguous: inventory -> quick wins -> import findings/paths
     # -> users & accounts.
     _build_active_directory(wb, hosts, domains)
