@@ -9,19 +9,77 @@
 
 ---
 
+## 0 · Before you begin (read this first)
+
+**What recce does, in plain terms:** you give it the addresses of computers you
+are *allowed* to test; it looks at each one, notes what it is running and where it
+might be weak, and writes everything into a single spreadsheet you tick off as you
+go. You don't have to remember commands — after each step, `recce status` tells you
+the exact next one to run.
+
+**What you need:**
+
+- **A computer running Kali Linux** (a free operating system built for security
+  testing). recce is normally run from Kali. If you don't have it, ask whoever set
+  up your engagement — this is not something you install on an everyday laptop.
+- **The list of addresses you're allowed to test** ("your scope"). One computer
+  looks like `10.0.10.5`; a whole block looks like `10.0.10.0/24`. Your team gives
+  you these — you do **not** guess them.
+- **Written permission** to test those addresses. Only ever point recce at systems
+  you are authorized to assess. If you're unsure, stop and ask.
+
+**How to run a command:** open the **Terminal** app, type (or copy-paste) the
+command, and press **Enter**. A few conventions used below:
+
+- A line starting with **`#`** is a note for you, *not* a command — don't type it.
+- **`sudo`** means "run with administrator rights." It may ask for your password;
+  the letters won't appear as you type — that's normal, just type it and press Enter.
+- Replace anything in **`< >`** (like `<targets>`) with your own value; leave the
+  rest exactly as written.
+- **`./bin/recce`** and **`python3 -m recce`** are the same thing — use whichever runs.
+
+If a step doesn't work, see **§7 Troubleshooting** or ask your team. Re-running any
+recce command is always safe — it never double-counts or loses your ticks.
+
+**Words you'll see:**
+
+| Word | Plain meaning |
+|---|---|
+| **target** | a computer you're testing, named by its address (e.g. `10.0.10.5`) |
+| **subnet** | a block of addresses written `10.0.10.0/24` (here, `.1` through `.254`) |
+| **port / service** | a "door" on a computer and the program answering behind it — a website, file-sharing, a database, etc. |
+| **enumerate** | list what a computer is running (recce's first pass) |
+| **vulnerability** ("vuln") | a known weakness a service may have |
+| **credentials** ("creds") | a username + password (or a password hash) that logs in |
+| **foothold / access** | you got in — a valid login or admin rights on a host |
+| **the workbook** | `enumeration.xlsx`, the spreadsheet recce fills in and you track your work in |
+| **`-o eng`** | the folder recce keeps everything in — **keep it the same every command** |
+| **`sudo`** | run with administrator rights (so the scan can see more) |
+| **`-Pn`** | "assume the host is up" — add it when a host shows zero open ports |
+
+---
+
 ## 1 · Get it running
 
-Nothing to install — Python 3.9+ and the tools already on Kali. Only **`nmap`** is
-required; everything else is optional and degrades cleanly.
+Nothing to install — Kali already has Python and the tools recce uses. Only
+**`nmap`** is truly required; everything else is optional and skipped cleanly if
+it's missing.
+
+First, move into the recce folder and run the self-check:
 
 ```bash
 cd recce
-./bin/recce doctor          # run this first: confirms nmap + shows optional tools
+./bin/recce doctor          # run this first: confirms the tool can run here
 ```
+
+**You'll see:** a checklist of tools (green **OK** for what's present, `-` for
+optional ones that aren't), then a short self-scan, ending in **`READY.`** If it
+says `READY`, you're good to go. If `nmap` shows as missing, install it first
+(ask your team how, or `sudo apt install nmap` on Kali).
 
 > [!TIP]
 > `./bin/recce` is just a shortcut for `python3 -m recce` — use whichever works.
-> Run scans with **`sudo`** so nmap can do SYN/OS detection.
+> Run scans with **`sudo`** so the scan can see the most (SYN/OS detection).
 
 > [!NOTE]
 > **Getting it onto Kali** (Windows host → Kali guest): best is `git clone` *inside
@@ -73,46 +131,62 @@ cd recce
 
 ## 3 · Step by step
 
-### ① Enumerate
+> The four commands below are the whole loop. Replace `10.0.10.0/24 10.0.20.0/24`
+> with **your** scope, and keep **`-o eng`** identical every time.
+
+### ① Enumerate — find the computers and what they run
 ```bash
 sudo ./bin/recce enum 10.0.10.0/24 10.0.20.0/24 -o eng --title "Client X"
 ```
-> [!WARNING]
-> **Hosts showing zero ports?** They block ping (firewalled / Windows / AD). Add
-> **`-Pn`** to scan every target as up: `sudo ./bin/recce enum 10.0.10.0/24 -Pn -o eng`.
-> recce also auto-falls-back to `-Pn` when discovery gets zero responses.
->
-> Still zero ports under `-Pn` but a manual `nmap` finds them (and prints
-> *"increasing send delay … dropped probes"*)? The network is **rate-limiting**.
-> recce auto-detects that and re-scans adaptively; add **`--reliable`** to force it
-> from the start.
+**You'll see:** a live count of hosts found and, at the end, `Reports written` with
+the path to `eng/enumeration.xlsx`. This is the longest step — a `/24` block can take
+a few minutes.
 
-Already have an nmap scan? Skip enum and **import** it (XML best; `.gnmap`, a dir, or a glob):
+> [!WARNING]
+> **Hosts showing zero ports?** They're likely hiding from the "are you there?" ping
+> (common on Windows / firewalled / AD hosts). Re-run with **`-Pn`** ("assume they're
+> up"): `sudo ./bin/recce enum 10.0.10.0/24 -Pn -o eng`. recce also tries this
+> automatically when it gets no answers.
+>
+> Still zero ports under `-Pn`? The network may be **rate-limiting** (slowing scans
+> on purpose). Add **`--reliable`** and it scans more patiently.
+
+Already have an nmap scan from someone else? Skip enum and **import** it instead:
 ```bash
 ./bin/recce import scan.xml -o eng
 ```
 
-### ② Open the workbook
-`eng/enumeration.xlsx` → read the **Start Here** tab, then work out of **Checklist**.
+### ② Open the workbook and look around
+Open **`eng/enumeration.xlsx`** in Excel or LibreOffice. Read the **Start Here** tab
+(it explains every other tab), then do your tracking on the **Checklist** tab — one
+row per computer, a checkbox per step.
 
-### ③ Vuln-scan (safe by default)
+### ③ Vuln-scan — check the open services for known weaknesses
 ```bash
 sudo ./bin/recce vulns -o eng
 ```
-Runs NSE vuln+weak-config, the offline version→CVE/CWE engine, stdlib HTTP-header +
-TLS probes, and searchsploit mapping.
+**You'll see:** per-host progress, then a summary of findings by severity. This is
+**safe by default** (it looks, it doesn't attack). Findings appear on the
+**Vulnerabilities** tab.
 
 > [!TIP]
-> Filters: `--only http smb` · `--unscanned` · `--aggressive` · `--fast` (top-signal
-> only, shows a live **% + ETA** on a big /24) · `--no-probes` · `--no-searchsploit`.
+> Handy add-ons: `--fast` (quicker, shows a live **% + ETA**) · `--only http smb`
+> (just those services) · `--unscanned` (only what's left).
 
-### ④ Deep per-service enumeration
+### ④ Deep pass — dig into each service, in one command
 ```bash
-./bin/recce services -o eng                        # the exact command per open port
-./scripts/recce-service.sh from-nmap eng/raw/*.xml # or sweep the whole scan; smb 10.0.10.5
+./bin/recce sweep -o eng
 ```
-Runs the **right** tool per service (SMB shares, HTTP paths/TLS, SNMP walk, anon
-FTP/LDAP, unauth Redis…). Safe by default; **`-a`** adds brute/nikto/dir-busting.
+**You'll see:** each service type checked in turn (web, SMB/file-shares, databases,
+etc.), skipping any you don't have. One command replaces running nine by hand.
+**Have credentials** (a username + password you're allowed to use)? Run the
+authenticated version too:
+```bash
+./bin/recce credsweep -u alice -p 'Passw0rd!' -d corp.local -o eng
+```
+> Want to focus a single service instead of the whole sweep? Each has its own
+> command — `./bin/recce web -o eng`, `smb`, `ftp`, `ldap`, `snmp`, `mongodb`,
+> `docker`, `k8s`, `mssql` (see the **Runbook** tab in the workbook).
 
 ### ⑤ Post-exploitation
 ```bash
@@ -173,9 +247,11 @@ work on **just that subset** of what's already enumerated — e.g.
 
 - **Start Here** explains every tab; **Runbook** is a "what to type" for each phase.
 - **Checklist** — one row per IP, grouped by subnet, with two kinds of box:
-  - 🟩 **Auto** (Enumerated / Vuln-scan / Web / DB) turn green when the tool finishes.
-  - ✍️ **Manual sign-offs** (AD / Access / Priv-esc / Creds / Lateral) you tick as
-    you work the kill-chain. Tick **Reviewed** when you're done with a host.
+  - 🟩 **Auto** (Enumerated / Vuln-scan / Web / DB / **Access** / Priv-esc) turn green
+    when recce finishes them — *Access* ticks itself once a credentialed step confirms
+    you're in (or record one yourself with `./bin/recce access --host IP --note '...'`).
+  - ✍️ **Manual sign-offs** (AD / Creds / Lateral) you tick yourself as you work.
+    Tick **Reviewed** when you're done with a host.
 - **`—` means the step doesn't apply** (no Web box off a non-web host), so a checked
   box always means real work.
 - **Services** — one row per open port with its own **☐ / ◐ / ☑** status + notes.

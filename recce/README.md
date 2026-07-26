@@ -226,16 +226,20 @@ The step columns are **two kinds**, and each **only appears where it applies**
   - **Enumerated** — universal. **Vuln-scan** — any host with an open port.
   - **Web** — hosts serving HTTP/HTTPS; green once the web ports are scanned.
   - **DB** — hosts running a database; green once `db` runs.
+  - **Access** — green once a credentialed step confirms a foothold on the host
+    (valid creds / local admin via `credenum`/`credsweep`, an SSH session, or a
+    working MSSQL login). You can also record a foothold you got another way with
+    `recce access --host IP --note '...'`, and untick to override.
+  - **Priv-esc** — appears once the `privesc` phase has run against the host.
 - **Manual sign-offs** — operator work the tool can't detect; start unchecked,
   you tick them as you go:
   - **AD** — only on **domain controllers / directory hosts** (LDAP / Kerberos /
     GC, or a discovered DC role). A plain SMB file server is *not* an AD host —
     its SMB surface is tracked per-port on the **Services** tab. Tick AD once
     you've reviewed users/shares/roasting/delegation/ADCS.
-  - **Access** (initial access / shell / valid creds on this host) → **Priv-esc**
-    (appears once the `privesc` phase runs) → **Creds** (harvested secrets) →
-    **Lateral** (tried credential reuse / pivot from here). These are the
-    kill-chain coverage markers — they answer "did we actually try?" per host.
+  - **Creds** (harvested secrets) → **Lateral** (tried credential reuse / pivot
+    from here). These are the kill-chain coverage markers — they answer "did we
+    actually try?" per host.
 - The long tail of services — **SMB, remote access (SSH/RDP/WinRM/VNC), mail,
   SNMP, DNS, …** — deliberately has **no column here**; each such port is tracked
   with its own tri-state status on the **Services** tab, so the checklist stays
