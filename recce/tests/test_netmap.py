@@ -211,6 +211,20 @@ class AdArchitectureSvgTest(unittest.TestCase):
         self.assertIn("No BloodHound", s)
         self.assertTrue(s.startswith("<svg"))
 
+    def test_ad_svg_access_and_risk_overlay(self):
+        import xml.dom.minidom as md
+        arch = self._arch()
+        # We hold ADMINISTRATOR-equivalent principal BOB; a DCSync edge targets the
+        # domain (critical) — both overlays should appear, grounded in the data.
+        s = netmap.ad_svg(arch, owned_labels={"BOB"})
+        md.parseString(s)
+        self.assertIn("✓", s)                          # held principal marked
+        self.assertIn("already held", s)               # access legend key
+        self.assertIn("directly seizable", s)          # risk legend key
+        self.assertIn("#C00000", s)                    # critical (DCSync target) dot
+        # No owned set → no access legend key (stays honest).
+        self.assertNotIn("already held", netmap.ad_svg(arch))
+
     def test_ad_svg_truncation_note(self):
         arch = self._arch()
         arch["truncated"] = True

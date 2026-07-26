@@ -432,12 +432,29 @@ def _network_map(hosts, domains, ad_data=None):
         '</section>')
 
 
-def _ad_architecture(ad_arch):
+def _owned_labels(hosts, credentials):
+    """Tier-0 labels recce already holds: usernames from captured credentials, plus
+    the short names of Domain Controllers we gained access to. Drives the AD
+    diagram's ✓ overlay — grounded, never inferred."""
+    owned = set()
+    for c in credentials or []:
+        u = getattr(c, "username", "") or ""
+        if u:
+            owned.add(u.upper())
+    for h in hosts or []:
+        if getattr(h, "access_gained", False) and h.hostname:
+            owned.add(h.hostname.split(".")[0].upper())
+    return owned
+
+
+def _ad_architecture(ad_arch, hosts=None, credentials=None):
     """The tier-0 Active Directory architecture recce derived from a BloodHound /
-    SharpHound collection, rendered as a directly-viewable inline SVG."""
+    SharpHound collection, rendered as a directly-viewable inline SVG. Enriched with
+    an access (✓) and risk overlay, like the network map."""
     arch = (ad_arch or {}).get("architecture") if isinstance(ad_arch, dict) else None
     if not arch or not arch.get("nodes"):
         return ""
+    owned = _owned_labels(hosts, credentials)
     n = len(arch.get("nodes") or {})
     return (
         '<section><h2>AD architecture <span class="tag">from BloodHound</span></h2>'
@@ -447,8 +464,10 @@ def _ad_architecture(ad_arch):
         'privileged principals that are members of those groups — with the '
         'membership, control (ACL / DCSync) and domain-trust edges between them. It '
         'is a curated view, not the whole BloodHound graph: only tier-0 objects and '
-        'the edges that reach them are drawn, so the picture stays legible.</p>'
-        f'<div class="netmap">{nm.ad_svg(arch)}</div>'
+        'the edges that reach them are drawn, so the picture stays legible. Objects '
+        'recce already holds are marked ✓; a red dot flags a node an attacker can '
+        'seize directly (DCSync = critical, control ACL = high).</p>'
+        f'<div class="netmap">{nm.ad_svg(arch, owned)}</div>'
         '<p class="basis">This diagram renders here directly (and prints to PDF). '
         f'Derived from {escape(str(n))} tier-0 object(s) in the collection. Full '
         'privilege-escalation routes are in the attack-path and AD findings '
@@ -750,7 +769,7 @@ def build_assets_html(hosts: list[Host], out_path: str, *, title: str = "",
         + nav + '</div></header>',
         '<div class="wrap">',
         _network_map(hosts, domains, ad_bloodhound),
-        _ad_architecture(ad_bloodhound),
+        _ad_architecture(ad_bloodhound, hosts, credentials),
         _key_info(hosts, domains),
         _accounts_section(hosts),
         _credentials_section(creds),

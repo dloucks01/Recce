@@ -5,6 +5,11 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Access + risk overlay on the AD architecture diagram.** Tier-0 objects recce
+  **already holds** (usernames from captured credentials, or an accessed DC) get a
+  bold border + ✓; nodes an attacker can **seize directly** get a risk dot (DCSync =
+  critical, control ACL = high) — the same grounded overlay language as the network
+  map. Legend keys appear only when they apply.
 - **Network map enriched from SharpHound + other findings.** The logical map now
   overlays what the engagement actually established: hosts recce **gained access to**
   get a green outline + ✓ badge (and an "N owned" tally per segment), each host card
