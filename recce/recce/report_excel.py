@@ -397,7 +397,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         out = v.output
         rows.append({"key": tr.vuln_row_key(v), "group": h.ip,
                      "data": {
-            "Severity": v.severity.upper(), "IP": h.ip,
+            "Severity": (v.severity or "info").upper(), "IP": h.ip,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
             "Source": v.source, "Conf.": v.confidence, "CVE / refs": ", ".join(v.ids),
             "CWE": ", ".join(v.cwes), "Exploit": _exploit_cell(h, v),

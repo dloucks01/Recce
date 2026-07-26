@@ -26,6 +26,16 @@ _CVSS_RE = re.compile(
 _VULNERS_RE = re.compile(r"CVE-\d{4}-\d{4,7}\s+([0-9]{1,2}\.[0-9])\b", re.IGNORECASE)
 
 
+def _to_int(value, default: int = 0) -> int:
+    """Tolerant int() for XML attributes: a well-formed nmap XML can still carry an
+    empty/odd numeric attribute (portid="", accuracy=""), and parse_nmap_xml promises
+    to never raise - it returns [] on bad input, not a ValueError up the call stack."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _severity_from_cvss(score: float) -> str:
     if score >= 9.0:
         return "critical"
@@ -282,16 +292,16 @@ def parse_nmap_xml(path: str) -> list[Host]:
         if os_node is not None:
             matches = os_node.findall("osmatch")
             if matches:
-                best = max(matches, key=lambda m: int(m.get("accuracy", "0")))
+                best = max(matches, key=lambda m: _to_int(m.get("accuracy", "0")))
                 host.os_name = best.get("name", "")
-                host.os_accuracy = int(best.get("accuracy", "0"))
+                host.os_accuracy = _to_int(best.get("accuracy", "0"))
                 oclass = best.find("osclass")
                 if oclass is not None:
                     host.os_family = oclass.get("osfamily", "")
 
         dist = hnode.find("distance")
         if dist is not None:
-            host.distance = int(dist.get("value", "0"))
+            host.distance = _to_int(dist.get("value", "0"))
 
         # Ports.
         ports_node = hnode.find("ports")
@@ -302,7 +312,7 @@ def parse_nmap_xml(path: str) -> list[Host]:
                 if pstate in ("closed", "filtered"):
                     continue  # keep only open / open|filtered
                 port = Port(
-                    portid=int(pnode.get("portid", "0")),
+                    portid=_to_int(pnode.get("portid", "0")),
                     protocol=pnode.get("protocol", "tcp"),
                     state=pstate or "open",
                     reason=st.get("reason", "") if st is not None else "",

@@ -40,9 +40,16 @@ _EXPIRY_WARN_DAYS = 30
 # --- port classification --------------------------------------------------------
 
 def _is_tls(port: Port) -> bool:
-    blob = f"{port.service} {port.tunnel} {port.product}".lower()
-    if port.tunnel == "ssl" or any(h in blob for h in _TLS_HINTS):
+    # Only the nmap service + tunnel decide TLS - NOT the product name. Substring-
+    # matching the product wrongly flagged "SimpleHTTPServer" (contains "https"),
+    # "*ssl*" builds, etc. as TLS, so a plain-HTTP 8080 got scanned as HTTPS and every
+    # web finding was missed. An explicit plain 'http' service is authoritative: not TLS.
+    svc = (port.service or "").lower()
+    tunnel = (port.tunnel or "").lower()
+    if tunnel == "ssl" or "ssl" in svc or "tls" in svc or "https" in svc:
         return True
+    if svc in ("http", "http-proxy", "http-alt", "www"):
+        return False                       # nmap says plaintext HTTP - trust it
     return port.portid in _COMMON_TLS_PORTS
 
 

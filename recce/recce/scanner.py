@@ -491,12 +491,18 @@ def masscan_sweep(ips: list[str], out_xml: str, profile: ScanProfile) -> dict[st
     nports = 65536 if profile.all_ports else (profile.top_ports + 1)
     est = nports * max(1, len(ips)) / max(rate, 1)
     kill = int(min(3600, max(600, est * 2 + 120)))
-    _run(["masscan", "-iL", list_file, "-p", port_range,
-          "--rate", str(rate), "-oX", out_xml], timeout=kill)
+    outcome = _run(["masscan", "-iL", list_file, "-p", port_range,
+                    "--rate", str(rate), "-oX", out_xml], timeout=kill)
     try:
         os.unlink(list_file)
     except OSError:
         pass
+    # A timed-out / errored sweep leaves a PARTIAL XML - hosts it never reached would
+    # silently vanish. Warn loudly so the operator re-runs (per-host nmap, or -Pn).
+    if outcome.timed_out or (outcome.returncode not in (0, None) and not outcome.missing):
+        print("[!] masscan sweep did not finish cleanly (timeout/error) - results may be "
+              "PARTIAL; hosts it didn't reach are missing. Re-run without --fast, or with "
+              "-Pn, to be sure.")
     return parse_masscan_sweep_xml(out_xml)
 
 

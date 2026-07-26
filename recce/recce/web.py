@@ -278,18 +278,19 @@ def _scan_backups(ip: str, port: Port, base_url: str, auth) -> list[Vuln]:
 # --- opt-in default-credential probe (bounded, lockout-aware) -------------------
 _BASIC_DEFAULTS = [("admin", "admin"), ("admin", "password"), ("tomcat", "tomcat"),
                    ("root", "root"), ("guest", "guest"), ("admin", "")]
+_MAX_BASIC_TRIES = 5    # hard cap per endpoint - stays under common lockout thresholds
 
 
 def _basic_auth_defaults(ip: str, port: Port, base_url: str, paths: list[str]) -> list[Vuln]:
     """Try a TINY documented default list against endpoints that ask for HTTP Basic
-    auth. Capped at 5 attempts per endpoint - stays well under lockout thresholds."""
+    auth. Capped at _MAX_BASIC_TRIES attempts per endpoint - well under lockout thresholds."""
     import base64
     out: list[Vuln] = []
     for path in paths:
         r = _fetch(ip, port, path)
         if not r or r[0] != 401 or "basic" not in r[1].get("www-authenticate", "").lower():
             continue
-        for user, pw in _BASIC_DEFAULTS:
+        for user, pw in _BASIC_DEFAULTS[:_MAX_BASIC_TRIES]:
             token = base64.b64encode(f"{user}:{pw}".encode()).decode()
             a = _fetch(ip, port, path, auth={"Authorization": f"Basic {token}"})
             if a and a[0] in (200, 301, 302):

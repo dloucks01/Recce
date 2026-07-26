@@ -11,6 +11,7 @@ Subcommands (see `recce -h` for the full, authoritative list):
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -659,7 +660,10 @@ def _discover(args, profile, store, paths):
     except (ValueError, OSError) as e:
         print(f"[x] Invalid --exclude: {e}")
         return None, [], None, None, {}
-    stored_excl = set(json.loads(store.get_meta("excludes") or "[]"))
+    try:
+        stored_excl = set(json.loads(store.get_meta("excludes") or "[]"))
+    except (ValueError, TypeError):
+        stored_excl = set()
     excluded = run_excl | stored_excl
     if excluded != stored_excl:
         store.set_meta("excludes", json.dumps(sorted(excluded)))
@@ -688,8 +692,15 @@ def _discover(args, profile, store, paths):
         sweep_xml = os.path.join(paths["raw"], "masscan_sweep.xml")
         port_map = scanner.masscan_sweep(hosts, sweep_xml, profile)
         if port_map:
-            live_ips = sorted(port_map, key=_ip_key)
-            print(f"[+] masscan found {len(live_ips)} host(s) with open ports.")
+            if getattr(args, "targets_up", False):
+                # Authoritative list: enumerate EVERY provided host, not just the ones
+                # masscan found open, so a silent host is still seeded (never "no hosts").
+                live_ips = sorted(hosts, key=_ip_key)
+                print(f"[+] masscan found {len(port_map)} host(s) with open ports; "
+                      f"enumerating all {len(live_ips)} authoritative target(s).")
+            else:
+                live_ips = sorted(port_map, key=_ip_key)
+                print(f"[+] masscan found {len(live_ips)} host(s) with open ports.")
         else:
             print("[!] masscan unavailable/empty; falling back to nmap.")
             port_map, fast_mode = None, False
@@ -1230,7 +1241,10 @@ def _phase_credenum(store, paths, args) -> None:
 
 def _setup_scan(args, need_targets=True):
     """Shared setup: profile, env check, store. Returns (profile, paths, store)."""
-    profile = scanner.PROFILES[args.profile]
+    # deepcopy: PROFILES holds shared module-level singletons; overriding a live one
+    # would leak flags (--all-ports, --min-rate, a downgraded scanner) into later runs
+    # in the same process (tests, library reuse).
+    profile = copy.deepcopy(scanner.PROFILES[args.profile])
     _apply_profile_overrides(profile, args)
     try:
         for w in scanner.check_environment(profile):

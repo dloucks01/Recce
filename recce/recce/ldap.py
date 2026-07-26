@@ -565,7 +565,12 @@ class _SealedStream:
             frame = _recvn(self._sock, struct.unpack(">I", hdr)[0])
             if not frame:
                 break
-            self._buf += self._ctx.unwrap(frame)
+            try:
+                self._buf += self._ctx.unwrap(frame)
+            except (struct.error, ValueError):
+                # A truncated/tampered sealed frame (short token or a signature
+                # mismatch) must degrade to a clean short read, not crash the module.
+                break
         out, self._buf = self._buf[:n], self._buf[n:]
         return out
 
@@ -640,7 +645,9 @@ def enum_authenticated(ip: str, port: int, base: str, creds: dict,
         return {"users": users, "computers": computers,
                 "domain": dom[0] if dom else {}, "bind_dn": _bind_dn(creds),
                 "bind_method": method, "error": None}
-    except OSError as e:
+    except (OSError, struct.error, ValueError) as e:
+        # struct.error/ValueError can surface from a truncated/tampered sealed frame
+        # on the pass-the-hash path - degrade to "bind failed", never crash the module.
         return {"error": f"enumeration error: {e}"}
     finally:
         try:

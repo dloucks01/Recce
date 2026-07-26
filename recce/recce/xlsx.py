@@ -510,10 +510,12 @@ def read_sheets(path: str) -> dict[str, list[list[str]]]:
             for row in data.findall(f"{_NS}row"):
                 cells: list[str] = []
                 max_c = 0
+                next_ci = 0                     # running column for cells lacking an r= ref
                 staged: dict[int, str] = {}
                 for c in row.findall(f"{_NS}c"):
                     ref = c.get("r", "")
-                    ci = _col_index(ref) if ref else (len(cells) + 1)
+                    ci = _col_index(ref) if ref else (next_ci + 1)
+                    next_ci = ci
                     ctype = c.get("t", "")
                     val = ""
                     if ctype == "inlineStr":
