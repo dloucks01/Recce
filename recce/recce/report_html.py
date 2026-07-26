@@ -7,6 +7,7 @@ table. Built from the same data as the workbook; stdlib-only.
 """
 from __future__ import annotations
 
+import math
 from html import escape
 
 from .models import Host
@@ -59,6 +60,20 @@ tr:nth-child(even) td{background:#fafcfb}
 .bar .track{flex:1;background:#eef1f1;border-radius:6px;height:16px;overflow:hidden}
 .bar .fill{height:100%;border-radius:6px}
 .bar .v{width:34px;text-align:right;font-weight:600;font-size:13px}
+.dash{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+@media(max-width:720px){.dash{grid-template-columns:1fr}}
+.panel{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.panel h3{margin:0 0 12px;color:var(--tl2)}
+.donutwrap{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.leg{list-style:none;margin:0;padding:0;font-size:13px;flex:1;min-width:150px}
+.leg li{display:flex;align-items:center;gap:8px;margin:6px 0}
+.leg .sw{width:12px;height:12px;border-radius:3px;flex:0 0 auto}
+.leg .c{margin-left:auto;font-weight:700;font-variant-numeric:tabular-nums}
+.hbar{display:flex;align-items:center;gap:10px;margin:7px 0;font-size:13px}
+.hbar .lab{width:132px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hbar .track{flex:1;background:#eef1f1;border-radius:6px;height:14px;overflow:hidden}
+.hbar .fill{height:100%;border-radius:6px;min-width:2px}
+.hbar .v{width:28px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
 .stage{margin:14px 0}
 .stage .sh{font-weight:700;color:var(--tl2);margin-bottom:4px}
 .step{border-left:3px solid var(--line);padding:4px 0 4px 12px;margin:6px 0}
@@ -74,7 +89,7 @@ tr:nth-child(even) td{background:#fafcfb}
   font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.4;margin:8px 0 0;max-height:230px}
 .tag{font-size:11px;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:0 5px;margin-left:6px}
 footer{color:var(--mut);font-size:12px;margin-top:40px;text-align:center}
-@media print{body{background:#fff}header{background:var(--tl2)!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}.tile,table,.bars,.narr{break-inside:avoid}}
+@media print{body{background:#fff}header{background:var(--tl2)!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}.tile,table,.bars,.narr,.panel,.dash{break-inside:avoid}}
 """
 
 
@@ -114,19 +129,97 @@ def _exec_summary(hosts, domains, creds):
     return "".join(out)
 
 
-def _severity_rollup(hosts):
+def _donut(counts):
+    """An inline-SVG donut of the severity mix (no xmlns / external refs, so the
+    page stays fully self-contained). Center shows the total finding count."""
+    total = sum(counts.values())
+    r, cx, cy, w = 52, 70, 70, 20
+    circ = 2 * math.pi * r
+    if total == 0:
+        segs = (f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" '
+                f'stroke="#e3e8e7" stroke-width="{w}"/>')
+    else:
+        segs, offset = "", 0.0
+        for s in _SEV_ORDER:
+            v = counts[s]
+            if not v:
+                continue
+            seg = v / total * circ
+            segs += (f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" '
+                     f'stroke="{_SEV[s]}" stroke-width="{w}" '
+                     f'stroke-dasharray="{seg:.2f} {circ - seg:.2f}" '
+                     f'stroke-dashoffset="{-offset:.2f}" '
+                     f'transform="rotate(-90 {cx} {cy})"/>')
+            offset += seg
+    center = (f'<text x="{cx}" y="{cy - 1}" text-anchor="middle" font-size="26" '
+              f'font-weight="700" fill="#1a2422">{total}</text>'
+              f'<text x="{cx}" y="{cy + 16}" text-anchor="middle" font-size="11" '
+              f'fill="#5f6f6e">findings</text>')
+    return (f'<svg viewBox="0 0 140 140" width="132" height="132" role="img" '
+            f'aria-label="Findings by severity">{segs}{center}</svg>')
+
+
+def _hbars(rows, mx, color_fn):
+    """rows = [(label, value)]; render as labelled horizontal bars."""
+    mx = max(1, mx)
+    out = []
+    for label, v in rows:
+        pct = v * 100 // mx
+        out.append(
+            f'<div class="hbar"><div class="lab" title="{escape(label)}">'
+            f'{escape(label)}</div><div class="track"><div class="fill" '
+            f'style="width:{pct}%;background:{color_fn(label, v)}"></div></div>'
+            f'<div class="v">{v}</div></div>')
+    return "".join(out)
+
+
+def _dashboard(hosts):
+    """Visual 'at a glance' for a non-technical reader: the severity mix as a donut,
+    how many machines carry each level of risk, and the most-affected systems."""
     findings = group_findings(hosts)
     counts = {s: sum(1 for f in findings if f.severity == s) for s in _SEV_ORDER}
-    total = max(1, len(findings))
-    rows = []
-    for s in _SEV_ORDER:
-        pct = counts[s] * 100 // total
-        rows.append(
-            f'<div class="bar"><div class="lab">{s.title()}</div>'
-            f'<div class="track"><div class="fill" style="width:{pct}%;'
-            f'background:{_SEV[s]}"></div></div><div class="v">{counts[s]}</div></div>')
-    return ('<section><h2>Findings by severity</h2>'
-            f'<div class="bars">{"".join(rows)}</div></section>')
+    legend = "".join(
+        f'<li><span class="sw" style="background:{_SEV[s]}"></span>{s.title()}'
+        f'<span class="c">{counts[s]}</span></li>'
+        for s in _SEV_ORDER if counts[s] or s in ("critical", "high", "medium"))
+    panel_sev = (
+        '<div class="panel"><h3>Findings by severity</h3>'
+        f'<div class="donutwrap">{_donut(counts)}<ul class="leg">{legend}</ul></div></div>')
+
+    # How many *machines* fall into each worst-severity bucket (info counts as clean).
+    up = [h for h in hosts if h.is_up]
+    order = ["critical", "high", "medium", "low"]
+    buckets = {k: 0 for k in order + ["clean"]}
+    for h in up:
+        sevs = {v.severity for v in h.vulns}
+        buckets[next((s for s in order if s in sevs), "clean")] += 1
+    risk_rows = [("Critical", buckets["critical"]), ("High", buckets["high"]),
+                 ("Medium", buckets["medium"]), ("Low", buckets["low"]),
+                 ("No findings", buckets["clean"])]
+    risk_color = {"Critical": _SEV["critical"], "High": _SEV["high"],
+                  "Medium": _SEV["medium"], "Low": _SEV["low"],
+                  "No findings": "#8a9997"}
+    panel_risk = (
+        f'<div class="panel"><h3>Machines by risk ({len(up)} live)</h3>'
+        + _hbars(risk_rows, max(buckets.values()), lambda l, v: risk_color[l])
+        + '</div>')
+
+    out = [f'<section><h2>At a glance</h2><div class="dash">{panel_sev}{panel_risk}</div>']
+
+    # Most-affected systems: hosts ranked by their high + critical finding count.
+    scored = sorted(
+        ((h, sum(1 for v in h.vulns if v.severity in ("critical", "high")))
+         for h in hosts),
+        key=lambda t: (-t[1], t[0].ip))
+    scored = [(h, n) for h, n in scored if n > 0][:8]
+    if scored:
+        rows = [(h.ip + (f" {h.hostname}" if h.hostname else ""), n) for h, n in scored]
+        out.append(
+            '<div class="panel" style="margin-top:16px"><h3>Most-affected systems '
+            '(high &amp; critical findings)</h3>'
+            + _hbars(rows, scored[0][1], lambda l, v: _SEV["high"]) + '</div>')
+    out.append('</section>')
+    return "".join(out)
 
 
 def _findings_table(hosts):
@@ -254,7 +347,7 @@ def build_html(hosts: list[Host], out_path: str, *, title: str = "",
         + (f' · {escape(generated)}' if generated else "") + '</div></div></header>',
         '<div class="wrap">',
         _exec_summary(hosts, domains, creds),
-        _severity_rollup(hosts),
+        _dashboard(hosts),
         _findings_table(hosts),
         _attack_path(hosts),
         _findings_detail(hosts),
