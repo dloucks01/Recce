@@ -1039,6 +1039,20 @@ def _build_guide(wb, meta: dict) -> None:
                     "buildInfo fingerprint, then listDatabases to prove whether the "
                     "instance answers privileged commands with no authentication. "
                     "Run `recce mongodb`."),
+        ("Redis", "Redis wire protocol (stdlib RESP client): PING + INFO, then "
+                  "INFO-without-auth to prove an unauthenticated instance (read/write "
+                  "+ CONFIG/SAVE file-write -> RCE). Run `recce redis`."),
+        ("Elasticsearch", "Elasticsearch HTTP API (stdlib client): / fingerprint, "
+                          "then /_cat/indices-without-auth to prove an exposed cluster "
+                          "(all documents readable). Run `recce elasticsearch`."),
+        ("rsync", "rsync daemon protocol (stdlib): #list the modules, then prove which "
+                  "answer @RSYNCD: OK with no credential (unauthenticated file read). "
+                  "Run `recce rsync`."),
+        ("NFS", "ONC RPC (stdlib): portmapper DUMP + mountd EXPORT (showmount -e); an "
+                "export shared to * / everyone is world-mountable. Run `recce nfs`."),
+        ("Kerberos", "Credential-less AD roasting (stdlib Kerberos): AS-REP roast "
+                     "pre-auth-disabled accounts + validate usernames via the KDC, no "
+                     "creds and no lockouts. Run `recce kerberos -d DOMAIN`."),
         # --- Active Directory cluster (kept contiguous) ---
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
@@ -1081,8 +1095,8 @@ def _build_guide(wb, meta: dict) -> None:
         ("vulns [targets]", "Phase 2: vuln-scan open ports (safe; --aggressive for more)."),
         ("sweep", "ONE command for the whole UNAUTHENTICATED deep pass: runs every "
                   "applicable credential-free module below (web/smb/ftp/ldap/snmp/"
-                  "mongodb/docker/k8s/mssql), skipping services you don't have. Add "
-                  "--vulns for the NSE scan too."),
+                  "mongodb/redis/elasticsearch/rsync/nfs/kerberos/docker/k8s/mssql), "
+                  "skipping services you don't have. Add --vulns for the NSE scan too."),
         ("credsweep -u U -p P -d DOM",
          "ONE command for the whole AUTHENTICATED deep pass (once you have creds): "
          "credenum (netexec/impacket) + authenticated ldap/smb/mssql/ftp. Run the "
@@ -1209,8 +1223,9 @@ def _build_runbook(wb, meta: dict) -> None:
                       "authenticated.")
 
     section("2c. Deep pass - one command instead of running each module by hand",
-            "After enum, rather than typing web/smb/ftp/ldap/snmp/mongodb/docker/k8s/"
-            "mssql one at a time, run the whole pass at once. Each module self-skips "
+            "After enum, rather than typing web/smb/ftp/ldap/snmp/mongodb/redis/"
+            "elasticsearch/rsync/nfs/kerberos/docker/k8s/mssql one at a time, run the "
+            "whole pass at once. Each module self-skips "
             "when there's no matching service; the workbook rebuilds once at the end.")
     cmd("sweep -o eng", "UNAUTHENTICATED pass: every applicable credential-free module. "
                         "Add --vulns to also run the NSE vuln scan; --only-modules / "
@@ -2597,7 +2612,9 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     for key, title in (("mssql", "MSSQL"), ("smb", "SMB"), ("ftp", "FTP"),
                        ("docker", "Docker"), ("kubernetes", "Kubernetes"),
                        ("ldap", "LDAP"), ("snmp", "SNMP"),
-                       ("mongodb", "MongoDB")):
+                       ("mongodb", "MongoDB"), ("redis", "Redis"),
+                       ("elasticsearch", "Elasticsearch"), ("rsync", "rsync"),
+                       ("nfs", "NFS"), ("kerberos", "Kerberos")):
         if _mod(key):
             nav.append(title)
     # AD cluster, kept contiguous.

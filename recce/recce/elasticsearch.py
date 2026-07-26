@@ -26,7 +26,9 @@ from .models import Host, Port
 _PORTS = (9200, 9201)
 _DEFAULT_PORT = 9200
 _TIMEOUT = 6.0
-_MAX_BODY = 512 * 1024
+_MAX_BODY = 8 * 1024 * 1024        # _cat/indices on a big cluster can be large; cap
+                                   # high so the index list isn't truncated (which
+                                   # would silently drop the unauth finding)
 
 
 def is_elasticsearch(port: Port) -> bool:

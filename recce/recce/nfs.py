@@ -32,6 +32,8 @@ _MOUNT_PROG = 100005
 _NFS_PROG = 100003
 _IPPROTO_TCP = 6
 _MAX_LIST = 4096                     # cap linked-list walks (hostile server guard)
+_MAX_RECORD = 8 * 1024 * 1024        # cap total RPC record size (memory guard)
+_MAX_FRAGMENTS = 64                  # cap record-marking fragments (loop guard)
 
 
 def is_nfs(port: Port) -> bool:
@@ -73,17 +75,19 @@ def _rpc(sock: socket.socket, xid: int, prog: int, vers: int, proc: int,
 
 
 def _recv_record(sock: socket.socket, timeout: float) -> bytes | None:
-    """Read a complete RPC record (one or more record-marking fragments)."""
+    """Read a complete RPC record (one or more record-marking fragments). Bounded on
+    both the total accumulated size and the fragment count so a hostile peer can't
+    exhaust memory or loop forever by never setting the last-fragment bit."""
     sock.settimeout(timeout)
     out = b""
-    while True:
+    for _ in range(_MAX_FRAGMENTS):
         hdr = _recvn(sock, 4, timeout)
         if hdr is None or len(hdr) < 4:
             return None
         marker = struct.unpack(">I", hdr)[0]
         last = bool(marker & 0x80000000)
         length = marker & 0x7FFFFFFF
-        if length > 4 * 1024 * 1024:                   # 4 MB per record: sane bound
+        if length > _MAX_RECORD or len(out) + length > _MAX_RECORD:
             return None
         frag = _recvn(sock, length, timeout)
         if frag is None or len(frag) < length:
@@ -91,6 +95,7 @@ def _recv_record(sock: socket.socket, timeout: float) -> bytes | None:
         out += frag
         if last:
             return out
+    return None                                        # too many fragments -> give up
 
 
 def _recvn(sock: socket.socket, n: int, timeout: float) -> bytes | None:
@@ -178,11 +183,14 @@ def portmap_dump(ip: str, timeout: float = _TIMEOUT, pmport: int = 111) -> list[
             return []
         cur = _Cur(res)
         out = []
-        while len(out) < _MAX_LIST:
-            if cur.u32() == 0:                             # value-follows == FALSE
-                break
-            prog, vers, prot, port = cur.u32(), cur.u32(), cur.u32(), cur.u32()
-            out.append({"prog": prog, "vers": vers, "prot": prot, "port": port})
+        try:
+            while len(out) < _MAX_LIST:
+                if cur.u32() == 0:                         # value-follows == FALSE
+                    break
+                prog, vers, prot, port = cur.u32(), cur.u32(), cur.u32(), cur.u32()
+                out.append({"prog": prog, "vers": vers, "prot": prot, "port": port})
+        except (ValueError, struct.error):
+            pass                                           # keep what parsed cleanly
         return out
     except (ValueError, struct.error):
         return []
@@ -227,16 +235,19 @@ def mount_export(ip: str, port: int, vers: int = 3,
             return []
         cur = _Cur(res)
         exports = []
-        while len(exports) < _MAX_LIST:
-            if cur.u32() == 0:                             # no more exports
-                break
-            dirp = cur.string()
-            groups = []
-            while len(groups) < _MAX_LIST:
-                if cur.u32() == 0:                         # no more groups
+        try:
+            while len(exports) < _MAX_LIST:
+                if cur.u32() == 0:                         # no more exports
                     break
-                groups.append(cur.string())
-            exports.append({"dir": dirp, "groups": groups})
+                dirp = cur.string()
+                groups = []
+                while len(groups) < _MAX_LIST:
+                    if cur.u32() == 0:                     # no more groups
+                        break
+                    groups.append(cur.string())
+                exports.append({"dir": dirp, "groups": groups})
+        except (ValueError, struct.error):
+            pass                                           # keep exports parsed so far
         return exports
     except (ValueError, struct.error):
         return []
@@ -296,11 +307,12 @@ _EVERYONE = ("*", "(everyone)", "everyone", "0.0.0.0/0", "::/0")
 
 
 def _is_world(groups: list[str]) -> bool:
-    """True if an export is shared to any host (no restriction / a wildcard)."""
+    """True if an export is shared to any host (no restriction / a bare wildcard).
+    A scoped wildcard like '*.corp.example.com' is a domain restriction, NOT
+    everyone, so it is not treated as world-mountable."""
     if not groups:
         return True
-    return any(g.strip().lower() in _EVERYONE or g.strip() == "*" or
-               g.strip().startswith("*") for g in groups)
+    return any(g.strip().lower() in _EVERYONE for g in groups)
 
 
 _NARRATIVE = {
