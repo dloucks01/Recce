@@ -18,7 +18,7 @@ import re
 import sys
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from . import ad
 from . import exploits
@@ -330,7 +330,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["ldap"] = json.loads(ldap_blob)
         except ValueError:
             pass
-    for _mk in ("snmp", "mongodb"):
+    for _mk in ("snmp", "mongodb", "redis", "elasticsearch", "rsync", "nfs",
+                "kerberos"):
         _blob = store.get_meta(_mk)
         if _blob:
             try:
@@ -1221,6 +1222,13 @@ def _phase_credenum(store, paths, args) -> None:
         print("    Install netexec + impacket, or ensure ssh is on PATH, then re-run.")
         print("!" * 64)
         return
+    # SMB/AD creds given but no SMB tool -> the SMB/AD half silently does nothing.
+    # Say so explicitly (consistent with cmd_smb/cmd_mssql) rather than finishing
+    # with a success message and zero accounts.
+    if (creds or admin_creds) and not tools.get("netexec"):
+        print("[!] netexec/impacket not installed - SMB/AD credentialed enum "
+              "(accounts, shares, secretsdump) will be SKIPPED. Install netexec + "
+              "impacket for the full credentialed pass; only the tools listed above run.")
     targets = _selected_hosts(store.all_hosts(), args)
     if not targets:
         print("[!] No hosts in scope.")
@@ -1413,13 +1421,16 @@ def _sweep_defaults(args: argparse.Namespace) -> None:
 # when the datastore has no matching host.
 _UNAUTH_SWEEP = [
     ("web", "cmd_web"), ("smb", "cmd_smb"), ("ftp", "cmd_ftp"), ("ldap", "cmd_ldap"),
-    ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("docker", "cmd_docker"),
+    ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("redis", "cmd_redis"),
+    ("elasticsearch", "cmd_elasticsearch"), ("rsync", "cmd_rsync"),
+    ("nfs", "cmd_nfs"), ("kerberos", "cmd_kerberos"), ("docker", "cmd_docker"),
     ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
 # the netexec/impacket phase plus the authenticated facets of the deep modules. The
-# unauth-only modules (web/snmp/mongodb/docker/k8s) are intentionally absent; you run
-# `sweep` for those. Each handler here keys its authenticated path off args.username.
+# unauth-only modules (web/snmp/mongodb/redis/elasticsearch/rsync/nfs/kerberos/docker/
+# k8s) are intentionally absent; you run `sweep` for those. Each handler here keys its
+# authenticated path off args.username.
 _AUTH_SWEEP = [
     ("credenum", "cmd_credenum"), ("ldap", "cmd_ldap"), ("smb", "cmd_smb"),
     ("mssql", "cmd_mssql"), ("ftp", "cmd_ftp"),
@@ -1513,8 +1524,9 @@ def _run_sweep(args: argparse.Namespace, *, authenticated: bool) -> int:
 
 def cmd_sweep(args: argparse.Namespace) -> int:
     """Unauthenticated deep pass: run every applicable credential-free module
-    (web/smb/ftp/ldap/snmp/mongodb/docker/kubernetes/mssql) in one shot after `enum`,
-    instead of typing each by hand. Each self-skips when there's no matching service;
+    (web/smb/ftp/ldap/snmp/mongodb/redis/elasticsearch/rsync/nfs/kerberos/docker/
+    kubernetes/mssql) in one shot after `enum`, instead of typing each by hand. Each
+    self-skips when there's no matching service;
     the workbook is rebuilt once at the end. For the authenticated modules use
     `credsweep`."""
     return _run_sweep(args, authenticated=False)
@@ -1787,12 +1799,24 @@ def cmd_web(args: argparse.Namespace) -> int:
             print(f"    [{h.ip}] crawled {pages} page(s), +{added} finding(s)")
         return profiles
 
+    budget = getattr(args, "budget", None)
+    started = time.monotonic()
+    stopped_budget = False
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_scan, h): h for h in targets}
         for fut in as_completed(futures):
+            # Wall-clock budget: stop scheduling more hosts (in-flight ones finish and
+            # are persisted per host below, so partial coverage is kept).
+            if budget is not None and not stopped_budget \
+                    and time.monotonic() - started > budget:
+                stopped_budget = True
+                for pending in futures:
+                    pending.cancel()
             h = futures[fut]
             try:
                 profiles = fut.result()
+            except CancelledError:
+                continue
             except Exception as e:  # noqa: BLE001 - one host never aborts the sweep
                 _record_issues(store, paths, h.ip, [{"phase": "web", "level": "warning",
                                "message": f"web scan failed: {e}"}])
@@ -1806,6 +1830,9 @@ def cmd_web(args: argparse.Namespace) -> int:
                 total_findings += wv
                 print(f"    {pr['url']:<28} {pr.get('server', '') or '?':<20}"
                       f"{tech}  ({wv} finding(s))")
+    if stopped_budget:
+        print("    [!] Time budget (--budget) reached - stopped scheduling more hosts; "
+              "results scanned so far were saved.")
     _final_report(store, paths, store.get_meta("engagement") or args.title)
     store.close()
     if getattr(args, "screenshots", False):
@@ -2235,6 +2262,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         degraded = [n for n, req, _ in tools if not req and not presence.get(n)]
         print("  READY." + (f"  Optional tools missing: {', '.join(degraded)}."
                             if degraded else "  All tools present."))
+        # Tell the user HOW to get each missing optional tool, not just its name.
+        _install = {
+            "masscan": "apt install masscan",
+            "searchsploit": "apt install exploitdb",
+            "netexec": "pipx install netexec  (+ pipx install impacket)",
+            "ssh": "apt install openssh-client",
+        }
+        for n in degraded:
+            if n in _install:
+                print(f"      - {n}: {_install[n]}")
         verdict = 0
     return verdict
 
@@ -3106,7 +3143,7 @@ def cmd_mssql(args: argparse.Namespace) -> int:
 
     active = not args.no_probe
     analysis = mssql.analyze(hosts, creds=creds, active=active,
-                             lhost=args.lhost or "<LHOST>")
+                             lhost=args.lhost or "<LHOST>", **_probe_kwargs(args, "mssql"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No MSSQL endpoints in the datastore (no port 1433 / ms-sql "
@@ -3405,7 +3442,7 @@ def cmd_smb(args: argparse.Namespace) -> int:
                  "dc_ip": args.dc_ip or ""}
 
     active = not args.no_probe
-    analysis = smb.analyze(hosts, creds=creds, active=active)
+    analysis = smb.analyze(hosts, creds=creds, active=active, **_probe_kwargs(args, "smb"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No SMB endpoints in the datastore (no port 445/139). Run `enum` "
@@ -3542,7 +3579,7 @@ def cmd_ftp(args: argparse.Namespace) -> int:
         creds = {"user": args.username, "secret": args.password or ""}
 
     active = not args.no_probe
-    analysis = ftp.analyze(hosts, creds=creds, active=active)
+    analysis = ftp.analyze(hosts, creds=creds, active=active, **_probe_kwargs(args, "ftp"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No FTP endpoints in the datastore (no port 21 / ftp service). Run "
@@ -3742,7 +3779,7 @@ def cmd_ldap(args: argparse.Namespace) -> int:
                  "hash": getattr(args, "hash", None) or ""}   # --hash -> NTLM pass-the-hash
 
     active = not args.no_probe
-    analysis = _ldap.analyze(hosts, creds=creds, active=active)
+    analysis = _ldap.analyze(hosts, creds=creds, active=active, **_probe_kwargs(args, "ldap"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No LDAP endpoints in the datastore (no port 389/636/3268/3269). "
@@ -3832,7 +3869,7 @@ def cmd_snmp(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = snmp.analyze(hosts, active=active)
+    analysis = snmp.analyze(hosts, active=active, **_probe_kwargs(args, "snmp"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No SNMP-responsive hosts. (SNMP is UDP 161; recce probes it directly, "
@@ -3882,7 +3919,7 @@ def cmd_mongodb(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = mongodb.analyze(hosts, active=active)
+    analysis = mongodb.analyze(hosts, active=active, **_probe_kwargs(args, "mongodb"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No MongoDB endpoints in the datastore (no port 27017-27019). Run "
@@ -3909,6 +3946,275 @@ def cmd_mongodb(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_redis(args: argparse.Namespace) -> int:
+    """Deep Redis enumeration: speak RESP (stdlib), read the version, and test whether
+    INFO works WITHOUT authentication - an exposed instance is a CONFIRMED critical
+    exposure (full read/write + a file-write -> RCE primitive). Read-only."""
+    from . import redis as _redis
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose Redis.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = _redis.analyze(hosts, active=active, **_probe_kwargs(args, "redis"))
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No Redis endpoints in the datastore (no port 6379/6380). Run `enum` "
+              "against the cache/database hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} Redis endpoint(s):")
+    for t in tgts:
+        if t.get("unauth"):
+            state = f"EXPOSED (unauth, {t.get('keys', 0)} keys)"
+        elif t.get("auth_required"):
+            state = "auth required"
+        else:
+            state = "probed" if t.get("version") else "reachable"
+        ver = f"  {t.get('version', '')}" if t.get("version") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
+
+    _fold_service_findings(store, hosts, analysis, "redis",
+                           _redis.findings_to_vulns, "Redis")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> Redis sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_elasticsearch(args: argparse.Namespace) -> int:
+    """Deep Elasticsearch enumeration: GET the HTTP API (stdlib), read the version, and
+    test whether /_cat/indices works WITHOUT authentication - an exposed cluster is a
+    CONFIRMED critical data exposure. Read-only (GETs only)."""
+    from . import elasticsearch as _es
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose Elasticsearch.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = _es.analyze(hosts, active=active, **_probe_kwargs(args, "elasticsearch"))
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No Elasticsearch endpoints in the datastore (no port 9200/9201). "
+              "Run `enum` against the search/log hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} Elasticsearch endpoint(s):")
+    for t in tgts:
+        if t.get("unauth"):
+            state = f"EXPOSED (unauth, {t.get('indices', 0)} indices)"
+        elif t.get("secured"):
+            state = "security enforced"
+        else:
+            state = "probed" if t.get("version") else "reachable"
+        ver = f"  {t.get('version', '')}" if t.get("version") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
+
+    _fold_service_findings(store, hosts, analysis, "elasticsearch",
+                           _es.findings_to_vulns, "Elasticsearch")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> Elasticsearch sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_rsync(args: argparse.Namespace) -> int:
+    """Deep rsync-daemon enumeration: speak the rsync daemon protocol (stdlib), list
+    the modules, and test each for anonymous access - an @RSYNCD: OK module is a
+    CONFIRMED unauthenticated file exposure. Read-only (never transfers a file)."""
+    from . import rsync as _rsync
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose rsync.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = _rsync.analyze(hosts, active=active, **_probe_kwargs(args, "rsync"))
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No rsync endpoints in the datastore (no port 873). Run `enum` "
+              "against the file hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} rsync endpoint(s):")
+    for t in tgts:
+        mods = t.get("modules", 0)
+        state = (f"{t.get('open', 0)}/{mods} module(s) open" if mods
+                 else "probed" if active else "reachable")
+        print(f"      {t['ip']}:{t['port']}  {state}")
+
+    _fold_service_findings(store, hosts, analysis, "rsync",
+                           _rsync.findings_to_vulns, "rsync")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> rsync sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_nfs(args: argparse.Namespace) -> int:
+    """Deep NFS enumeration: speak ONC RPC (stdlib) to the portmapper + mountd, list
+    the exports (showmount -e), and flag any shared to every host - a world-mountable
+    export is a CONFIRMED exposure. Read-only (never mounts)."""
+    from . import nfs as _nfs
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose NFS.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = _nfs.analyze(hosts, active=active, **_probe_kwargs(args, "nfs"))
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No NFS endpoints in the datastore (no port 2049/111). Run `enum` "
+              "against the file hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} NFS host(s):")
+    for t in tgts:
+        exp = t.get("exports", 0)
+        if t.get("world"):
+            state = f"{t['world']}/{exp} export(s) WORLD-mountable"
+        elif exp:
+            state = f"{exp} export(s) listed"
+        else:
+            state = "probed" if active else "reachable"
+        print(f"      {t['ip']}  {state}")
+
+    _fold_service_findings(store, hosts, analysis, "nfs",
+                           _nfs.findings_to_vulns, "NFS")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> NFS sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_kerberos(args: argparse.Namespace) -> int:
+    """Credential-less AD roasting: speak Kerberos (stdlib) to the DC, AS-REP roast
+    every pre-auth-disabled account (capture a crackable hash with NO credential), and
+    validate usernames via the KDC's pre-auth response. Read-only - no logon, no
+    lockouts."""
+    from . import kerberos as _krb
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` (and, for the "
+              "user list, `ldap`/`ad`) first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    # Candidate users: --user / --userlist override the enumerated account names.
+    users = None
+    if getattr(args, "user", None):
+        users = list(args.user)
+    elif getattr(args, "userlist", None):
+        try:
+            with open(args.userlist, encoding="utf-8", errors="replace") as fh:
+                users = [ln.strip() for ln in fh if ln.strip()
+                         and not ln.startswith("#")]
+        except OSError as e:
+            print(f"[x] Could not read --userlist {args.userlist!r}: {e}")
+            store.close()
+            return 1
+    # Privileged names (for critical severity) from admin-flagged accounts.
+    privileged = {a.name.lower() for h in hosts for a in (h.accounts or [])
+                  if str((a.attrs or {}).get("admincount", "")).lower() in ("1", "true")
+                  or a.name.lower() in ("administrator", "admin")}
+
+    active = not args.no_probe
+    realm = getattr(args, "domain", "") or store.get_meta("domain") or ""
+    # AS-REQ is one TCP connection to the DC per user, sequentially. Warn before a
+    # large, slow, and network-noisy run so it isn't mistaken for a hang.
+    n_users = len(users) if users is not None else len(_krb.candidate_users(hosts))
+    if active and n_users > 200:
+        print(f"[*] Testing {n_users} username(s) against the DC - one AS-REQ each, "
+              f"sequentially ({n_users} connections to a single DC). This can take a "
+              "while and is network-noisy; narrow with --userlist / --user if needed.")
+    analysis = _krb.analyze(hosts, users=users, realm=realm,
+                            dc_ip=getattr(args, "dc_ip", "") or "",
+                            privileged=privileged, active=active,
+                            **_probe_kwargs(args, "kerberos"))
+    if not analysis["dc_ip"]:
+        print("[!] No Kerberos DC found (no host with port 88). Pass --dc-ip, or run "
+              "`enum` against the domain controller first.")
+        store.close()
+        return 0
+    if not analysis["realm"]:
+        print("[!] No realm/domain known. Pass --domain <REALM> (e.g. CORP.LOCAL).")
+        store.close()
+        return 0
+    st = analysis["stats"]
+    if not analysis["results"]:
+        print(f"[!] No candidate usernames to test against {analysis['dc_ip']} "
+              f"({analysis['realm']}). Enumerate users (ldap/ad) or pass --userlist.")
+        store.close()
+        return 0
+    # If every AS-REQ came back "no_reply", the DC never answered - don't present
+    # that as "0 valid" (which reads like a clean, complete test).
+    if active and all(r["state"] == "no_reply" for r in analysis["results"]):
+        print(f"[!] The DC {analysis['dc_ip']}:88 did not answer any AS-REQ "
+              f"({st['users_tested']} attempted). Check the DC IP / that TCP 88 is "
+              "reachable, then re-run. Nothing was concluded about these accounts.")
+        store.close()
+        return 0
+    print(f"[+] Kerberos {analysis['realm']} @ {analysis['dc_ip']}: tested "
+          f"{st['users_tested']} user(s) -> {st['valid']} valid, "
+          f"{st['roastable']} AS-REP roastable.")
+    for r in analysis["results"]:
+        if r["state"] == "roastable":
+            print(f"      [ROASTABLE] {r['user']}")
+
+    _fold_service_findings(store, hosts, analysis, "kerberos",
+                           _krb.findings_to_vulns, "Kerberos")
+    if active:
+        _mark_capability_scanned(store, [{"ip": analysis["dc_ip"], "port": 88}])
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> Kerberos sheet written; findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3922,6 +4228,47 @@ def cmd_report(args: argparse.Namespace) -> int:
     _generate_reports(store, paths, title)
     store.close()
     return 0
+
+
+def _add_budget(parser) -> None:
+    """A wall-clock cap for a deep module's sequential probe loop."""
+    parser.add_argument("--budget", type=float, metavar="SECONDS",
+                        help="stop probing after this many seconds and keep partial "
+                             "results (default: no cap)")
+
+
+def _probe_progress(label: str):
+    """A throttled per-target progress printer for the sequential deep-module loops,
+    so a long run reads as 'working' rather than 'hung'. Quiet on tiny runs."""
+    import time
+    last = [0.0]
+
+    def cb(i, n, t):
+        if n < 8:
+            return                                     # small runs: the summary suffices
+        now = time.monotonic()
+        if now - last[0] >= 2.0 or i == n:
+            last[0] = now
+            who = t.get("ip", "") if isinstance(t, dict) else str(t)
+            print(f"    [{i}/{n}] {label} {who} ...", flush=True)
+    return cb
+
+
+def _probe_kwargs(args, label: str) -> dict:
+    """budget + progress kwargs for a deep module's analyze()."""
+    return {"budget": getattr(args, "budget", None),
+            "progress": _probe_progress(label)}
+
+
+def _report_partial(stats) -> None:
+    """Tell the operator when a probe loop stopped early (budget / Ctrl-C) so partial
+    results are never mistaken for a complete, clean assessment."""
+    stopped = (stats or {}).get("stopped")
+    if stopped == "budget":
+        print("    [!] Time budget (--budget) reached - stopped early; partial results "
+              "saved. Raise --budget or narrow the targets to finish the rest.")
+    elif stopped == "interrupt":
+        print("    [!] Interrupted - stopped early; results probed so far were saved.")
 
 
 def _fold_service_findings(store, hosts, analysis, source, to_vulns, label):
@@ -3954,6 +4301,7 @@ def _fold_service_findings(store, hosts, analysis, source, to_vulns, label):
         print(f"[+] {len(fs)} {label} finding(s): "
               + ", ".join(f"{by_sev[s]} {s}" for s in
                           ("critical", "high", "medium", "low") if by_sev.get(s)))
+    _report_partial(analysis.get("stats"))
     return by_ip
 
 
@@ -3989,9 +4337,16 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     in the module's stored analysis targets, or it carries a finding from that source.
     Ordered highest-impact first so `status` surfaces the critical exposures."""
     from . import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
-                   snmp as _snmp, mongodb as _mongo)
+                   snmp as _snmp, mongodb as _mongo, redis as _redis,
+                   elasticsearch as _es, rsync as _rsync, nfs as _nfs,
+                   kerberos as _krb)
     mods = [
         ("MongoDB", "mongodb", _mongo.is_mongodb, "recce mongodb"),
+        ("Redis", "redis", _redis.is_redis, "recce redis"),
+        ("Elasticsearch", "elasticsearch", _es.is_elasticsearch, "recce elasticsearch"),
+        ("rsync", "rsync", _rsync.is_rsync, "recce rsync"),
+        ("NFS", "nfs", _nfs.is_nfs, "recce nfs"),
+        ("Kerberos", "kerberos", _krb.is_kerberos, "recce kerberos -d DOMAIN"),
         ("Docker", "docker", docker.is_docker, "recce docker"),
         ("Kubernetes", "kubernetes", k8s.is_k8s, "recce k8s"),
         ("MSSQL", "mssql", mssql.is_mssql, "recce mssql -u USER -p PASS -d DOM"),
@@ -4582,10 +4937,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "typical engagement:\n"
             "  1. recce doctor                     # verify this box\n"
             "  2. recce enum 10.0.0.0/24 -o eng    # discover + services\n"
-            "  3. open eng/enumeration.xlsx -> Start Here tab\n"
-            "  4. recce vulns -o eng               # vuln-scan open ports\n"
-            "  5. recce db -o eng ; recce privesc -o eng\n"
-            "  6. recce status -o eng              # what's left\n\n"
+            "  3. recce vulns -o eng               # vuln-scan open ports\n"
+            "  4. recce sweep -o eng               # ALL credential-free deep modules\n"
+            "  5. recce credsweep -u U -p P -d DOM -o eng   # once you have creds\n"
+            "  6. recce status -o eng              # what's left; open eng/enumeration.xlsx\n\n"
             "targets: single IP, several IPs, range (10.0.0.10-40), CIDR, or @file.\n"
             "run 'recce <command> -h' for a command's options."
         ),
@@ -4771,6 +5126,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "side effect (delete / pay / send / post / ...). Off by default "
                          "- those forms are recorded, not submitted. File uploads are "
                          "never submitted. Use only on a throwaway/dev target.")
+    _add_budget(wb)
     wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.
@@ -4823,10 +5179,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cd.add_argument("--add", action="append", metavar="USER:SECRET",
                     help="add a captured credential: 'user:secret', "
                          "'DOMAIN\\user:secret' (a 32-hex secret => NT hash). Repeatable.")
-    cd.add_argument("--user", help="add a credential: username")
-    cd.add_argument("--pass", dest="password", help="add a credential: password")
-    cd.add_argument("--hash", help="add a credential: NT hash (for pass-the-hash)")
-    cd.add_argument("--domain", help="add a credential: AD domain (blank = local)")
+    cd.add_argument("-u", "--user", help="add a credential: username")
+    cd.add_argument("-p", "--pass", dest="password", help="add a credential: password")
+    cd.add_argument("-H", "--hash", help="add a credential: NT hash (for pass-the-hash)")
+    cd.add_argument("-d", "--domain", help="add a credential: AD domain (blank = local)")
     cd.add_argument("--plan", action="store_true",
                     help="build the spray plan (write users/passwords/hashes files "
                          "+ print the netexec/impacket commands)")
@@ -4843,7 +5199,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # One command instead of ~9: run every applicable credential-free deep module.
     sw = sub.add_parser("sweep",
                         help="run ALL applicable deep modules after enum in one shot "
-                             "(web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)")
+                             "(web/smb/ftp/ldap/snmp/mongodb/redis/elasticsearch/rsync/"
+                             "nfs/kerberos/docker/k8s/mssql)")
     sw.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
     _add_common(sw)
@@ -4992,6 +5349,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="max linked-server chain depth to walk (default 4)")
     ms.add_argument("-o", "--output-dir", default="engagement")
     ms.add_argument("--title", default="Recce Engagement")
+    _add_budget(ms)
     ms.set_defaults(func=cmd_mssql)
 
     # SMB offensive enumeration + attack surface.
@@ -5019,6 +5377,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live SMB2/SMBv1 negotiate probes")
     sm.add_argument("-o", "--output-dir", default="engagement")
     sm.add_argument("--title", default="Recce Engagement")
+    _add_budget(sm)
     sm.set_defaults(func=cmd_smb)
 
     # FTP offensive enumeration.
@@ -5041,6 +5400,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live banner/anonymous/FEAT probe")
     fp.add_argument("-o", "--output-dir", default="engagement")
     fp.add_argument("--title", default="Recce Engagement")
+    _add_budget(fp)
     fp.set_defaults(func=cmd_ftp)
 
     # Docker Engine API enumeration.
@@ -5091,6 +5451,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "accepts it (LDAPS 636 needs no sealing)")
     lp.add_argument("-o", "--output-dir", default="engagement")
     lp.add_argument("--title", default="Recce Engagement")
+    _add_budget(lp)
     lp.set_defaults(func=cmd_ldap)
 
     # SNMP enumeration (UDP 161).
@@ -5104,6 +5465,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live community brute/walk; just write the commands")
     sp.add_argument("-o", "--output-dir", default="engagement")
     sp.add_argument("--title", default="Recce Engagement")
+    _add_budget(sp)
     sp.set_defaults(func=cmd_snmp)
 
     # MongoDB enumeration.
@@ -5117,7 +5479,86 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live probe; just write the commands")
     mp.add_argument("-o", "--output-dir", default="engagement")
     mp.add_argument("--title", default="Recce Engagement")
+    _add_budget(mp)
     mp.set_defaults(func=cmd_mongodb)
+
+    # Redis enumeration.
+    rp = sub.add_parser("redis",
+                        help="Redis: unauthenticated RESP probe (6379/6380) -> CONFIRM "
+                             "INFO without auth = critical exposure (read/write + RCE)")
+    rp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "Redis hosts in the datastore)")
+    rp.add_argument("--no-probe", action="store_true",
+                    help="skip the live probe; just write the commands")
+    rp.add_argument("-o", "--output-dir", default="engagement")
+    rp.add_argument("--title", default="Recce Engagement")
+    _add_budget(rp)
+    rp.set_defaults(func=cmd_redis)
+
+    # Elasticsearch enumeration.
+    ep = sub.add_parser("elasticsearch", aliases=["es", "elastic"],
+                        help="Elasticsearch: unauthenticated HTTP probe (9200/9201) -> "
+                             "CONFIRM /_cat/indices without auth = critical data exposure")
+    ep.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "Elasticsearch hosts in the datastore)")
+    ep.add_argument("--no-probe", action="store_true",
+                    help="skip the live probe; just write the commands")
+    ep.add_argument("-o", "--output-dir", default="engagement")
+    ep.add_argument("--title", default="Recce Engagement")
+    _add_budget(ep)
+    ep.set_defaults(func=cmd_elasticsearch)
+
+    # rsync-daemon enumeration.
+    syp = sub.add_parser("rsync",
+                         help="rsync daemon: list modules (873) + prove anonymous "
+                              "access = CONFIRMED unauthenticated file exposure")
+    syp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: "
+                          "all rsync hosts in the datastore)")
+    syp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    syp.add_argument("-o", "--output-dir", default="engagement")
+    syp.add_argument("--title", default="Recce Engagement")
+    _add_budget(syp)
+    syp.set_defaults(func=cmd_rsync)
+
+    # NFS / mountd enumeration.
+    nfp = sub.add_parser("nfs", aliases=["showmount"],
+                         help="NFS: ONC RPC portmapper + mountd export list (showmount "
+                              "-e) -> world-mountable export = CONFIRMED exposure")
+    nfp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: "
+                          "all NFS hosts in the datastore)")
+    nfp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    nfp.add_argument("-o", "--output-dir", default="engagement")
+    nfp.add_argument("--title", default="Recce Engagement")
+    _add_budget(nfp)
+    nfp.set_defaults(func=cmd_nfs)
+
+    # Credential-less Kerberos AS-REP roasting + user enumeration.
+    kp = sub.add_parser("kerberos", aliases=["asrep", "asreproast"],
+                        help="credential-less AD roasting: AS-REP roast pre-auth-disabled "
+                             "accounts + validate usernames via the KDC (no creds, port 88)")
+    kp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file")
+    kp.add_argument("--dc-ip", dest="dc_ip", default="",
+                    help="domain controller IP (default: a host with port 88 open)")
+    kp.add_argument("-d", "--domain", default="",
+                    help="Kerberos realm / AD domain (e.g. CORP.LOCAL)")
+    kp.add_argument("--userlist",
+                    help="file of candidate usernames, one per line (default: the "
+                         "user accounts recce already enumerated)")
+    kp.add_argument("--user", action="append",
+                    help="test a single username (repeatable)")
+    kp.add_argument("--no-probe", action="store_true",
+                    help="skip the live probe; just write the commands")
+    kp.add_argument("-o", "--output-dir", default="engagement")
+    kp.add_argument("--title", default="Recce Engagement")
+    _add_budget(kp)
+    kp.set_defaults(func=cmd_kerberos)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
@@ -5173,7 +5614,8 @@ plain-English, step-by-step walkthrough. The core loop is short:
   2.  recce enum  <targets> -o eng        find hosts, ports, services -> workbook
   3.  recce vulns -o eng                   vuln-scan what enum found
   4.  recce sweep -o eng                   ALL credential-free deep modules at once
-                                          (web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)
+                                          (web/smb/ftp/ldap/snmp/mongodb/redis/
+                                          elasticsearch/rsync/nfs/kerberos/docker/k8s/mssql)
   5.  recce credsweep -u USER -p PASS -d DOMAIN -o eng
                                           ALL authenticated modules once you have creds
                                           (credenum + authenticated ldap/smb/mssql/ftp)
@@ -5182,8 +5624,9 @@ Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options)
 or check progress and the suggested next step:  recce status -o eng
 
 Want to focus one service instead of the whole sweep?  Each still has its own
-command - recce web|smb|ftp|ldap|snmp|mongodb|docker|k8s|mssql -o eng  (or add
--u/-p/-d to smb/ldap/mssql/ftp for their authenticated depth). See the Runbook tab.
+command - recce web|smb|ftp|ldap|snmp|mongodb|redis|elasticsearch|rsync|nfs|
+kerberos|docker|k8s|mssql -o eng  (or add -u/-p/-d to smb/ldap/mssql/ftp for their
+authenticated depth). See the Runbook tab.
 
 Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
 SharpHound / Certipy data?   recce ad loot.zip certipy.json -u USER -p PASS -d DOMAIN

@@ -5,6 +5,66 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Wall-clock budget + live progress for the deep-service probe loops** (`svcprobe`).
+  The credential-free modules probe hosts sequentially on raw sockets; a large target
+  list with slow/filtered hosts (a /24 with no SNMP, thousands of AS-REP attempts)
+  could run for many minutes with no output — indistinguishable from a hang — and a
+  Ctrl-C lost everything probed so far. A shared driver now gives redis / elasticsearch
+  / rsync / nfs / mongodb / snmp / kerberos three properties: an optional **`--budget
+  SECONDS`** cap (stops early and keeps partial results), **throttled per-target
+  progress** (`[i/N] redis 10.0.0.7 …`) so a long run reads as working, and **Ctrl-C
+  safety** (a keyboard interrupt stops the loop and the partial results are still folded
+  + saved). When a run stops early the CLI says so explicitly, so partial coverage is
+  never mistaken for a complete assessment. Behaviour is unchanged when `--budget` is
+  omitted. Now applied to **all** the sequential deep modules — smb, ftp, ldap, mssql
+  and web included (web cancels pending hosts at the budget and keeps the per-host
+  results it already persisted; ldap and mssql run each whole per-target unit — probe +
+  paged auth enum / SQL-Browser — under the guard, so a slow authenticated enum can't
+  overrun unbounded and a Ctrl-C keeps partial results).
+
+- **Credential-less AD roasting (`recce kerberos` / `asrep`).** A minimal Kerberos
+  client — hand-rolled ASN.1 DER over TCP 88, no impacket — that needs **no credential**,
+  only a DC and candidate usernames (from the LDAP/SharpHound accounts recce already
+  enumerated, or a `--userlist`). For each name it sends a pre-auth-less AS-REQ: an
+  **AS-REP back** means the account has pre-auth disabled, and recce captures the
+  encrypted part as a crackable `$krb5asrep$` hash (**AS-REP roasting with no
+  credential** — CONFIRMED high, critical if privileged); a **KDC_ERR_PREAUTH_REQUIRED**
+  confirms a **valid username** (enumeration with no logon → no lockouts), while
+  **PRINCIPAL_UNKNOWN** means it doesn't exist. Feeds the totals, a dedicated
+  **Kerberos** tab, the prove engine, and `sweep`. Read-only — it only requests tickets.
+- **rsync-daemon deep module (`recce rsync`).** Speaks the rsync daemon protocol
+  (TCP 873) directly — no rsync binary. Reads the `@RSYNCD` greeting, lists the modules
+  with `#list`, then probes each for anonymous access: an `@RSYNCD: OK` module is
+  **readable with no credential** (CONFIRMED — unauthenticated read, and often write, of
+  every file it exposes), while `@RSYNCD: AUTHREQD` is reported reachable-but-locked. The
+  module inventory itself is flagged as an information leak. Read-only — recce reads the
+  verdict line and never transfers a file. Feeds the totals, a dedicated **rsync** tab,
+  the prove engine, and `sweep`.
+- **NFS / mountd deep module (`recce nfs` / `showmount`).** Speaks ONC RPC (Sun RPC)
+  directly with stdlib struct/XDR — no rpcinfo/showmount binary. Calls the portmapper
+  DUMP (111) for the RPC directory, resolves mountd, and calls `MOUNTPROC_EXPORT` (the
+  `showmount -e` equivalent) to read every export and its client ACL. An export shared
+  to `*` / everyone (or with no host restriction) is flagged **world-mountable**
+  (CONFIRMED — mountable by any host: read, and via `no_root_squash` write, every file).
+  A restricted-but-enumerable export list and an open portmapper are lower-severity
+  info leaks. Read-only — recce never mounts. Feeds the totals, a dedicated **NFS** tab,
+  the prove engine, and `sweep`.
+- **Redis deep module (`recce redis`).** Speaks the Redis wire protocol (RESP)
+  directly on a raw socket — no redis-py. Sends PING + INFO, and uses INFO-without-auth
+  as the discriminator: if the server stats come back with no credential the instance
+  is **exposed unauthenticated** (CONFIRMED critical — full read/write plus the CONFIG
+  `dir`/`dbfilename` + SAVE file-write → RCE primitive, which recce reads but never
+  sets). A `-NOAUTH` reply is reported reachable-but-locked (not a finding). Old/EOL
+  builds (< 6.0, pre-ACL) are flagged. Feeds the severity totals, a dedicated **Redis**
+  tab, the prove engine, and `sweep`. Read-only.
+- **Elasticsearch deep module (`recce elasticsearch` / `es`).** Talks to the ES HTTP
+  API (9200/9201) with stdlib `http.client`. Fingerprints via `GET /`, then uses
+  `GET /_cat/indices`-without-auth as the discriminator: if the index list comes back
+  the cluster is **exposed unauthenticated** (CONFIRMED critical data exposure — every
+  document readable/writable), recording index names + total document count. A
+  401/security_exception is reported reachable-but-locked. Old/EOL builds (< 7.x, with
+  the historical scripting-sandbox RCEs) are flagged. Feeds the severity totals, a
+  dedicated **Elasticsearch** tab, the prove engine, and `sweep`. Read-only (GETs only).
 - **Access + risk overlay on the AD architecture diagram.** Tier-0 objects recce
   **already holds** (usernames from captured credentials, or an accessed DC) get a
   bold border + ✓; nodes an attacker can **seize directly** get a risk dot (DCSync =

@@ -317,6 +317,99 @@ def _v_mongodb(host, port, vuln):
         "FP only if the server actually required auth (it would have returned an error)."]
 
 
+def _v_redis(host, port, vuln):
+    # recce read INFO over RESP with no AUTH, so the no-auth exposure is directly
+    # observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "end-of-life" in b or "legacy" in b:
+        return CONFIRMED, [
+            "recce read the running Redis version via INFO and it predates the 6.0 ACL "
+            "line / is end-of-life (directly observed).",
+            "redis-cli -h <ip> -p <port> INFO server to re-read the version.",
+            "FP only if a vendor backported fixes to this build in place."]
+    return CONFIRMED, [
+        "recce sent INFO over the Redis wire protocol with no authentication and the "
+        "server returned its stats (directly observed).",
+        "redis-cli -h <ip> -p <port> INFO ; KEYS '*'  then the CONFIG SET dir + "
+        "dbfilename + SAVE file-write chain for RCE (within ROE).",
+        "FP only if the server actually required auth (it would have returned -NOAUTH)."]
+
+
+def _v_elasticsearch(host, port, vuln):
+    # recce GET /_cat/indices returned the index list with no credential -> CONFIRMED.
+    b = _blob(vuln)
+    if "end-of-life" in b or "legacy" in b:
+        return CONFIRMED, [
+            "recce read the running Elasticsearch version from the / banner and it is "
+            "past end-of-life (directly observed).",
+            "curl -s http://<ip>:<port>/ to re-read the version number.",
+            "FP only if a vendor backported fixes to this build in place."]
+    return CONFIRMED, [
+        "recce GET /_cat/indices with no credential and the cluster returned the index "
+        "list (directly observed).",
+        "curl -s http://<ip>:<port>/_cat/indices then _search / elasticdump to pull "
+        "documents (within ROE).",
+        "FP only if security was actually enforced (it would have returned 401)."]
+
+
+def _v_kerberos(host, port, vuln):
+    b = _blob(vuln)
+    if "username enumeration" in b:
+        return CONFIRMED, [
+            "recce sent pre-auth-less AS-REQs and the DC distinguished valid from "
+            "invalid usernames (PREAUTH_REQUIRED vs PRINCIPAL_UNKNOWN) - directly "
+            "observed, no logon attempted.",
+            "impacket-GetNPUsers <domain>/ -no-pass -usersfile users.txt to re-confirm.",
+            "FP only if the DC actually returned the same error for every name."]
+    return CONFIRMED, [
+        "recce requested an AS-REP with no pre-authentication and the DC returned one - "
+        "the account has DONT_REQ_PREAUTH set and the crackable hash is captured "
+        "(directly observed, no credential).",
+        "hashcat -m 18200 asrep.hash rockyou.txt to recover the plaintext (within ROE).",
+        "FP only if the account actually required pre-auth (no AS-REP would be issued)."]
+
+
+def _v_rsync(host, port, vuln):
+    b = _blob(vuln)
+    if "enumerable" in b or "modules enumerable" in b:
+        return CONFIRMED, [
+            "recce completed the rsync handshake and the daemon returned its module "
+            "list with no credential (directly observed).",
+            "rsync rsync://<ip>:<port>/ to re-read the module inventory.",
+            "FP only if the daemon actually required auth to list (it would not have "
+            "returned the modules)."]
+    return CONFIRMED, [
+        "recce requested the module and the daemon answered @RSYNCD: OK - anonymous "
+        "access with no credential (directly observed).",
+        "rsync --list-only rsync://<ip>:<port>/<module>/ then rsync -av ... loot/ "
+        "(within ROE).",
+        "FP only if the module actually required auth (it would have returned "
+        "AUTHREQD)."]
+
+
+def _v_nfs(host, port, vuln):
+    b = _blob(vuln)
+    if "world-mountable" in b or "shared to any host" in b:
+        return CONFIRMED, [
+            "recce read the mountd export list and an export is shared with no host "
+            "restriction / a wildcard (directly observed).",
+            "showmount -e <ip> then mount -o vers=3 <ip>:<export> /mnt (within ROE); "
+            "check for no_root_squash to escalate.",
+            "FP only if the server actually restricts the export (the ACL would name "
+            "specific hosts)."]
+    if "rpc services enumerable" in b:
+        return CONFIRMED, [
+            "recce called the portmapper DUMP and it returned the registered RPC "
+            "programs with no credential (directly observed).",
+            "rpcinfo -p <ip> to re-read the RPC directory.",
+            "FP only if rpcbind actually refused the query."]
+    return CONFIRMED, [
+        "recce called MOUNTPROC_EXPORT and mountd returned the export list with no "
+        "credential (directly observed).",
+        "showmount -e <ip> to re-read the exports.",
+        "FP only if mountd actually required auth."]
+
+
 def _v_ftp_backdoor(host, port, vuln):
     # A banner-matched trojaned/backdoored FTP build. The banner is strong evidence
     # but backdoor presence is only truly proven by triggering it, so LIKELY with the
@@ -795,6 +888,51 @@ _RECIPES: list[dict] = [
                "then mongodump --host <ip> --port <port> --out loot/  (recce already read it).",
      "fp": "The server actually enforced auth and returned an error.",
      "fn": _v_mongodb},
+    {"id": "redis-unauth",
+     "match": r"redis exposed without authentication|redis.*(no auth|unauth)|"
+              r"redis end-of-life|redis.*legacy build",
+     "name": "Redis exposed without authentication",
+     "pre": ["Redis (6379/6380) reachable", "INFO answered with no credential"],
+     "finish": "redis-cli -h <ip> -p <port> INFO ; KEYS '*'  then the CONFIG SET dir + "
+               "SAVE file-write chain for RCE (recce already read it).",
+     "fp": "The server actually enforced auth (-NOAUTH).",
+     "fn": _v_redis},
+    {"id": "elasticsearch-unauth",
+     "match": r"elasticsearch exposed without authentication|elasticsearch.*(no auth|unauth)|"
+              r"elasticsearch end-of-life|elasticsearch.*legacy build",
+     "name": "Elasticsearch exposed without authentication",
+     "pre": ["Elasticsearch (9200/9201) reachable", "/_cat/indices answered with no credential"],
+     "finish": "curl -s http://<ip>:<port>/_cat/indices then _search / elasticdump to "
+               "pull documents (recce already listed them).",
+     "fp": "The cluster actually enforced security (401).",
+     "fn": _v_elasticsearch},
+    {"id": "rsync-unauth",
+     "match": r"rsync module readable without authentication|"
+              r"rsync modules enumerable|rsync.*(no auth|unauth|anonymous)",
+     "name": "rsync exposed without authentication",
+     "pre": ["rsync daemon (873) reachable", "module list / module answered with no credential"],
+     "finish": "rsync --list-only rsync://<ip>:<port>/<module>/ then rsync -av ... loot/ "
+               "(recce already read the OK verdict).",
+     "fp": "The daemon actually required auth (AUTHREQD).",
+     "fn": _v_rsync},
+    {"id": "nfs-export",
+     "match": r"nfs export shared to any host|world-mountable|"
+              r"nfs exports enumerable|rpc services enumerable via portmapper",
+     "name": "NFS export exposed",
+     "pre": ["portmapper (111) / mountd reachable", "export list answered with no credential"],
+     "finish": "showmount -e <ip> then mount -o vers=3 <ip>:<export> /mnt  (recce "
+               "already read the export list).",
+     "fp": "The export is actually restricted to specific hosts.",
+     "fn": _v_nfs},
+    {"id": "asrep-roast",
+     "match": r"as-rep roastable account|kerberos username enumeration|"
+              r"pre-auth disabled",
+     "name": "AS-REP roastable account / Kerberos user enumeration",
+     "pre": ["DC (88) reachable", "AS-REP returned / username validated with no credential"],
+     "finish": "hashcat -m 18200 asrep.hash rockyou.txt (roast), or GetNPUsers -no-pass "
+               "(enum) - recce already captured the reply.",
+     "fp": "The account actually required pre-auth (no AS-REP would be issued).",
+     "fn": _v_kerberos},
     {"id": "ftp-backdoor",
      "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
      "name": "Backdoored / RCE FTP build",

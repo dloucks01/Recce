@@ -58,6 +58,9 @@ PORT_NAMES: dict[int, tuple[str, str]] = {
     9100: ("jetdirect", "Printer / HP JetDirect (raw)"),
     11211: ("memcached", "Memcached"),
     27017: ("mongodb", "MongoDB"),
+    6379: ("redis", "Redis"),
+    9200: ("elasticsearch", "Elasticsearch (HTTP API)"),
+    9300: ("elasticsearch", "Elasticsearch (transport)"),
     5432: ("postgresql", "PostgreSQL"),
     1521: ("oracle-tns", "Oracle TNS listener"),
 }

@@ -7979,6 +7979,587 @@ class MongodbTest(unittest.TestCase):
             self.assertEqual(cli.main(["mongodb", "-o", out, "--no-probe"]), 0)
 
 
+class RedisTest(unittest.TestCase):
+    """Deep Redis module: RESP parse, a mock RESP server (PING/INFO/CONFIG), unauth
+    detection, findings, prove, `recce redis`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import threading
+
+        def bulk(s):
+            b = s.encode()
+            return b"$" + str(len(b)).encode() + b"\r\n" + b + b"\r\n"
+
+        def arr(*items):
+            out = b"*" + str(len(items)).encode() + b"\r\n"
+            return out + b"".join(bulk(i) for i in items)
+
+        info = ("# Server\r\nredis_version:5.0.7\r\nos:Linux\r\nredis_mode:standalone\r\n"
+                "# Keyspace\r\ndb0:keys=42,expires=0\r\n")
+        cfg = {"dir": "/var/lib/redis", "dbfilename": "dump.rdb",
+               "requirepass": "", "protected-mode": "no"}
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(3.0)
+                buf = b""
+                while True:
+                    try:
+                        chunk = sock.recv(4096)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    buf += chunk
+                    # Parse each complete command (array of bulk strings) we have.
+                    while True:
+                        try:
+                            val, n = __import__("recce.redis", fromlist=["_parse"])._parse(buf, 0)
+                        except Exception:
+                            break
+                        buf = buf[n:]
+                        args = val if isinstance(val, list) else [val]
+                        cmd = (args[0] or "").upper() if args else ""
+                        if cmd == "PING":
+                            sock.sendall(b"+PONG\r\n")
+                        elif cmd == "INFO":
+                            sock.sendall(bulk(info))
+                        elif cmd == "CONFIG" and len(args) >= 3:
+                            sock.sendall(arr(args[2], cfg.get(args[2], "")))
+                        else:
+                            sock.sendall(b"-ERR unknown\r\n")
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_resp_parse_types(self):
+        from recce import redis as R
+        self.assertEqual(R._parse(b"+OK\r\n")[0], "OK")
+        self.assertEqual(R._parse(b":7\r\n")[0], 7)
+        self.assertEqual(R._parse(b"$3\r\nabc\r\n")[0], "abc")
+        self.assertEqual(R._parse(b"*2\r\n$1\r\na\r\n$1\r\nb\r\n")[0], ["a", "b"])
+        self.assertIsInstance(R._parse(b"-NOAUTH x\r\n")[0], R._Err)
+        with self.assertRaises(R._Incomplete):
+            R._parse(b"$5\r\nab")
+
+    def test_probe_detects_unauth(self):
+        from recce import redis as R
+        pr = R.probe("127.0.0.1", self.port, timeout=3.0)
+        self.assertTrue(pr["reachable"])
+        self.assertTrue(pr["unauth"])
+        self.assertEqual(pr["version"], "5.0.7")
+        self.assertEqual(pr["keys"], 42)
+        self.assertEqual(pr["dir"], "/var/lib/redis")
+
+    def test_findings_and_prove(self):
+        from recce import redis as R, proofs
+        pr = R.probe("127.0.0.1", self.port, timeout=3.0)
+        h = Host(ip="10.0.9.9", ports=[Port(portid=6379, service="redis", state="open")])
+        fs = R.findings([h], {("10.0.9.9", 6379): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("Redis exposed without authentication", titles)
+        self.assertIn("Redis end-of-life", titles)          # 5.0.7 < 6.0
+        h.vulns = R.findings_to_vulns(fs)["10.0.9.9"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_cmd_redis_end_to_end(self):
+        from recce import cli, xlsx, redis as R
+        from recce.store import Store
+        orig = R.is_redis
+        R.is_redis = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="redis")]))
+                st.close()
+                self.assertEqual(cli.main(["redis", "-o", out]), 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("Redis", sheets)
+                vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+                self.assertIn("Redis", vtxt)
+        finally:
+            R.is_redis = orig
+
+
+class ElasticsearchTest(unittest.TestCase):
+    """Deep Elasticsearch module: a mock HTTP API (/ banner + /_cat/indices), unauth
+    detection, findings, prove, `recce elasticsearch`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import json as _json
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, obj):
+                body = _json.dumps(obj).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                if self.path == "/":
+                    self._send({"name": "es01", "cluster_name": "prod",
+                                "version": {"number": "6.8.0", "lucene_version": "7.7.0"},
+                                "tagline": "You Know, for Search"})
+                elif self.path.startswith("/_cat/indices"):
+                    self._send([{"index": "logs-2024", "docs.count": "1500"},
+                                {"index": "users", "docs.count": "40"},
+                                {"index": ".kibana", "docs.count": "3"}])
+                elif self.path.startswith("/_cluster/health"):
+                    self._send({"status": "green"})
+                else:
+                    self._send({})
+
+        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_probe_detects_unauth(self):
+        from recce import elasticsearch as E
+        pr = E.probe("127.0.0.1", self.port, timeout=3.0)
+        self.assertTrue(pr["reachable"])
+        self.assertTrue(pr["unauth"])
+        self.assertEqual(pr["version"], "6.8.0")
+        self.assertIn("logs-2024", pr["indices"])
+        self.assertEqual(pr["docs"], 1543)
+        self.assertEqual(pr["status"], "green")
+
+    def test_findings_and_prove(self):
+        from recce import elasticsearch as E, proofs
+        pr = E.probe("127.0.0.1", self.port, timeout=3.0)
+        h = Host(ip="10.0.9.8", ports=[Port(portid=9200, service="http", state="open")])
+        fs = E.findings([h], {("10.0.9.8", 9200): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("Elasticsearch exposed without authentication", titles)
+        self.assertIn("Elasticsearch end-of-life", titles)     # 6.8 < 7
+        h.vulns = E.findings_to_vulns(fs)["10.0.9.8"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_cmd_elasticsearch_end_to_end(self):
+        from recce import cli, xlsx, elasticsearch as E
+        from recce.store import Store
+        orig = E.is_elasticsearch
+        E.is_elasticsearch = lambda p: (p.state == "open"
+                                        and (p.portid == self.port or orig(p)))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="http")]))
+                st.close()
+                self.assertEqual(cli.main(["elasticsearch", "-o", out]), 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("Elasticsearch", sheets)
+                vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+                self.assertIn("Elasticsearch", vtxt)
+        finally:
+            E.is_elasticsearch = orig
+
+
+class RsyncTest(unittest.TestCase):
+    """Deep rsync module: a mock rsync daemon (@RSYNCD greeting, #list, per-module
+    OK/AUTHREQD), anonymous-access detection, findings, prove, `recce rsync`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import threading
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(3.0)
+                sock.sendall(b"@RSYNCD: 31.0\n")
+                # Read the client's version echo + the request line.
+                buf = b""
+                while buf.count(b"\n") < 2:
+                    try:
+                        c = sock.recv(256)
+                    except OSError:
+                        return
+                    if not c:
+                        return
+                    buf += c
+                lines = buf.decode().split("\n")
+                req = lines[1] if len(lines) > 1 else ""
+                if req == "#list":
+                    sock.sendall(b"backups\tnightly server backups\n")
+                    sock.sendall(b"public\tanonymous share\n")
+                    sock.sendall(b"secret\trestricted\n")
+                    sock.sendall(b"@RSYNCD: EXIT\n")
+                elif req == "secret":
+                    sock.sendall(b"@RSYNCD: AUTHREQD abcdef\n")
+                else:                                   # backups / public: anonymous OK
+                    sock.sendall(b"@RSYNCD: OK\n")
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_list_and_access(self):
+        from recce import rsync as R
+        pr = R.list_modules("127.0.0.1", self.port, timeout=3.0)
+        self.assertTrue(pr["reachable"])
+        self.assertEqual([m["name"] for m in pr["modules"]],
+                         ["backups", "public", "secret"])
+        self.assertEqual(R.probe_module("127.0.0.1", self.port, "backups", 3.0), "open")
+        self.assertEqual(R.probe_module("127.0.0.1", self.port, "secret", 3.0), "auth")
+
+    def test_findings_and_prove(self):
+        from recce import rsync as R, proofs
+        analysis = R.analyze([Host(ip="127.0.0.1",
+                                   ports=[Port(portid=self.port, state="open",
+                                               service="rsync")])], active=True)
+        # is_rsync gates on port 873; drive findings directly off the probe instead.
+        pr = {("10.0.8.8", 873): R.list_modules("127.0.0.1", self.port, 3.0)}
+        for m in pr[("10.0.8.8", 873)]["modules"]:
+            m["access"] = R.probe_module("127.0.0.1", self.port, m["name"], 3.0)
+        h = Host(ip="10.0.8.8", ports=[Port(portid=873, service="rsync", state="open")])
+        fs = R.findings([h], pr)
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("rsync module readable without authentication", titles)
+        self.assertIn("rsync modules enumerable", titles)
+        h.vulns = R.findings_to_vulns(fs)["10.0.8.8"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_cmd_rsync_end_to_end(self):
+        from recce import cli, xlsx, rsync as R
+        from recce.store import Store
+        orig = R.is_rsync
+        R.is_rsync = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="rsync")]))
+                st.close()
+                self.assertEqual(cli.main(["rsync", "-o", out]), 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("rsync", sheets)
+                vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+                self.assertIn("rsync", vtxt)
+        finally:
+            R.is_rsync = orig
+
+
+class NfsTest(unittest.TestCase):
+    """Deep NFS module: a mock ONC RPC server (portmapper DUMP + mountd EXPORT over
+    record marking), world-export detection, findings, prove, `recce nfs`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import struct
+        import threading
+        from recce import nfs as N
+
+        def xstr(s):
+            b = s.encode()
+            return struct.pack(">I", len(b)) + b + b"\x00" * ((4 - len(b) % 4) % 4)
+
+        def reply(xid, results):
+            body = (struct.pack(">III", xid, 1, 0)      # xid, REPLY, MSG_ACCEPTED
+                    + struct.pack(">II", 0, 0)          # verf AUTH_NULL
+                    + struct.pack(">I", 0)              # accept_stat SUCCESS
+                    + results)
+            return struct.pack(">I", 0x80000000 | len(body)) + body
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(3.0)
+                rec = N._recv_record(sock, 3.0)
+                if rec is None:
+                    return
+                xid, mtype, rpcvers, prog, vers, proc = struct.unpack_from(">IIIIII", rec, 0)
+                myport = self.server.server_address[1]
+                if prog == N._PMAP_PROG and proc == 4:          # portmap DUMP
+                    res = b""
+                    for pr, ve, po in ((N._MOUNT_PROG, 3, myport),
+                                       (N._NFS_PROG, 3, 2049)):
+                        res += struct.pack(">IIIII", 1, pr, ve, N._IPPROTO_TCP, po)
+                    res += struct.pack(">I", 0)
+                    sock.sendall(reply(xid, res))
+                elif prog == N._MOUNT_PROG and proc == 5:       # mountd EXPORT
+                    res = b""
+                    res += struct.pack(">I", 1) + xstr("/srv/backups") \
+                        + struct.pack(">I", 1) + xstr("*") + struct.pack(">I", 0)
+                    res += struct.pack(">I", 1) + xstr("/home") \
+                        + struct.pack(">I", 1) + xstr("10.0.0.0/24") + struct.pack(">I", 0)
+                    res += struct.pack(">I", 0)
+                    sock.sendall(reply(xid, res))
+                else:
+                    sock.sendall(reply(xid, b""))
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_probe_lists_exports(self):
+        from recce import nfs as N
+        pr = N.probe("127.0.0.1", timeout=3.0, pmport=self.port)
+        self.assertTrue(pr["reachable"])
+        self.assertTrue(pr["nfs"])
+        dirs = [e["dir"] for e in pr["exports"]]
+        self.assertEqual(dirs, ["/srv/backups", "/home"])
+        self.assertTrue(N._is_world(pr["exports"][0]["groups"]))     # '*'
+        self.assertFalse(N._is_world(pr["exports"][1]["groups"]))    # subnet
+
+    def test_is_world_scoped_wildcard_not_world(self):
+        # Regression (audit): a scoped wildcard is a domain restriction, NOT everyone.
+        from recce import nfs as N
+        self.assertTrue(N._is_world([]))                             # no restriction
+        self.assertTrue(N._is_world(["*"]))                          # bare wildcard
+        self.assertTrue(N._is_world(["(everyone)"]))
+        self.assertFalse(N._is_world(["*.corp.example.com"]))        # domain-scoped
+        self.assertFalse(N._is_world(["10.0.0.0/8"]))
+
+    def test_recv_record_bounds_hostile_fragments(self):
+        # Regression (audit): a never-last fragment stream must terminate, not hang.
+        from recce import nfs as N
+        import io
+        class _FakeSock:
+            def __init__(self):
+                self.n = 0
+            def settimeout(self, t):
+                pass
+            def recv(self, n):
+                # Always a non-last 4-byte fragment header + 4 bytes of body.
+                self.n += 1
+                return b"\x00\x00\x00\x04" if self.n % 2 else b"AAAA"
+        self.assertIsNone(N._recv_record(_FakeSock(), 1.0))          # bounded -> None
+
+    def test_findings_and_prove(self):
+        from recce import nfs as N, proofs
+        pr = {"10.0.8.9": N.probe("127.0.0.1", timeout=3.0, pmport=self.port)}
+        h = Host(ip="10.0.8.9", ports=[Port(portid=2049, service="nfs", state="open"),
+                                       Port(portid=111, service="rpcbind", state="open")])
+        fs = N.findings([h], pr)
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("NFS export shared to any host", titles)
+        self.assertIn("NFS exports enumerable", titles)
+        h.vulns = N.findings_to_vulns(fs)["10.0.8.9"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_rpc_reply_framing(self):
+        from recce import nfs as N
+        import struct
+        body = struct.pack(">III", 0x1003, 1, 0) + struct.pack(">II", 0, 0) \
+            + struct.pack(">I", 0) + b"payload!!"
+        self.assertEqual(N._parse_reply(body, 0x1003), b"payload!!")
+        self.assertIsNone(N._parse_reply(body, 0x9999))          # wrong xid
+
+
+class KerberosTest(unittest.TestCase):
+    """Credential-less AD roasting: DER round-trip, a mock KDC (AS-REP for a
+    pre-auth-disabled user, KRB-ERROR otherwise), roast/enum classification,
+    findings, prove, `recce kerberos`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import struct
+        import threading
+        from recce import kerberos as K
+
+        def asrep():
+            cipher = bytes(range(40))                   # 16 checksum + 24 edata
+            enc = K._seq(K._ctx(0, K._int(23)), K._ctx(2, K._tlv(0x04, cipher)))
+            return K._tlv(0x6B, K._seq(
+                K._ctx(3, K._gstr("CORP.LOCAL")),
+                K._ctx(4, K._principal(1, ["svc_roast"])),
+                K._ctx(6, enc)))
+
+        def krberr(code):
+            return K._tlv(0x7E, K._seq(K._ctx(6, K._int(code))))
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(3.0)
+                hdr = K._recvn(sock, 4, 3.0)
+                if hdr is None:
+                    return
+                n = struct.unpack(">I", hdr)[0]
+                req = K._recvn(sock, n, 3.0) or b""
+                if b"svc_roast" in req:
+                    resp = asrep()
+                elif b"jdoe" in req:
+                    resp = krberr(K.KDC_ERR_PREAUTH_REQUIRED)     # 25 = valid
+                else:
+                    resp = krberr(K.KDC_ERR_PRINCIPAL_UNKNOWN)    # 6 = unknown
+                sock.sendall(struct.pack(">I", len(resp)) + resp)
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls._orig_port = K._PORT
+        K._PORT = cls.port                              # roast connects here, not 88
+
+    @classmethod
+    def tearDownClass(cls):
+        from recce import kerberos as K
+        K._PORT = cls._orig_port
+        cls.srv.shutdown()
+
+    def test_der_roundtrip(self):
+        from recce import kerberos as K
+        err = K._tlv(0x7E, K._seq(K._ctx(6, K._int(25))))
+        self.assertEqual(K.parse_response(err), {"type": "error", "code": 25})
+        cipher = bytes(range(40))
+        enc = K._seq(K._ctx(0, K._int(23)), K._ctx(2, K._tlv(0x04, cipher)))
+        rep = K._tlv(0x6B, K._seq(K._ctx(3, K._gstr("CORP.LOCAL")),
+                                  K._ctx(4, K._principal(1, ["jdoe"])),
+                                  K._ctx(6, enc)))
+        r = K.parse_response(rep)
+        self.assertEqual((r["type"], r["user"], r["etype"]), ("asrep", "jdoe", 23))
+        self.assertTrue(K.asrep_hash("jdoe", "CORP.LOCAL", 23, cipher)
+                        .startswith("$krb5asrep$23$jdoe@CORP.LOCAL:"))
+
+    def test_roast_classification(self):
+        from recce import kerberos as K
+        self.assertEqual(K.roast_user("127.0.0.1", "CORP.LOCAL", "svc_roast")["state"],
+                         "roastable")
+        self.assertEqual(K.roast_user("127.0.0.1", "CORP.LOCAL", "jdoe")["state"],
+                         "valid")
+        self.assertEqual(K.roast_user("127.0.0.1", "CORP.LOCAL", "ghost")["state"],
+                         "unknown_user")
+
+    def test_findings_and_prove(self):
+        from recce import kerberos as K, proofs
+        analysis = K.analyze(
+            [Host(ip="127.0.0.1", state="up", up_reason="syn-ack",
+                  ports=[Port(portid=self.port, state="open", service="kerberos")])],
+            users=["svc_roast", "jdoe", "ghost"], realm="CORP.LOCAL",
+            dc_ip="127.0.0.1", privileged={"svc_roast"})
+        titles = " ".join(f["title"] for f in analysis["findings"])
+        self.assertIn("AS-REP roastable account", titles)
+        self.assertIn("Kerberos username enumeration", titles)
+        h = Host(ip="127.0.0.1",
+                 ports=[Port(portid=88, service="kerberos", state="open")])
+        h.vulns = K.findings_to_vulns(analysis["findings"])["127.0.0.1"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_cmd_kerberos_end_to_end(self):
+        from recce import cli, xlsx, kerberos as K
+        from recce.models import Account
+        from recce.store import Store
+        orig = K.is_kerberos
+        K.is_kerberos = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(
+                    ip="127.0.0.1", state="up", up_reason="syn-ack",
+                    ports=[Port(portid=self.port, state="open", service="kerberos")],
+                    accounts=[Account(ip="127.0.0.1", source="ldap", kind="user",
+                                      name="svc_roast"),
+                              Account(ip="127.0.0.1", source="ldap", kind="user",
+                                      name="jdoe")]))
+                st.close()
+                rc = cli.main(["kerberos", "-d", "CORP.LOCAL", "-o", out])
+                self.assertEqual(rc, 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("Kerberos", sheets)
+                vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+                self.assertIn("roastable", vtxt.lower())
+        finally:
+            K.is_kerberos = orig
+
+
+class SvcProbeTest(unittest.TestCase):
+    """The shared sequential-probe driver: wall-clock budget, per-target progress,
+    and clean partial results on Ctrl-C."""
+
+    def test_budget_stops_early_with_partial(self):
+        import time
+        from recce import svcprobe as S
+        targets = [{"ip": f"10.0.0.{i}"} for i in range(20)]
+        st = {}
+        got = [r for _, r in S.iter_probe(
+            targets, lambda t: (time.sleep(0.03) or t["ip"]),
+            budget=0.1, state=st)]
+        self.assertEqual(st["stopped"], "budget")
+        self.assertLess(len(got), 20)                    # stopped early
+        self.assertEqual(st["done"], len(got))           # bookkeeping matches
+
+    def test_keyboardinterrupt_yields_partial(self):
+        from recce import svcprobe as S
+        targets = [{"ip": f"10.0.0.{i}"} for i in range(10)]
+
+        def probe(t):
+            if t["ip"] == "10.0.0.4":
+                raise KeyboardInterrupt
+            return t["ip"]
+        st = {}
+        got = [r for _, r in S.iter_probe(targets, probe, state=st)]
+        self.assertEqual(st["stopped"], "interrupt")
+        self.assertEqual(got, [f"10.0.0.{i}" for i in range(4)])   # 4 completed
+
+    def test_progress_fires_and_completes(self):
+        from recce import svcprobe as S
+        targets = [{"ip": f"10.0.0.{i}"} for i in range(5)]
+        seen = []
+        st = {}
+        out = [r for _, r in S.iter_probe(
+            targets, lambda t: t["ip"],
+            progress=lambda i, n, t: seen.append((i, n)), state=st)]
+        self.assertEqual(out, [f"10.0.0.{i}" for i in range(5)])
+        self.assertEqual(seen, [(i, 5) for i in range(1, 6)])
+        self.assertIsNone(st["stopped"])                 # ran to completion
+
+    def test_progress_exception_never_breaks_the_loop(self):
+        from recce import svcprobe as S
+        def boom(i, n, t):
+            raise ValueError("progress must never break a scan")
+        out = [r for _, r in S.iter_probe(
+            [{"ip": "1.1.1.1"}], lambda t: "ok", progress=boom)]
+        self.assertEqual(out, ["ok"])
+
+
 class DiscoveryReconfirmTest(unittest.TestCase):
     """False-negative hardening: the discovery probe set, and the reconfirm re-probe
     that recovers firewalled hosts which block ping but answer a port scan."""
