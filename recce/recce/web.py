@@ -1128,7 +1128,37 @@ def _traversal_via(ip: str, port: Port, where: str, param: str, send) -> list[Vu
     return []
 
 
-_SKIP_FORM_ACTION = re.compile(r"delete|remove|destroy|drop|logout|signout|purge|reset", re.I)
+# A form is NOT auto-submitted when its action verb OR one of its fields signals a real
+# side effect (state change / transaction / content post / file upload). Submitting such
+# a form with junk values could delete data, place an order, send mail, invite users,
+# etc. Login/search/filter/generic forms (where injection actually lives) stay fuzzable.
+_SKIP_FORM_ACTION = re.compile(
+    r"delete|remove|destroy|\bdrop\b|wipe|purge|reset|revoke|disable|deactivate|ban|"
+    r"kick|logout|sign.?out|transfer|pay(ment)?|checkout|order|buy|purchase|invite|"
+    r"subscribe|unsubscribe|register|sign.?up|upload|import|export|\bsend\b|e?mail|"
+    r"message|comment|publish|deploy|exec(ute)?|restart|reboot|shutdown|approve", re.I)
+_SENSITIVE_FIELD = re.compile(
+    r"amount|price|\bqty\b|quantity|total|card|cvv|cvc|iban|swift|routing|account|"
+    r"recipient|payee|e?mail|phone|mobile|\bssn\b|\bdob\b|message|subject|\bbody\b|"
+    r"comment|content|\botp\b|\bpin\b|upload|attachment", re.I)
+
+
+def _form_risk(form: dict, allow_risky: bool = False) -> str:
+    """Reason this form should NOT be auto-submitted during fuzzing (side-effect risk),
+    or '' if it is safe to fuzz. A file-upload form is never auto-submitted. With
+    allow_risky the state-change/transaction guards are relaxed (uploads still skipped)."""
+    for name, itype in form.get("fields") or []:
+        if itype == "file":
+            return f"has a file-upload field '{name}'"
+    if allow_risky:
+        return ""
+    action = form.get("action", "")
+    if _SKIP_FORM_ACTION.search(action):
+        return f"action '{action[:60]}' looks state-changing"
+    for name, _itype in form.get("fields") or []:
+        if _SENSITIVE_FIELD.search(name):
+            return f"has a sensitive/transactional field '{name}'"
+    return ""
 
 
 def _crawl_findings(ip: str, port: Port, cres: dict) -> list[Vuln]:
@@ -1160,11 +1190,14 @@ def _inject_param(ip, port, where, param, send, sqli, time_based):
 
 
 def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
-               time_based: bool = False) -> tuple[int, int]:
+               time_based: bool = False, fuzz_risky: bool = False) -> tuple[int, int]:
     """Crawl every web endpoint (authenticated if auth is set), test discovered GET
     params AND form fields for reflection/SSTI, SQL injection, open redirect and path
     traversal, and flag risky forms. `time_based` opts into the slower time-blind SQLi
-    probe. Returns (pages_crawled, findings_added)."""
+    probe. Forms whose action/fields signal a real side effect (delete / pay / send /
+    upload / ...) are NOT submitted - they're recorded so the operator tests them by
+    hand; `fuzz_risky=True` relaxes that (file uploads are still never submitted).
+    Returns (pages_crawled, findings_added)."""
     existing = {v.key for v in host.vulns}
     pages = added = 0
     for port in host.open_ports:
@@ -1175,7 +1208,7 @@ def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
         fs = _crawl_findings(host.ip, port, cres)
         budget = 24                        # cap injectable targets per endpoint
 
-        # Discovered GET query params.
+        # Discovered GET query params (idempotent - always safe to fuzz).
         for pth, prm in cres["params"]:
             if budget <= 0:
                 break
@@ -1184,11 +1217,15 @@ def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
                                 send, sqli, time_based)
             budget -= 1
 
-        # Form fields (POST/GET bodies) - skip obviously destructive forms.
+        # Form fields (POST/GET bodies). Skip forms that would cause a side effect,
+        # and record them so nothing is silently untested.
+        skipped: list[str] = []
         for form in (cres["forms"] or [])[:6]:
-            if _SKIP_FORM_ACTION.search(form.get("action", "")):
-                continue
+            risk = _form_risk(form, allow_risky=fuzz_risky)
             where_base = f"form {(form.get('method') or 'get').upper()} {form['action']}"
+            if risk:
+                skipped.append(f"{where_base} ({risk})")
+                continue
             for prm in _fuzzable_fields(form):
                 if budget <= 0:
                     break
@@ -1196,6 +1233,14 @@ def scan_crawl(host: Host, auth: dict | None = None, sqli: bool = True,
                 fs += _inject_param(host.ip, port, f"field '{prm}' of {where_base}", prm,
                                     send, sqli, time_based)
                 budget -= 1
+        if skipped:
+            fs.append(_mk(host.ip, port, "web-form-unfuzzed", "info",
+                          "Form(s) not auto-fuzzed (side-effect risk) - test by hand",
+                          ["CWE-200"],
+                          "recce did NOT submit these forms to avoid side effects; review "
+                          "them manually (or re-run --crawl --fuzz-risky-forms on a "
+                          "throwaway target):\n  " + "\n  ".join(skipped[:12]),
+                          "N/A - operator note.", confidence="potential"))
 
         for v in fs:
             if v.key in existing:

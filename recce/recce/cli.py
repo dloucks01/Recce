@@ -28,7 +28,7 @@ from .models import Host
 from .report_excel import read_workbook_edits, update_workbook
 from .report_markdown import build_csv, build_markdown
 from .store import Store, StoreError
-from .targets import apply_exclusions, ip_matcher, load_targets
+from .targets import apply_exclusions, expand_excludes, ip_matcher, load_targets
 
 BANNER = r"""
   ____  _____ ____ ____ _____
@@ -379,6 +379,8 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.reliable = True
     if g("udp_top"):
         profile.udp_top = args.udp_top
+    if g("no_udp"):
+        profile.udp_basic = False
     if g("masscan") or g("fast"):
         profile.scanner = "masscan"
     if g("offline"):
@@ -560,6 +562,19 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     # names, if any, come first) so the host is labelled even when it answered nothing.
     if provided_name:
         host.hostnames = list(dict.fromkeys(host.hostnames + [provided_name]))
+    # Basic UDP sweep: a TCP-only scan misses DNS/SNMP/NTP/IKE/TFTP/NetBIOS/... Fold any
+    # open UDP services into the host. Runs in the per-host nmap path only (not the fast
+    # masscan sweep, where UDP stays opt-in via --udp-top).
+    if profile.udp_basic and port_map is None and not truncated:
+        udp_xml = os.path.join(paths["raw"], f"{ip}_udp_basic.xml")
+        _, uiss = scanner.udp_basic_scan(ip, udp_xml, profile)
+        if uiss:
+            issues.append(_mkissue(uiss, "udp-basic"))
+        uhost = next((h for h in np.parse_nmap_xml(udp_xml) if h.ip == ip), None)
+        if uhost is not None:
+            have = {(p.protocol, p.portid) for p in host.ports}
+            host.ports.extend(p for p in uhost.ports
+                              if (p.protocol, p.portid) not in have)
     # Recover the services nmap left as unknown/blank: mine its kept fingerprint,
     # fall back to the curated port map, then a stdlib banner grab (active) - so a
     # port like 5040 becomes 'Windows CDPSvc', not a dead 'unknown'.
@@ -636,7 +651,23 @@ def _discover(args, profile, store, paths):
         print(f"[x] Invalid targets: {e}\n    Fix the IP / range / CIDR / @file "
               "and re-run.")
         return None, [], None, None, {}
-    hosts = apply_exclusions(hosts, args.exclude or [])
+    # Exclusions: expand this run's --exclude (IPs / ranges / CIDRs / @file), MERGE with
+    # any persisted from a prior run, and persist the union - so once an IP is excluded
+    # it stays out of scope on every later phase/re-run without re-typing it.
+    try:
+        run_excl = expand_excludes(args.exclude or [])
+    except (ValueError, OSError) as e:
+        print(f"[x] Invalid --exclude: {e}")
+        return None, [], None, None, {}
+    stored_excl = set(json.loads(store.get_meta("excludes") or "[]"))
+    excluded = run_excl | stored_excl
+    if excluded != stored_excl:
+        store.set_meta("excludes", json.dumps(sorted(excluded)))
+    before = len(hosts)
+    hosts = [h for h in hosts if h not in excluded]
+    if before != len(hosts):
+        print(f"[+] Excluded {before - len(hosts)} host(s) from scope "
+              f"({len(excluded)} IP(s) on the exclusion list).")
     if not hosts:
         print("[x] No targets after expansion/exclusion.")
         return None, [], None, None, {}
@@ -1557,11 +1588,13 @@ def cmd_web(args: argparse.Namespace) -> int:
     creds = getattr(args, "creds", False)
     do_crawl = getattr(args, "crawl", False)
     sqli_time = getattr(args, "sqli_time", False)
+    fuzz_risky = getattr(args, "fuzz_risky_forms", False)
 
     def _scan(h):
         profiles = web.scan_host(h, active, auth, creds)
         if do_crawl:
-            pages, added = web.scan_crawl(h, auth, time_based=sqli_time)
+            pages, added = web.scan_crawl(h, auth, time_based=sqli_time,
+                                          fuzz_risky=fuzz_risky)
             print(f"    [{h.ip}] crawled {pages} page(s), +{added} finding(s)")
         return profiles
 
@@ -4090,7 +4123,10 @@ def _add_discovery(pp) -> None:
                     help="go fast: masscan network-wide sweep instead of per-host "
                          "nmap (and, in `scan`, top-signal vuln scripts only)")
     g = pp.add_argument_group("scan tuning (optional)")
-    g.add_argument("--exclude", nargs="*", help="hosts/CIDRs to exclude")
+    g.add_argument("--exclude", nargs="*", metavar="IP|CIDR|RANGE|@file",
+                   help="hosts to keep OUT of scope: IPs / ranges / CIDRs, or @file "
+                        "(one per line). Persisted to the engagement - once excluded, an "
+                        "IP stays out of scope on every later phase/re-run.")
     g.add_argument("--masscan", action="store_true", help="use masscan for port sweep")
     g.add_argument("--all-ports", action="store_true",
                    help="force the full 65535-port TCP sweep, overriding the profile "
@@ -4145,7 +4181,10 @@ def _add_vuln_opts(pp) -> None:
                    help="skip the active stdlib probes (HTTP-header / TLS "
                         "enrichment + the service-detection banner grabs); the free "
                         "passive naming (servicefp mining + curated port map) stays on")
-    g.add_argument("--udp-top", type=int, help="also scan top-N UDP ports")
+    g.add_argument("--udp-top", type=int, help="also scan top-N UDP ports (vulns phase)")
+    g.add_argument("--no-udp", action="store_true",
+                   help="skip the enum-phase basic-UDP sweep (DNS/SNMP/NTP/IKE/TFTP/"
+                        "NetBIOS/...). The sweep needs root; it auto-skips otherwise.")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -4343,6 +4382,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     wb.add_argument("--sqli-time", action="store_true",
                     help="with --crawl, also run the slower TIME-based blind SQLi probe "
                          "(sends deliberate DB sleeps; confirms by scaling the delay)")
+    wb.add_argument("--fuzz-risky-forms", action="store_true",
+                    help="with --crawl, ALSO submit forms whose action/fields signal a "
+                         "side effect (delete / pay / send / post / ...). Off by default "
+                         "- those forms are recorded, not submitted. File uploads are "
+                         "never submitted. Use only on a throwaway/dev target.")
     wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.
