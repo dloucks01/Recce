@@ -32,6 +32,10 @@ class ScanProfile:
     ad_enrich: bool = True            # SMB / LDAP NSE scripts (enum phase)
     deep_enum: bool = True            # service-aware deep enum scripts (enum phase)
     udp_top: int = 0                  # >0 -> also scan N top UDP ports (vulns phase)
+    udp_basic: bool = True            # enum phase: sweep a curated set of high-value
+                                      # UDP ports (DNS/SNMP/NTP/IKE/TFTP/NetBIOS/...) so
+                                      # UDP services aren't missed by the TCP-only sweep
+                                      # (needs root; skipped with a warning otherwise)
     ping_discovery: bool = True       # discovery; False => treat all as up (-Pn)
     assume_up: bool = False           # -Pn / discovery fell back: scanning dead IPs
                                       # too, so fail faster on non-responders
@@ -682,6 +686,29 @@ def reprobe_services(ip: str, ports: list[int], out_xml: str,
     ]
     outcome = _run(cmd, timeout=kill)
     return out_xml, _issue_from(outcome, out_xml, "reprobe", profile.host_timeout)
+
+
+# High-value UDP services a TCP-only sweep misses. Kept small so the enum-phase sweep
+# stays fast: DNS, DHCP, TFTP, NTP, NetBIOS, SNMP(+trap), IKE/VPN, syslog, RIP, IPMI,
+# MSSQL browser, SIP, SSDP/UPnP, IPsec NAT-T, mDNS.
+_UDP_BASIC_PORTS = "53,67,69,123,137,138,161,162,500,514,520,623,1434,1900,4500,5060,5353"
+
+
+def udp_basic_scan(ip: str, out_xml: str, profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Enum-phase sweep of a curated set of high-value UDP ports with service detection
+    and the cheap SNMP/DNS/NTP/NetBIOS/IKE scripts, so UDP services show up in the main
+    enumeration instead of only under `thorough`. Needs root (raw UDP)."""
+    if not _is_root():
+        return _empty_xml(out_xml), ScanIssue(
+            "warning", "udp-basic: skipped (needs root/CAP_NET_RAW for raw UDP); "
+            "run with sudo, or use --udp-top in the vulns phase")
+    to_args, kill = _timeout_args(profile)
+    outcome = _run(["nmap", "-sU", "-sV", "-Pn", "-n", "-p", _UDP_BASIC_PORTS, "--open",
+                    f"-T{profile.timing}",
+                    "--script", "snmp-info,dns-nsid,ntp-info,nbstat,ike-version",
+                    "--script-timeout", "60s", *to_args, ip, "-oX", out_xml],
+                   timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "udp-basic", profile.host_timeout)
 
 
 def udp_scan(ip: str, out_xml: str, profile: ScanProfile) -> tuple[str, ScanIssue | None]:

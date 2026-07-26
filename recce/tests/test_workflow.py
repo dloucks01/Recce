@@ -1355,9 +1355,16 @@ class UsabilityAndDiscoveryTest(unittest.TestCase):
         def enum(ip, ports, out, profile, creds=None):
             return fps(ip, out, profile)
 
-        saved = (s.check_environment, s.discover_hosts, s.full_port_scan, s.enum_scan)
+        def empty_udp(ip, out, profile):
+            with open(out, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun></nmaprun>')
+            return out, None
+
+        saved = (s.check_environment, s.discover_hosts, s.full_port_scan, s.enum_scan,
+                 s.udp_basic_scan)
         s.check_environment = lambda p: []
         s.discover_hosts, s.full_port_scan, s.enum_scan = empty_disc, fps, enum
+        s.udp_basic_scan = empty_udp
         try:
             with tempfile.TemporaryDirectory() as d:
                 buf = io.StringIO()
@@ -1372,7 +1379,7 @@ class UsabilityAndDiscoveryTest(unittest.TestCase):
                 self.assertTrue(all(h.open_ports for h in hosts))
         finally:
             (s.check_environment, s.discover_hosts,
-             s.full_port_scan, s.enum_scan) = saved
+             s.full_port_scan, s.enum_scan, s.udp_basic_scan) = saved
 
 
 class PhaseIdempotencyTest(unittest.TestCase):
@@ -2191,24 +2198,24 @@ class EnumRobustnessTest(unittest.TestCase):
             self.addCleanup(shutil.rmtree, d, ignore_errors=True)
             paths = {"raw": d}
             # discovered-live 0-port host -> verified
-            cli._enum_worker("1.2.3.4", scanner.ScanProfile(ping_discovery=True),
-                             paths, None, None, {})
+            cli._enum_worker("1.2.3.4", scanner.ScanProfile(ping_discovery=True,
+                             udp_basic=False), paths, None, None, {})
             self.assertEqual(calls["verify"], 1)
             # -Pn (assume-up) without --verify-all -> NOT re-scanning every dead IP
             calls["verify"] = 0
             cli._enum_worker("1.2.3.5",
-                             scanner.ScanProfile(ping_discovery=False, verify_all=False),
+                             scanner.ScanProfile(ping_discovery=False, verify_all=False, udp_basic=False),
                              paths, None, None, {})
             self.assertEqual(calls["verify"], 0)
             # -Pn WITH --verify-all -> verified
             cli._enum_worker("1.2.3.6",
-                             scanner.ScanProfile(ping_discovery=False, verify_all=True),
+                             scanner.ScanProfile(ping_discovery=False, verify_all=True, udp_basic=False),
                              paths, None, None, {})
             self.assertEqual(calls["verify"], 1)
             # verify disabled -> never
             calls["verify"] = 0
             cli._enum_worker("1.2.3.7",
-                             scanner.ScanProfile(ping_discovery=True, verify=False),
+                             scanner.ScanProfile(ping_discovery=True, verify=False, udp_basic=False),
                              paths, None, None, {})
             self.assertEqual(calls["verify"], 0)
         finally:

@@ -67,6 +67,21 @@ class TargetsTest(unittest.TestCase):
         hosts, _, _ = load_targets(["10.200.37.0"])
         self.assertEqual(hosts, ["10.200.37.0"])
 
+    def test_exclude_accepts_ips_cidrs_and_file(self):
+        from recce.targets import apply_exclusions, expand_excludes
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "ex.txt")
+            with open(f, "w") as fh:
+                fh.write("10.0.0.9 badbox\n10.0.0.16/30\n# note\n")
+            ex = expand_excludes(["10.0.0.5", "@" + f, "192.168.1.1"])
+        self.assertIn("10.0.0.5", ex)
+        self.assertIn("10.0.0.9", ex)          # IP from an 'IP hostname' file line
+        self.assertIn("10.0.0.17", ex)         # from the CIDR in the file
+        self.assertIn("192.168.1.1", ex)
+        kept = apply_exclusions(["10.0.0.5", "10.0.0.6", "192.168.1.1"],
+                                ["10.0.0.5", "192.168.1.1"])
+        self.assertEqual(kept, ["10.0.0.6"])
+
     def test_file_parses_ip_hostname_pairs(self):
         # An authoritative @file may carry IP+hostname (space / comma / tab / hosts-
         # file style); the name is captured and the IP is still the scan target.
@@ -1911,7 +1926,8 @@ class HostUpCertaintyTest(unittest.TestCase):
         cli.np.parse_nmap_xml = fake_parse
         try:
             with tempfile.TemporaryDirectory() as d:
-                prof = scanner.ScanProfile(ping_discovery=False, assume_up=True)
+                prof = scanner.ScanProfile(ping_discovery=False, assume_up=True,
+                                           udp_basic=False)
                 host, _ = cli._enum_worker("10.0.0.9", prof, {"raw": d}, None, None,
                                            {"10.0.0.9": "10.0.0.0/24"})
             self.assertEqual(udp_calls["n"], 1)            # UDP fallback fired
@@ -1940,7 +1956,7 @@ class HostUpCertaintyTest(unittest.TestCase):
         cli.np.parse_nmap_xml = lambda path: []
         try:
             with tempfile.TemporaryDirectory() as d:
-                prof = scanner.ScanProfile(ping_discovery=True)
+                prof = scanner.ScanProfile(ping_discovery=True, udp_basic=False)
                 host, _ = cli._enum_worker("10.0.0.9", prof, {"raw": d}, None, None,
                                            {"10.0.0.9": "10.0.0.0/24"},
                                            disc_reason="echo-reply")
@@ -3644,6 +3660,38 @@ class WebSqliTest(unittest.TestCase):
         send = web._make_sender("127.0.0.1", self._port(), "get", "/dyn", "id", None)
         fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /dyn", send)
         self.assertEqual(fs, [])            # a page that changes every request must not FP
+
+    def test_form_risk_classifier_skips_side_effecting_forms(self):
+        from recce import web
+
+        def form(action, fields):
+            return {"action": action, "method": "post", "inputs": [f[0] for f in fields],
+                    "fields": fields}
+        # State-changing / transactional / content / upload -> not submitted.
+        self.assertTrue(web._form_risk(form("/account/delete", [("id", "text")])))
+        self.assertTrue(web._form_risk(form("/checkout", [("card", "text")])))
+        self.assertTrue(web._form_risk(form("/contact", [("email", "text"),
+                                                         ("message", "textarea")])))
+        upload = form("/profile", [("avatar", "file")])
+        self.assertTrue(web._form_risk(upload))
+        self.assertTrue(web._form_risk(upload, allow_risky=True))   # uploads NEVER submitted
+        # --fuzz-risky-forms relaxes the state-change/transaction guards.
+        self.assertFalse(web._form_risk(form("/account/delete", [("id", "text")]),
+                                        allow_risky=True))
+        # Login / search forms (where injection lives) stay fuzzable by default.
+        self.assertFalse(web._form_risk(form("/login", [("user", "text"), ("pw", "password")])))
+        self.assertFalse(web._form_risk(form("/search", [("q", "text")])))
+
+    def test_risky_form_is_recorded_not_submitted(self):
+        from recce import web
+        # scan_crawl over the mock root, whose forms include /account/delete.
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        web.scan_crawl(h)
+        sids = {v.script_id for v in h.vulns}
+        self.assertIn("web-form-unfuzzed", sids)         # the delete form was recorded
+        note = next(v for v in h.vulns if v.script_id == "web-form-unfuzzed")
+        self.assertIn("/account/delete", note.output)
+        self.assertFalse(WebSqliTest.hit_delete)         # and never actually submitted
 
     def test_form_field_fuzzing_via_scan_crawl(self):
         from recce import web
@@ -7723,6 +7771,27 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         # A single dropped probe shouldn't lose a host -> at least 2 retries.
         self.assertIn("--max-retries", seen["cmd"])
         self.assertEqual(seen["cmd"][seen["cmd"].index("--max-retries") + 1], "2")
+
+    def test_udp_basic_scan_command(self):
+        from recce import scanner
+        seen = {}
+        orig_run, orig_root = scanner._run, scanner._is_root
+        scanner._is_root = lambda: True          # pretend root so it builds the command
+        scanner._run = lambda cmd, timeout=None: (seen.__setitem__("cmd", cmd),
+                                                 scanner.RunOutcome(returncode=0))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                scanner.udp_basic_scan("10.0.0.5", os.path.join(d, "u.xml"),
+                                       scanner.PROFILES["standard"])
+        finally:
+            scanner._run, scanner._is_root = orig_run, orig_root
+        cmd = " ".join(seen["cmd"])
+        self.assertIn("-sU", seen["cmd"])                     # UDP scan
+        for p in ("53", "161", "123", "500"):                 # DNS/SNMP/NTP/IKE covered
+            self.assertIn(p, scanner._UDP_BASIC_PORTS.split(","))
+        self.assertIn("161", cmd)
+        # Default profile enables the basic UDP sweep.
+        self.assertTrue(scanner.PROFILES["standard"].udp_basic)
 
     def test_reconfirm_command_is_bounded_pn_topports(self):
         from recce import scanner

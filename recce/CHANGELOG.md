@@ -142,6 +142,25 @@ All notable changes to recce are documented here. Dates are UTC.
   to force a full sweep on demand. Combined with the existing host-timeout truncation
   flagging, a scan is never silently narrower than it looks.
 
+- **Engagement-readiness hardening.**
+  - **Basic UDP coverage in the enum phase.** A TCP-only sweep misses UDP services, so
+    `enum` now also sweeps a curated set of high-value UDP ports (DNS, DHCP, TFTP, NTP,
+    NetBIOS, SNMP, IKE/VPN, syslog, IPMI, MSSQL-browser, SIP, SSDP, mDNS) with service
+    detection + the cheap SNMP/DNS/NTP/NBT/IKE scripts, folding any open UDP services
+    into the host. On by default (needs root; auto-skips with a warning otherwise);
+    `--no-udp` to skip. `--udp-top N` still drives the larger vulns-phase UDP scan.
+  - **Exclude IPs from scope, from a file, persistently.** `--exclude` now accepts
+    `@file` (one IP/range/CIDR per line, `IP hostname` lines welcome) alongside inline
+    tokens, and the exclusion set is **persisted to the engagement** — once an IP is
+    excluded it stays out of scope on every later phase/re-run without re-typing.
+  - **Fewer form-fuzzing side effects.** The `--crawl` form fuzzer now refuses to submit
+    a form whose action or fields signal a real side effect — delete/pay/checkout/
+    invite/send/subscribe/upload/… actions, transactional/content fields (amount, card,
+    email, message, …), or any file-upload — and **records** the skipped forms as an
+    info finding so nothing is silently untested. Login/search/generic forms (where
+    injection lives) stay fuzzable. `--fuzz-risky-forms` opts back into submitting
+    state-changing forms on a throwaway target (file uploads are never submitted).
+
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a
   3-tuple after the callers were updated to unpack 4 values, so a bad CIDR / empty

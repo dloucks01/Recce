@@ -156,11 +156,33 @@ def ip_matcher(tokens: list[str]):
     return match
 
 
+def expand_excludes(excludes: list[str]) -> set[str]:
+    """Expand exclusion tokens (IPs / ranges / CIDRs / @files) into a flat IP set.
+    A token beginning with '@' is a file of exclusions, one per line (# comments ok,
+    and an `IP hostname` line contributes just the IP)."""
+    out: set[str] = set()
+    for token in excludes or []:
+        token = token.strip()
+        if not token:
+            continue
+        if token.startswith("@"):
+            path = token[1:]
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Exclusion file not found: {path}")
+            with open(path) as fh:
+                for line in fh:
+                    line = line.split("#", 1)[0].strip()
+                    if line:
+                        target, _ = _split_ip_hostname(line)
+                        out.update(_expand_token(target))
+        else:
+            out.update(_expand_token(token))
+    return out
+
+
 def apply_exclusions(hosts: list[str], excludes: list[str]) -> list[str]:
-    """Remove any hosts covered by the exclusion tokens."""
+    """Remove any hosts covered by the exclusion tokens (IPs / ranges / CIDRs / @file)."""
     if not excludes:
         return hosts
-    excluded: set[str] = set()
-    for token in excludes:
-        excluded.update(_expand_token(token))
+    excluded = expand_excludes(excludes)
     return [h for h in hosts if h not in excluded]

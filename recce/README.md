@@ -953,6 +953,15 @@ Override with `--all-ports`, `--top-ports`, `--no-ad`, `--no-os`, `--min-rate`,
 `--udp-top`, `--version-all`/`--version-intensity N` (service detection), and
 `--host-timeout N` (minutes). (Vuln scanning is its own `vulns` phase, safe-by-default.)
 
+**Basic UDP is scanned in `enum` by default** (needs root): a curated high-value set —
+DNS, DHCP, TFTP, NTP, NetBIOS, SNMP, IKE/VPN, syslog, IPMI, MSSQL-browser, SIP, SSDP,
+mDNS — so a TCP-only sweep doesn't silently miss UDP services. `--no-udp` skips it;
+`--udp-top N` runs the larger UDP scan in the `vulns` phase.
+
+**Scope exclusions** — `--exclude` takes IPs / ranges / CIDRs **or `@file`**, and the
+exclusion set is **persisted to the engagement**: once an IP is excluded it stays out
+of scope on every later phase and re-run without re-typing it.
+
 **Full port scan is the default and it's stated up front.** `standard`/`thorough`
 sweep all 65535 TCP ports (`-p-`); recce prints the port scope when the enum phase
 starts and records it (echoed by `status`). A reduced scan — `quick`, `--top-ports N`,
