@@ -166,14 +166,15 @@ class AdArchitectureSvgTest(unittest.TestCase):
 
 class ReportEmbedTest(unittest.TestCase):
 
-    def test_network_map_in_html_report(self):
+    def test_network_map_in_assets_page(self):
         from recce import report_html
         hosts = [_h("10.0.10.10", ports=[(445, "microsoft-ds")],
                     roles=["Domain Controller"], hostname="dc01")]
         with tempfile.TemporaryDirectory() as d:
-            p = os.path.join(d, "r.html")
-            report_html.build_html(hosts, p, title="Map",
-                                   domains=[Domain(name="corp.local", dc_ips=["10.0.10.10"])])
+            p = os.path.join(d, "assets.html")
+            report_html.build_assets_html(
+                hosts, p, title="Map",
+                domains=[Domain(name="corp.local", dc_ips=["10.0.10.10"])])
             with open(p, encoding="utf-8") as fh:
                 html = fh.read()
         self.assertIn("Network map", html)
