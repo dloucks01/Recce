@@ -299,7 +299,7 @@ class SweepWiringTest(unittest.TestCase):
 
     def test_only_modules_limits_what_runs(self):
         rc, out = self._run_capture(
-            ["sweep", "-o", self.dir, "--only-modules", "web", "smb"])
+            ["sweep", "-o", self.dir, "--no-probe", "--only-modules", "web", "smb"])
         self.assertIn(rc, (0, 1))
         self.assertIn("[SWEEP] web", out)
         self.assertIn("[SWEEP] smb", out)
@@ -310,7 +310,7 @@ class SweepWiringTest(unittest.TestCase):
 
     def test_skip_excludes_modules(self):
         rc, out = self._run_capture(
-            ["sweep", "-o", self.dir, "--skip", "web", "ldap"])
+            ["sweep", "-o", self.dir, "--no-probe", "--skip", "web", "ldap"])
         self.assertIn(rc, (0, 1))
         self.assertNotIn("[SWEEP] web", out)
         self.assertNotIn("[SWEEP] ldap", out)
@@ -324,6 +324,43 @@ class SweepWiringTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("No datastore", out)
         shutil.rmtree(empty, ignore_errors=True)
+
+    def test_sweep_ignores_passed_credentials(self):
+        """Plain `sweep` is the unauthenticated pass: creds are warned about and
+        dropped, never fired as a side-effect of the command."""
+        rc, out = self._run_capture(
+            ["sweep", "-o", self.dir, "--no-probe", "--only-modules", "smb",
+             "-u", "admin", "-p", "pw", "-d", "corp.local"])
+        self.assertIn(rc, (0, 1))
+        self.assertIn("ignoring the credentials", out)
+        self.assertIn("[SWEEP] smb", out)
+
+    def test_credsweep_requires_credentials(self):
+        rc, out = self._run_capture(["credsweep", "-o", self.dir])
+        self.assertEqual(rc, 1)
+        self.assertIn("needs credentials", out)
+
+    def test_credsweep_runs_only_authenticated_modules(self):
+        """credsweep runs the credentialed table (credenum + auth ldap/smb/mssql/ftp)
+        and never the unauth-only modules (web/snmp/mongodb/docker/k8s)."""
+        rc, out = self._run_capture(
+            ["credsweep", "-o", self.dir, "--no-probe", "-u", "admin", "-p", "pw",
+             "-d", "corp.local", "--only-modules", "ldap", "smb"])
+        self.assertIn(rc, (0, 1))
+        self.assertIn("[CREDSWEEP] ldap", out)
+        self.assertIn("[CREDSWEEP] smb", out)
+        self.assertNotIn("web", out.split("Credentialed sweep complete")[0]
+                         .replace("credenum", ""))   # web is not in the auth table
+        self.assertEqual(out.count("Reports written"), 1)
+
+    def test_credsweep_skips_unauth_only_module_names(self):
+        """Asking credsweep for an unauth-only module (mongodb) simply runs nothing
+        from the auth table matching it - it must not crash."""
+        rc, out = self._run_capture(
+            ["credsweep", "-o", self.dir, "--no-probe", "-u", "a", "-p", "b",
+             "--only-modules", "mongodb"])
+        self.assertIn(rc, (0, 1))
+        self.assertIn("ran 0 module(s)", out)
 
 
 if __name__ == "__main__":

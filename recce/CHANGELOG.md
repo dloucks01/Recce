@@ -5,15 +5,22 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
-- **`recce sweep` — one command for the whole post-`enum` deep-enum pass.** Instead of
-  typing `web`, `smb`, `ftp`, `ldap`, `snmp`, `mongodb`, `docker`, `kubernetes` and
-  `mssql` by hand after enum, `sweep` runs every applicable credential-free deep module
-  in one shot. Each self-skips when the datastore has no matching service, so running
-  them all is cheap, and the workbook is rebuilt exactly once at the end (intermediate
-  rebuilds are deferred) instead of once per module. Any creds you pass (`-u/-p/-d`)
-  flow through to the modules that use them; `--vulns` also runs the nmap NSE scan,
-  `--skip`/`--only-modules` narrow the set, `--no-probe` folds passively, and a module
-  that errors is isolated (logged, sweep continues) rather than aborting the run.
+- **`recce sweep` / `recce credsweep` — one command each for the two post-`enum` deep
+  passes.** Instead of typing the deep modules by hand after enum, these run them in
+  one shot; each module self-skips when the datastore has no matching service, and the
+  workbook is rebuilt exactly once at the end (intermediate rebuilds are deferred).
+  - **`sweep`** is the **unauthenticated** pass: web/smb/ftp/ldap/snmp/mongodb/docker/
+    kubernetes/mssql, using recce's own stdlib probes — no creds needed. `--vulns` also
+    runs the nmap NSE scan. Passing creds to `sweep` is refused with a pointer to
+    `credsweep` (a credentialed action must be explicit, never a side-effect of a flag).
+  - **`credsweep`** is the **authenticated** pass (requires `-u/-p`): the netexec/
+    impacket phase (`credenum`) plus the authenticated facets of `ldap` (kerberoast/
+    AS-REP/accounts), `smb` (credentialed shares + write proof), `mssql` (access/
+    privilege matrix) and `ftp`. The unauth-only modules are intentionally absent —
+    you run `sweep` for those.
+  - Both take `--skip`/`--only-modules` to narrow the set and `--no-probe` to fold
+    passively; a module that errors is isolated (logged, the sweep continues) rather
+    than aborting the run.
 - **Live end-to-end smoke test** (`tests/test_live_smoke.py`). Stands up real localhost
   web / MongoDB-wire / FTP servers and drives the actual `recce` CLI against them —
   `import` → `sweep` folds genuine findings from the live probes (MongoDB unauth

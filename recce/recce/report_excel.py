@@ -1072,11 +1072,14 @@ def _build_guide(wb, meta: dict) -> None:
         ("doctor", "Check this box can run everything (env + tools + self-scan)."),
         ("enum <targets>", "Phase 1: discover hosts, scan ports, ID services (fast)."),
         ("vulns [targets]", "Phase 2: vuln-scan open ports (safe; --aggressive for more)."),
-        ("sweep [-u U -p P -d DOM]",
-         "ONE command for the whole deep pass: runs every applicable module below "
-         "(web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql), skipping services you "
-         "don't have. Add --vulns for the NSE scan too. Run the individual commands "
-         "below only when you want to focus or pass module-specific options."),
+        ("sweep", "ONE command for the whole UNAUTHENTICATED deep pass: runs every "
+                  "applicable credential-free module below (web/smb/ftp/ldap/snmp/"
+                  "mongodb/docker/k8s/mssql), skipping services you don't have. Add "
+                  "--vulns for the NSE scan too."),
+        ("credsweep -u U -p P -d DOM",
+         "ONE command for the whole AUTHENTICATED deep pass (once you have creds): "
+         "credenum (netexec/impacket) + authenticated ldap/smb/mssql/ftp. Run the "
+         "individual commands below only to focus or pass module-specific options."),
         ("web [targets]", "Deep, non-intrusive scan of every HTTP/HTTPS endpoint "
                           "(exposed files, PUT/JWT proofs, CORS, GraphQL). Fills Web."),
         ("db [targets]", "Database enumeration + vuln scan."),
