@@ -5,15 +5,22 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
-- **Architecture / network map from the enumeration** (`netmap.py`). A new **Network
-  map** section in the HTML report — plus standalone `architecture.mmd` (Mermaid) and
-  `architecture.dot` (Graphviz) files — drawn from what recce observed: each **subnet**
-  as a network segment (subgraph), every host as a **role-tagged, colour-coded node**
-  (DC / DB / Web / Mail / File-SMB / Workstation), and **AD domains** with DC-of edges
-  and observed **trust** edges. It is explicitly a **logical** map, not a physical or
-  routing topology — recce doesn't trace links or firewall rules between hosts, so only
-  relationships it actually saw are drawn (nothing inferred). Self-contained, no
-  external assets; render the Mermaid in any viewer or `dot -Tpng architecture.dot`.
+- **Architecture / network map from the enumeration** (`netmap.py`), rendered as an
+  **inline SVG that draws directly in the HTML report** — no Mermaid/Graphviz tools
+  needed, and it prints straight to PDF from the browser. Each **subnet** is a network
+  segment, every host a **role-tagged, colour-coded card** (DC / DB / Web / Mail /
+  File-SMB / Workstation), with **AD domain** nodes and dashed edges to their DCs; a
+  large estate (>50 live hosts) aggregates each subnet to role counts so it stays
+  readable. Explicitly a **logical** map, not physical/routing topology — only
+  relationships recce actually observed are drawn, nothing inferred. The same map is
+  still also written as `architecture.mmd` / `architecture.dot` for those who use them.
+- **Users, credentials and key-information inventory in the HTML report.** New sections:
+  **Key information** (AD domains, DCs, functional level, machine-account quota,
+  password policy), **Users & accounts** (every discovered user with admin /
+  kerberoastable / AS-REP / delegation / disabled flags, plus shares), and
+  **Credentials captured** (every recovered/stacked credential with type, source and
+  origin host). Credential **secrets are masked** in this shareable HTML — the full
+  values for spraying stay on the workbook's Credentials tab.
 
 ### Changed
 - **Attack path is now framed honestly as PROJECTED, not a proven kill chain.** recce

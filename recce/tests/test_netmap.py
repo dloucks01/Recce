@@ -69,6 +69,26 @@ class MermaidTest(unittest.TestCase):
     def test_empty_is_graceful(self):
         self.assertIn("No hosts enumerated", netmap.mermaid([]))
         self.assertIn("No hosts enumerated", netmap.dot([]))
+        self.assertIn("No hosts", netmap.svg([]))
+
+    def test_svg_renders_directly_and_is_self_contained(self):
+        import xml.dom.minidom as md
+        doms = [Domain(name="corp.local", dc_ips=["10.0.10.10"])]
+        s = netmap.svg(self._hosts(), doms)
+        self.assertTrue(s.startswith("<svg"))
+        md.parseString(s)                              # well-formed XML (renders anywhere)
+        self.assertNotIn("xmlns", s)                   # inline, self-contained
+        self.assertNotIn("http://", s)
+        self.assertIn("#C00000", s)                    # DC role colour
+        self.assertIn("<path", s)                      # DC -> domain edge
+        self.assertIn("10.0.10.10", s)
+
+    def test_svg_aggregates_large_estate(self):
+        many = [_h(f"10.0.0.{i}", ports=[(80, "http")]) for i in range(1, 60)]
+        s = netmap.svg(many)
+        import xml.dom.minidom as md
+        md.parseString(s)
+        self.assertIn("×", s)                          # "N× Web" aggregate labels
 
     def test_dot_renders(self):
         d = netmap.dot(self._hosts(), [Domain(name="corp.local", dc_ips=["10.0.10.10"])])
@@ -104,8 +124,9 @@ class ReportEmbedTest(unittest.TestCase):
             with open(p, encoding="utf-8") as fh:
                 html = fh.read()
         self.assertIn("Network map", html)
-        self.assertIn("flowchart TB", html)
+        self.assertIn("<svg", html)                    # renders directly, no tools
         self.assertIn("logical", html)                 # honest caveat
+        self.assertNotIn("xmlns", html)                # inline SVG stays self-contained
         for bad in ("src=", "<link", "<script"):
             self.assertNotIn(bad, html)
 
