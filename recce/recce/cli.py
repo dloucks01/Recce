@@ -5036,7 +5036,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 _QUICKSTART = r"""
-recce - phased enumeration & reporting. The core loop is short:
+recce - phased enumeration & reporting. New to this? Open QUICKSTART.md for a
+plain-English, step-by-step walkthrough. The core loop is short:
 
   1.  recce doctor                       check this box can run everything
   2.  recce enum  <targets> -o eng        find hosts, ports, services -> workbook
