@@ -32,6 +32,10 @@ class ScanProfile:
     ad_enrich: bool = True            # SMB / LDAP NSE scripts (enum phase)
     deep_enum: bool = True            # service-aware deep enum scripts (enum phase)
     udp_top: int = 0                  # >0 -> also scan N top UDP ports (vulns phase)
+    udp_basic: bool = True            # enum phase: sweep a curated set of high-value
+                                      # UDP ports (DNS/SNMP/NTP/IKE/TFTP/NetBIOS/...) so
+                                      # UDP services aren't missed by the TCP-only sweep
+                                      # (needs root; skipped with a warning otherwise)
     ping_discovery: bool = True       # discovery; False => treat all as up (-Pn)
     assume_up: bool = False           # -Pn / discovery fell back: scanning dead IPs
                                       # too, so fail faster on non-responders
@@ -51,6 +55,16 @@ class ScanProfile:
                                       # confirm it's really empty vs a missed sweep
     verify_all: bool = False          # also verify 0-port hosts under -Pn (not just
                                       # discovered-live ones) - slower on dead-IP scopes
+    udp_fallback: bool = True         # for a -Pn host still silent after the TCP
+                                      # sweep+verify, send a UDP ping to common
+                                      # services: a reply / ICMP-unreach proves it's
+                                      # up, so a firewalled host isn't ruled dead
+    reconfirm: bool = True            # after a PARTIAL ping sweep, re-probe the hosts
+                                      # that DIDN'T answer with a fast -Pn top-ports
+                                      # scan: any open port proves the host is up, so a
+                                      # firewalled-but-alive box isn't written off down
+    reconfirm_cap: int = 1024         # skip that re-probe when more than this many
+                                      # hosts missed discovery (huge scope -> use -Pn)
 
 
 PROFILES: dict[str, ScanProfile] = {
@@ -265,8 +279,11 @@ def discover_hosts(targets_file: str, out_xml: str) -> tuple[str, ScanIssue | No
     """Ping-sweep the targets; return (xml path, issue|None) listing live hosts."""
     cmd = [
         "nmap", "-sn", "-PE", "-PP",
-        "-PS21,22,23,25,80,135,139,443,445,3389,3306,8080",
-        "-PA80,443,3389", "-n", "--max-retries", "1", "--host-timeout", "3m",
+        # SYN-ping a broad port set - incl. the ports firewalled Windows/AD hosts most
+        # often still answer (88 Kerberos, 389 LDAP, 5985 WinRM) so they aren't ruled
+        # down. --max-retries 2 (not 1) so a single dropped probe doesn't lose a host.
+        "-PS21,22,23,25,53,80,88,110,135,139,143,389,443,445,993,995,1433,3306,3389,5985,8080",
+        "-PA80,443,3389", "-n", "--max-retries", "2", "--host-timeout", "3m",
         "-iL", targets_file, "-oX", out_xml,
     ]
     # nmap's --host-timeout bounds each host, but add a wall-clock backstop scaled
@@ -298,6 +315,14 @@ _DROP_MARKERS = ("increasing send delay", "dropped probes", "giving up on port",
 def _congested(outcome: RunOutcome) -> bool:
     blob = f"{outcome.stdout}\n{outcome.stderr}".lower()
     return any(m in blob for m in _DROP_MARKERS)
+
+
+def port_scope_label(profile: ScanProfile) -> tuple[str, bool]:
+    """(human label, is_full) for the TCP port scope this profile scans. `is_full`
+    is False for a top-N scan, so callers can loudly flag a PARTIAL sweep."""
+    if profile.all_ports:
+        return "all 65535 TCP ports", True
+    return f"top {profile.top_ports} TCP ports", False
 
 
 def _portscan_cmd(ip: str, out_xml: str, profile: ScanProfile,
@@ -366,6 +391,62 @@ def verify_port_scan(ip: str, out_xml: str,
     return out_xml, _issue_from(outcome, out_xml, "verify", profile.host_timeout)
 
 
+# Common UDP services that answer even when TCP and ICMP are firewalled off. A ping
+# to any of them elicits a service reply OR an ICMP port-unreachable - either one
+# proves the host is up. Kept small so the probe stays fast against dead IPs.
+_UDP_PING_PORTS = "53,67,123,137,138,161,500,514,520,623,1900,4500,5353"
+
+
+def udp_liveness_probe(ip: str, out_xml: str,
+                       profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Last-resort liveness check for a host that answered NOTHING on TCP under -Pn.
+
+    Under -Pn a silent host is genuinely ambiguous: it could be dead, or a live host
+    behind a default-drop firewall that only silences TCP+ICMP. A UDP ping to common
+    services (DNS/DHCP/NTP/NetBIOS/SNMP/IKE/Syslog/RIP/IPMI/SSDP/mDNS) catches the
+    firewalled-but-alive case - a service reply or an ICMP port-unreachable both come
+    back with a real nmap status reason (never the -Pn "user-set"), so the host flips
+    from UNKNOWN to confirmed-up instead of being written off as down.
+
+    Uses `-sn` (no -Pn) so nmap's up/down verdict is meaningful again: it reports the
+    host up ONLY on an actual reply. Needs root (raw UDP); returns a skip issue if not.
+    """
+    if not _is_root():
+        return _empty_xml(out_xml), ScanIssue(
+            "warning", "udp-liveness: skipped (needs root/CAP_NET_RAW for UDP ping)")
+    to_args, kill = _timeout_args(profile)
+    outcome = _run(["nmap", "-sn", "-n", "-PU" + _UDP_PING_PORTS,
+                    f"-T{profile.timing}", "--max-retries", "2", *to_args,
+                    ip, "-oX", out_xml], timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "udp-liveness", profile.host_timeout)
+
+
+def reconfirm_hosts(targets_file: str, out_xml: str,
+                    profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Re-probe hosts that MISSED the ping sweep with a fast -Pn top-ports scan.
+
+    A ping sweep (even the broad one above) can miss a live host behind a default-drop
+    firewall that silences ICMP *and* every ping port. An actual TCP port scan is a
+    stronger liveness test: a host that answers on ANY port is definitively up. This
+    catches the firewalled-but-alive box before it's written off as down - without
+    full-scanning every dead IP (top 100 ports, --open, fail-fast, one bounded sweep
+    over all the missed IPs). Callers cap the input size (profile.reconfirm_cap)."""
+    scan_type = "-sS" if _is_root() else "-sT"
+    cmd = ["nmap", scan_type, "-Pn", "-n", "--open", "--top-ports", "100",
+           f"-T{profile.timing}", "--max-retries", "2", "--host-timeout", "2m",
+           "-iL", targets_file, "-oX", out_xml]
+    try:
+        with open(targets_file) as fh:
+            ntargets = sum(1 for ln in fh if ln.strip())
+    except OSError:
+        ntargets = 256
+    kill = int(min(5400, max(300, ntargets * 1.5 + 180)))
+    outcome = _run(cmd, timeout=kill)
+    if outcome.missing:
+        return out_xml, ScanIssue("error", "reconfirm: nmap not found on PATH")
+    return out_xml, _issue_from(outcome, out_xml, "reconfirm", None)
+
+
 def _masscan_ports(ip: str, out_xml: str,
                    profile: ScanProfile) -> tuple[str, ScanIssue | None]:
     port_range = "0-65535" if profile.all_ports else f"0-{profile.top_ports}"
@@ -374,6 +455,10 @@ def _masscan_ports(ip: str, out_xml: str,
           "-oX", tmp], timeout=(profile.host_timeout * 60 + 120) or None)
     # Re-emit as an nmap-shaped XML by re-scanning just the open ports with nmap.
     ports = _extract_masscan_ports(tmp)
+    try:                                      # clean up the intermediate masscan XML
+        os.unlink(tmp)
+    except OSError:
+        pass
     if not ports:
         return _empty_xml(out_xml), None
     scan_type = "-sS" if _is_root() else "-sT"
@@ -406,12 +491,18 @@ def masscan_sweep(ips: list[str], out_xml: str, profile: ScanProfile) -> dict[st
     nports = 65536 if profile.all_ports else (profile.top_ports + 1)
     est = nports * max(1, len(ips)) / max(rate, 1)
     kill = int(min(3600, max(600, est * 2 + 120)))
-    _run(["masscan", "-iL", list_file, "-p", port_range,
-          "--rate", str(rate), "-oX", out_xml], timeout=kill)
+    outcome = _run(["masscan", "-iL", list_file, "-p", port_range,
+                    "--rate", str(rate), "-oX", out_xml], timeout=kill)
     try:
         os.unlink(list_file)
     except OSError:
         pass
+    # A timed-out / errored sweep leaves a PARTIAL XML - hosts it never reached would
+    # silently vanish. Warn loudly so the operator re-runs (per-host nmap, or -Pn).
+    if outcome.timed_out or (outcome.returncode not in (0, None) and not outcome.missing):
+        print("[!] masscan sweep did not finish cleanly (timeout/error) - results may be "
+              "PARTIAL; hosts it didn't reach are missing. Re-run without --fast, or with "
+              "-Pn, to be sure.")
     return parse_masscan_sweep_xml(out_xml)
 
 
@@ -601,6 +692,29 @@ def reprobe_services(ip: str, ports: list[int], out_xml: str,
     ]
     outcome = _run(cmd, timeout=kill)
     return out_xml, _issue_from(outcome, out_xml, "reprobe", profile.host_timeout)
+
+
+# High-value UDP services a TCP-only sweep misses. Kept small so the enum-phase sweep
+# stays fast: DNS, DHCP, TFTP, NTP, NetBIOS, SNMP(+trap), IKE/VPN, syslog, RIP, IPMI,
+# MSSQL browser, SIP, SSDP/UPnP, IPsec NAT-T, mDNS.
+_UDP_BASIC_PORTS = "53,67,69,123,137,138,161,162,500,514,520,623,1434,1900,4500,5060,5353"
+
+
+def udp_basic_scan(ip: str, out_xml: str, profile: ScanProfile) -> tuple[str, ScanIssue | None]:
+    """Enum-phase sweep of a curated set of high-value UDP ports with service detection
+    and the cheap SNMP/DNS/NTP/NetBIOS/IKE scripts, so UDP services show up in the main
+    enumeration instead of only under `thorough`. Needs root (raw UDP)."""
+    if not _is_root():
+        return _empty_xml(out_xml), ScanIssue(
+            "warning", "udp-basic: skipped (needs root/CAP_NET_RAW for raw UDP); "
+            "run with sudo, or use --udp-top in the vulns phase")
+    to_args, kill = _timeout_args(profile)
+    outcome = _run(["nmap", "-sU", "-sV", "-Pn", "-n", "-p", _UDP_BASIC_PORTS, "--open",
+                    f"-T{profile.timing}",
+                    "--script", "snmp-info,dns-nsid,ntp-info,nbstat,ike-version",
+                    "--script-timeout", "60s", *to_args, ip, "-oX", out_xml],
+                   timeout=kill)
+    return out_xml, _issue_from(outcome, out_xml, "udp-basic", profile.host_timeout)
 
 
 def udp_scan(ip: str, out_xml: str, profile: ScanProfile) -> tuple[str, ScanIssue | None]:

@@ -19,6 +19,7 @@ exception that would stall a scan.
 
 from __future__ import annotations
 
+import calendar
 import http.client
 import socket
 import ssl
@@ -39,9 +40,16 @@ _EXPIRY_WARN_DAYS = 30
 # --- port classification --------------------------------------------------------
 
 def _is_tls(port: Port) -> bool:
-    blob = f"{port.service} {port.tunnel} {port.product}".lower()
-    if port.tunnel == "ssl" or any(h in blob for h in _TLS_HINTS):
+    # Only the nmap service + tunnel decide TLS - NOT the product name. Substring-
+    # matching the product wrongly flagged "SimpleHTTPServer" (contains "https"),
+    # "*ssl*" builds, etc. as TLS, so a plain-HTTP 8080 got scanned as HTTPS and every
+    # web finding was missed. An explicit plain 'http' service is authoritative: not TLS.
+    svc = (port.service or "").lower()
+    tunnel = (port.tunnel or "").lower()
+    if tunnel == "ssl" or "ssl" in svc or "tls" in svc or "https" in svc:
         return True
+    if svc in ("http", "http-proxy", "http-alt", "www"):
+        return False                       # nmap says plaintext HTTP - trust it
     return port.portid in _COMMON_TLS_PORTS
 
 
@@ -177,7 +185,9 @@ def _parse_cert_time(value: str) -> float | None:
         day = int(parts[1])
         hh, mm, sec = (int(x) for x in parts[2].split(":"))
         year = int(parts[3])
-        return time.mktime((year, mon or 1, day, hh, mm, sec, 0, 0, 0))
+        # notAfter is GMT/UTC; timegm treats the tuple as UTC. mktime would read it as
+        # LOCAL time, shifting the expiry window by the runner's UTC offset.
+        return calendar.timegm((year, mon or 1, day, hh, mm, sec, 0, 0, 0))
     except (ValueError, IndexError, TypeError):
         return None
 

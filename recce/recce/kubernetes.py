@@ -12,14 +12,15 @@ Stdlib-only HTTP(S) probes of the cluster's most dangerous network exposures:
   * **etcd** (2379): the cluster's backing store; unauthenticated read = every Secret
     (all service-account tokens, TLS keys) in plaintext.
 
-Each positive read is the proof (recce only READS - it never execs or writes), folds
-into the main severity totals, the Vulnerabilities sheet and the write-ups, and lands
-on a dedicated Kubernetes tab. Airgapped-safe, stdlib only.
+Each positive read is the proof, folds into the main severity totals, the
+Vulnerabilities sheet and the write-ups, and lands on a dedicated Kubernetes tab.
+Airgapped, stdlib only. Safety posture: see SECURITY.md.
 """
 from __future__ import annotations
 
 import http.client
 import json
+import re
 import ssl
 
 from .models import Host, Port
@@ -57,6 +58,22 @@ def role(port: int) -> str:
     return "unknown"
 
 
+_READ_CAP = 16 * 1024 * 1024   # hard ceiling on a single response body (16 MB)
+
+
+def _read_capped(resp, cap: int = _READ_CAP) -> bytes:
+    """Read an HTTP response to EOF, bounded by `cap` (avoids OOM on a hostile body
+    while still capturing multi-MB pod/secret lists that a 256 KB read truncated)."""
+    chunks, total = [], 0
+    while total < cap:
+        chunk = resp.read(min(65536, cap - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def _req(ip: str, port: int, path: str, tls: bool, method: str = "GET",
          body: str | None = None, timeout: float = _TIMEOUT):
     """Issue one request. Returns (status, parsed_json_or_text) or None."""
@@ -72,7 +89,11 @@ def _req(ip: str, port: int, path: str, tls: bool, method: str = "GET",
             headers["Content-Type"] = "application/json"
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
-        raw = resp.read(262144).decode("utf-8", "replace")
+        # Read to EOF up to a generous cap. A single small read() truncated a busy
+        # node's /pods or the apiserver's /secrets mid-buffer, so json.loads failed
+        # and the endpoint was misread as merely "reachable" (a critical exposure
+        # downgraded). The str fallback below still flags a >cap body as a real list.
+        raw = _read_capped(resp).decode("utf-8", "replace")
         try:
             return resp.status, json.loads(raw)
         except ValueError:
@@ -131,12 +152,14 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
             return None
         out["tls"] = tls
         out["version"] = (ver[1] or {}).get("gitVersion", "") if isinstance(ver[1], dict) else ""
+        # Reuse the scheme /version answered on - re-probing TLS-then-plaintext for
+        # every follow-up doubles the connects (and wrong-scheme timeouts) per host.
         # Anonymous authorization: can system:anonymous LIST namespaces?
-        ns, _ = _try_get(ip, port, "/api/v1/namespaces", timeout)
+        ns = _get(ip, port, "/api/v1/namespaces", tls=tls, timeout=timeout)
         out["anon_status"] = ns[0] if ns else None
         out["anon_list"] = bool(ns and ns[0] == 200 and _is_list(ns[1]))
         if out["anon_list"]:
-            sec, _ = _try_get(ip, port, "/api/v1/secrets", timeout)
+            sec = _get(ip, port, "/api/v1/secrets", tls=tls, timeout=timeout)
             out["anon_secrets"] = bool(sec and sec[0] == 200 and _is_list(sec[1]))
         return out
     if r == "etcd":
@@ -146,8 +169,8 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
         out["tls"] = tls
         out["etcd_version"] = _etcd_version(ver[1])
         # v2 keys API (disabled by default since etcd 3.4, but still seen on older
-        # clusters).
-        keys, _ = _try_get(ip, port, "/v2/keys/?recursive=true", timeout)
+        # clusters). Reuse the scheme /version answered on (etcd serves both over it).
+        keys = _get(ip, port, "/v2/keys/?recursive=true", tls=tls, timeout=timeout)
         out["v2_readable"] = bool(keys and keys[0] == 200
                                   and isinstance(keys[1], dict) and "node" in keys[1])
         # v3 gRPC-gateway (what every modern Kubernetes ships): an unauthenticated
@@ -163,8 +186,12 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
 
 
 def _is_podlist(body) -> bool:
-    return isinstance(body, dict) and (body.get("kind") == "PodList"
-                                       or isinstance(body.get("items"), list))
+    if isinstance(body, dict):
+        return body.get("kind") == "PodList" or isinstance(body.get("items"), list)
+    if isinstance(body, str):     # oversized/truncated JSON still proves exposure
+        b = body.replace(" ", "")
+        return '"kind":"PodList"' in b or '"items"' in b
+    return False
 
 
 def _pod_count(body) -> int | None:
@@ -174,8 +201,13 @@ def _pod_count(body) -> int | None:
 
 
 def _is_list(body) -> bool:
-    return isinstance(body, dict) and (str(body.get("kind", "")).endswith("List")
-                                       or isinstance(body.get("items"), list))
+    if isinstance(body, dict):
+        return (str(body.get("kind", "")).endswith("List")
+                or isinstance(body.get("items"), list))
+    if isinstance(body, str):     # oversized/truncated JSON still proves exposure
+        b = body.replace(" ", "")
+        return '"items"' in b or bool(re.search(r'"kind":"\w+List"', b))
+    return False
 
 
 def _etcd_version(body) -> str:
@@ -393,24 +425,9 @@ def proof_html(command, output, banner: str = "") -> str:
 # --- top-level analyze ----------------------------------------------------------
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from .models import Vuln
-    by_ip: dict[str, list] = {}
-    for f in fs:
-        parts = f["target"].split(":")
-        ip = parts[0]
-        port = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else _KUBELET
-        evidence = f.get("detail", "")
-        if f.get("narrative"):
-            evidence += f"\n\nWhat this enables:\n{f['narrative']}"
-        if f.get("command"):
-            evidence += f"\n\nProve / next step:\n{f['command']}"
-        by_ip.setdefault(ip, []).append(Vuln(
-            ip=ip, port=port, protocol="tcp",
-            script_id=f"k8s:{f['title'][:40]}", state="finding", title=f["title"],
-            severity=f["severity"], source="kubernetes", confidence="confirmed",
-            cwes=list(f.get("cwes") or ["CWE-284"]),
-            output=evidence.strip(), remediation=f.get("remediation", "")))
-    return by_ip
+    """Kubernetes findings -> {ip: [Vuln]} (source='kubernetes', script_id 'k8s:')."""
+    from .svccommon import findings_to_vulns as _f2v
+    return _f2v(fs, "kubernetes", _KUBELET, prefix="k8s")
 
 
 def analyze(hosts: list[Host], active: bool = True) -> dict:

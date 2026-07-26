@@ -4,7 +4,452 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Access + risk overlay on the AD architecture diagram.** Tier-0 objects recce
+  **already holds** (usernames from captured credentials, or an accessed DC) get a
+  bold border + ✓; nodes an attacker can **seize directly** get a risk dot (DCSync =
+  critical, control ACL = high) — the same grounded overlay language as the network
+  map. Legend keys appear only when they apply.
+- **Network map enriched from SharpHound + other findings.** The logical map now
+  overlays what the engagement actually established: hosts recce **gained access to**
+  get a green outline + ✓ badge (and an "N owned" tally per segment), each host card
+  carries a **risk dot** for its worst *confirmed* finding (unverified "potential"
+  guesses are excluded), and **Domain Controllers are confirmed from the BloodHound
+  data** — a DC that only had 445 open is still marked. The text summary gains a
+  grounded "Status:" line (how many hosts owned / at critical-high risk) and an
+  AD-confirmed-DC line. The same enrichment flows into `architecture.mmd` / `.dot`.
+- **AD architecture diagram from the BloodHound / SharpHound collection**
+  (`bloodhound.architecture()` + `netmap.ad_svg()`), rendered as an **inline SVG that
+  draws directly in the HTML report** (and prints to PDF) — no BloodHound GUI, Neo4j,
+  Mermaid or Graphviz needed. It is the **curated tier-0 slice**, not the unreadable
+  full graph: the **domain(s)** on top, the **high-value groups** (Domain Admins,
+  Administrators, …) and **Domain Controllers** below, and the **privileged members /
+  principals that can seize tier-0** at the bottom — with **MemberOf**, **control (ACL /
+  DCSync)** and **domain-trust** edges between them. Large graphs are capped for
+  legibility (with a truncation note); a standalone `ad-architecture.svg` is also
+  written next to the report. Everything is grounded in what SharpHound collected.
+- **Architecture / network map from the enumeration** (`netmap.py`), rendered as an
+  **inline SVG that draws directly in the HTML report** — no Mermaid/Graphviz tools
+  needed, and it prints straight to PDF from the browser. Each **subnet** is a network
+  segment, every host a **role-tagged, colour-coded card** (DC / DB / Web / Mail /
+  File-SMB / Workstation), with **AD domain** nodes and dashed edges to their DCs; a
+  large estate (>50 live hosts) aggregates each subnet to role counts so it stays
+  readable. Explicitly a **logical** map, not physical/routing topology — only
+  relationships recce actually observed are drawn, nothing inferred. The same map is
+  still also written as `architecture.mmd` / `architecture.dot` for those who use them.
+- **Users, credentials and key-information inventory in the HTML report.** New sections:
+  **Key information** (AD domains, DCs, functional level, machine-account quota,
+  password policy), **Users & accounts** (every discovered user with admin /
+  kerberoastable / AS-REP / delegation / disabled flags, plus shares), and
+  **Credentials captured** (every recovered/stacked credential with type, source and
+  origin host). Credential **secrets are masked** in this shareable HTML — the full
+  values for spraying stay on the workbook's Credentials tab.
+
+### Changed
+- **Split the HTML report into a findings page and an architecture & assets page.**
+  `report.html` now stays focused on the assessment (exec summary, dashboard, scoring
+  legend, findings, attack path, coverage checklist), while a new self-contained
+  **`assets.html`** holds the reference material: the **network map**, the **AD
+  architecture** diagram, **key information**, the **users / accounts** inventory, and
+  the **(masked) credentials**. The two pages cross-link in their headers. Both are
+  still fully self-contained (no JS, no external assets) and print to PDF.
+- **Attack path is now framed honestly as PROJECTED, not a proven kill chain.** recce
+  builds the path from confirmed findings (`_confirmed_vulns` excludes "potential"
+  version guesses) and observes each step's precondition — but it does **not** execute
+  the chain (recce never exploits). The report's Attack-path section now carries a
+  "projected" tag and a prominent note: the route is precondition-grounded but has not
+  been walked end-to-end, every step gives the command to run + how to validate, and
+  lateral-movement steps are options that apply only once you hold a valid credential.
+  The workbook's Attack Path tab description says the same. No overclaim that the path
+  "works."
+
+### Added
+- **Read-only "Assessment coverage" checklist in the HTML report.** A per-host,
+  per-subnet progress grid mirroring the workbook Checklist (✓ done · ☐ to-do · —
+  not-applicable), so a non-technical stakeholder can see how far the assessment got
+  in a browser without opening Excel. It reflects both the tool's auto/derived state
+  and the operator's ticks (passed through from the datastore). It is deliberately
+  **read-only**: editing still happens in `enumeration.xlsx`, the one place ticks
+  persist back into recce's datastore and survive re-scans (a static HTML file can't
+  do that offline without a server or a non-authoritative browser-local store).
+- **Expanded, grounded executive summary + "How findings are scored" in the HTML
+  report.** The exec summary now adds a **Confirmed** tile (and a **Footholds** tile
+  when access was gained) and a plain-language **assessment** that separates what recce
+  *confirmed by direct observation* from what is **potential** — inferred from a
+  service's version/banner and explicitly "flagged for manual verification, not
+  presented as fact." A new **How findings are scored** section explains *why* a rating
+  is assigned: the **severity** bands (Critical ≥ CVSS 9.0, High 7.0–8.9, Medium
+  4.0–6.9, Low < 4.0, plus impact-based for observed misconfigs) and the **confidence**
+  labels (Confirmed / Likely / Potential). Every finding now carries a **confidence
+  badge** and a one-line **"why this rating"** basis (e.g. "rated High from the
+  published CVSS score of CVE-…"), and the findings table gains a Confidence column —
+  so nothing in the report reads as fact that recce did not actually observe.
+- **Visual "At a glance" dashboard in the HTML report.** `report.html` now opens with
+  a graphics band aimed at a non-technical reader: an inline-SVG **severity donut**
+  (finding mix at a glance), a **Machines by risk** bar chart (how many live hosts fall
+  into each worst-severity bucket), and a **Most-affected systems** bar chart (hosts
+  ranked by high + critical findings). All rendered with inline SVG/CSS — no external
+  assets, no JavaScript — so the single file still opens offline in any browser and
+  prints cleanly. Replaces the old plain severity-bar rollup.
+- **Initial-access tracking — the `Access` step is now auto-derived, and a new
+  `access` command.** recce marks a host as *access gained* the moment a credentialed
+  phase confirms a foothold — a valid credential or local admin from `credenum` /
+  `credsweep`, an SSH session, or a working MSSQL login (`Host.access_gained`) — and the
+  Checklist **Access** step auto-ticks (green/auto instead of amber/manual, joining
+  enum/vuln/web/db/priv-esc). The `access` command reviews footholds per host
+  (`recce access`), re-derives them from existing findings, or records one you gained
+  another way (`recce access --host IP --note '...'`, `--undo` to clear). `status` now
+  shows Access under the auto "Tool progress" block (operator-tick still overrides), and
+  the flag round-trips the datastore + survives a re-scan merge. Closes the per-host
+  "what's done, what's left" tracking goal for the access phase.
+- **`recce sweep` / `recce credsweep` — one command each for the two post-`enum` deep
+  passes.** Instead of typing the deep modules by hand after enum, these run them in
+  one shot; each module self-skips when the datastore has no matching service, and the
+  workbook is rebuilt exactly once at the end (intermediate rebuilds are deferred).
+  - **`sweep`** is the **unauthenticated** pass: web/smb/ftp/ldap/snmp/mongodb/docker/
+    kubernetes/mssql, using recce's own stdlib probes — no creds needed. `--vulns` also
+    runs the nmap NSE scan. Passing creds to `sweep` is refused with a pointer to
+    `credsweep` (a credentialed action must be explicit, never a side-effect of a flag).
+  - **`credsweep`** is the **authenticated** pass (requires `-u/-p`): the netexec/
+    impacket phase (`credenum`) plus the authenticated facets of `ldap` (kerberoast/
+    AS-REP/accounts), `smb` (credentialed shares + write proof), `mssql` (access/
+    privilege matrix) and `ftp`. The unauth-only modules are intentionally absent —
+    you run `sweep` for those.
+  - Both take `--skip`/`--only-modules` to narrow the set and `--no-probe` to fold
+    passively; a module that errors is isolated (logged, the sweep continues) rather
+    than aborting the run.
+  - Surfaced everywhere: the `recce` quickstart, `status`'s suggested-next-step (points
+    to `sweep` when several deep-dives are pending), the workbook **Start Here** +
+    **Runbook** tabs, `README.md`, `QUICKSTART.md`, `CHEATSHEET.html` and `SECURITY.md`
+    (which notes `sweep` is credential-free/read-only and `credsweep` is the
+    authenticated pass) were all updated to lead with the two grouped commands.
+- **Live end-to-end smoke test** (`tests/test_live_smoke.py`). Stands up real localhost
+  web / MongoDB-wire / FTP servers and drives the actual `recce` CLI against them —
+  `import` → `sweep` folds genuine findings from the live probes (MongoDB unauth
+  exposure with the version read off the wire, web cookie/dir-listing, FTP anonymous),
+  and a real nmap-backed `recce enum` discovers a live open port — proving the whole
+  scan → parse → probe → fold → report path against live sockets, not fixtures. Plus
+  `sweep` selection/deferral wiring tests against the bundled sample.
+- **Credentialed-path integration tests** (`tests/test_cred_integration.py`). Install a
+  fake `nxc` binary on PATH that emits real netexec output, so the credentialed modules
+  run their actual `subprocess.run` → stdout-parse → finding-fold → access-derivation
+  path (including `recce credenum` end to end) without needing netexec or a live DC —
+  previously these were only monkeypatched.
+- **Scale test** (`tests/test_scale.py`). Builds a 500-host / 20-subnet datastore and
+  rebuilds the workbook + runs `status`/`access` over it, asserting correct output and
+  a near-linear time budget so an O(n²) regression in reporting/tracking is caught.
+- **`ldap` — deep LDAP / Active Directory directory enumeration (stdlib only).** A
+  hand-rolled BER/ASN.1 LDAP client on a raw socket (no python-ldap / ldap3), so it
+  runs on a stock airgapped Kali. Credential-free and read-only, against a Directory
+  port (389/636/3268/3269) it: attempts an **anonymous simple bind**; reads the
+  **RootDSE** (naming contexts, domain/forest DNS names, the DC's dnsHostName, the
+  domain/forest **functional level**, supported SASL); tries to **read the naming
+  context anonymously** (a real misconfig — the default AD posture denies it); and
+  flags **cleartext LDAP** on 389 as a credential-sniff / NTLM-relay surface. LDAPS
+  (636/3269) is wrapped in TLS first. Findings fold into the severity totals, the
+  Vulnerabilities sheet, the write-ups, a dedicated **LDAP** workbook tab, the prove
+  engine (anonymous-bind / anonymous-read / cleartext each adjudicated CONFIRMED —
+  recce performed the bind itself), the exploit plan (ldapsearch enumeration,
+  ntlmrelayx relay), the `status` service-module coverage, and the Checklist auto-tick.
+  - **Authenticated enumeration is now in-house too** (`recce ldap -u U -p P -d DOM`):
+    the stdlib client does a UPN simple bind and **paged** subtree searches (walking
+    past AD's MaxPageSize via the SimplePagedResults control) for users, computers and
+    the domain object, deriving kerberoastable / AS-REP-roastable / unconstrained- &
+    constrained-delegation / privileged / disabled from the `userAccountControl` bits
+    and attributes. It produces `Account` objects that flow straight into **Users &
+    Accounts, AD Quick Wins, Kerberoast and AS-REP** — no hand-off to nxc/bloodhound-
+    python — plus module findings for machine-account-quota > 0, a zero lockout
+    threshold (spray-friendly), and passwords in `description` fields. An extensible-
+    match filter encoder (`userAccountControl:1.2.840.113556.1.4.803:=…`) backs the
+    bit tests. LDAPS (636/3269) is TLS-wrapped for the authenticated bind too.
+  - **Pass-the-hash** (`recce ldap -u U -d DOM --hash <NT>`): a new stdlib `ntlm`
+    module (NTLMSSP Type 1/2/3 with an NTLMv2 response, and a pure-Python MD4 since
+    modern OpenSSL drops it) drives an LDAP SASL **GSS-SPNEGO** bind, so the whole
+    authenticated enumeration above runs from an NT hash with no plaintext password.
+    The NTLMv2 crypto is validated against the MS-NLMP 4.2.4 worked example.
+  - **Full NTLM sign+seal on plaintext 389.** When the pass-the-hash bind runs on
+    cleartext 389, recce now negotiates SIGN+SEAL with key exchange and wraps every
+    post-bind LDAP PDU in an NTLM signature + RC4-sealed payload — so a DC that
+    enforces *LDAP signing / channel binding* accepts the enumeration without TLS.
+    Adds a pure-stdlib RC4, the MS-NLMP session-key / sign-key / seal-key derivation,
+    and a `SecurityContext` that wraps/unwraps the SASL security layer transparently
+    (the search code is unchanged). RC4 is checked against known-answer vectors and
+    the whole sealed channel is exercised end-to-end against a mock DC that recovers
+    the session key from the client's Type 3 and seals its own replies. LDAPS remains
+    the path when you'd rather let TLS carry it (no sealing then).
+- **`snmp` — deep SNMP enumeration over UDP (stdlib only).** A hand-rolled SNMP v2c
+  client on a raw UDP socket (BER/ASN.1 with OID base-128 encoding, GETNEXT walking —
+  no pysnmp), so it runs on a stock airgapped Kali. Credential-free and **read-only**:
+  recce never sends a SET, so a read-write community is flagged by *name* but never
+  exercised. Against a host it **guesses common community strings** (public/private/…),
+  reads the **system group** (sysDescr / sysName), and **walks** the Windows LanManager
+  user table, running processes, installed software and interfaces. Enumerated local
+  accounts become `Account` objects that flow into **Users & Accounts** (a pre-auth
+  spray list). Findings (guessable community, exposed user accounts, process/software
+  inventory) fold into the severity totals, the Vulnerabilities sheet, the write-ups, a
+  dedicated **SNMP** workbook tab, the prove engine (each disclosure adjudicated
+  CONFIRMED — recce read the data back itself), the exploit plan (snmpwalk / snmp-check
+  → spray), and the `status` service-module coverage. SNMP discovery *is* a GET, so no
+  prior UDP scan is required — `recce snmp` probes 161 directly.
+- **`mongodb` — deep MongoDB enumeration (stdlib only).** A hand-rolled MongoDB wire-
+  protocol client (OP_MSG opcode 2013 with a minimal BSON encoder/decoder — no pymongo).
+  Credential-free and read-only: it runs **hello** + **buildInfo** to fingerprint the
+  version and replica-set role, then the discriminator — **`listDatabases` without
+  authentication**. If the instance returns the database list, it is exposed
+  unauthenticated (full read/write to every database) and recce raises a **critical**
+  finding; if it errors "not authorized", auth is enforced and recce reports it
+  reachable-but-locked (no finding). An end-of-life build raises a medium. Findings fold
+  into the severity totals, the Vulnerabilities sheet, the write-ups, a dedicated
+  **MongoDB** workbook tab, the prove engine (unauth `listDatabases` CONFIRMED), the
+  exploit plan (mongosh / mongodump), and the `status` coverage.
+- **Web signatures — Tier 1 niche-app coverage (data-driven, no new module).** Extends
+  the existing `web` sweep (`web.py`) rather than adding per-app modules, so each app is
+  a fingerprint + a self-proving path, folding into the same **Web** / **Vulnerabilities**
+  / **Verification** sheets. Added: **Jenkins** script console reachable unauthenticated
+  (critical — Groovy RCE), **Keycloak** admin console reachable, **Grafana** plugin path
+  traversal (CVE-2021-43798, reads `/etc/passwd` read-only to confirm), **HashiCorp
+  Vault** seal-status/version exposure, **Elasticsearch** unauthenticated index read
+  (data exposure), and **Kibana** version disclosure — plus fingerprints for all six.
+  A new **form/JSON default-credential probe** (`_form_login_defaults`, opt-in via
+  `--creds`, one attempt per documented default, lockout-aware) confirms **Grafana**
+  `admin/admin` and **MinIO** `minioadmin/minioadmin`, and HTTP-Basic `guest/guest`
+  now covers the **RabbitMQ** management API. Each finding gets a CONFIRMED prove-engine
+  verdict with app-specific escalation and an exploit-plan action (Jenkins RCE, Grafana
+  file read, Elasticsearch dump, default-cred login).
+- **SQL injection detection + form-field fuzzing (`web --crawl`).** The crawler now
+  fuzzes **form fields** (POST/GET bodies), not just URL query params — a shared
+  injection transport (`_make_sender`) drives both the existing reflection/SSTI canary
+  and a new **SQLi engine** against every discovered input. The engine confirms three
+  ways, all with **non-destructive payloads** (quote-break + `AND`/sleep inside the
+  SELECT/WHERE context — never a stacked `DROP`/`UPDATE`/`DELETE`): **error-based** (a
+  DBMS error — MySQL/PostgreSQL/MSSQL/Oracle/SQLite — that appears only after the
+  quote-break), **boolean-based blind** (a TRUE payload matches the baseline while a
+  FALSE one diverges, re-tested to reproduce, and skipped entirely on highly dynamic
+  pages to avoid false positives), and **time-based blind** (opt-in via `--sqli-time`;
+  a deliberate DB sleep whose delay scales with the sleep argument). Destructive-looking
+  forms (`action` matching delete/remove/logout/…) are never submitted; password and
+  anti-CSRF fields are never fuzzed; per-endpoint injection budget is bounded. Findings
+  land as `web-sqli` (CWE-89) with a CONFIRMED prove-engine verdict and a pre-filled
+  `sqlmap` exploit-plan action.
+- **Cookie hardening + open-redirect + path-traversal checks.** `_fetch` now preserves
+  every `Set-Cookie` (repeats were being collapsed), and a new per-cookie analysis
+  (`_cookie_findings`) flags missing **HttpOnly**/**Secure** (kept), missing **SameSite**
+  (or `SameSite=None` without `Secure`), a **session cookie set over cleartext HTTP**
+  (token exposed on the wire), a missing **`__Host-`/`__Secure-` prefix**, and an
+  **over-broad parent `Domain`** scope (CWE-1004/614/1275/319). Two new active param
+  checks join the `--crawl` sweep (GET params **and** form fields, via the shared
+  injection transport): **open redirect** (`web-openredirect`, CWE-601 — a parameter
+  reflected into a `3xx Location` pointing at an attacker host, read-only, no auto-follow)
+  and **generic path traversal / local file read** (`web-lfi`, CWE-22 — `../…/etc/passwd`
+  + `....//`, `%2f` and Windows `win.ini` variants, only on file-ish param names to keep
+  false positives and request budget down). Both get CONFIRMED prove-engine verdicts;
+  path traversal adds a `curl`/`php://filter` exploit-plan action.
+- **Discovery hardening — fewer false "host down".** The ping sweep now SYN-pings a
+  broader port set that includes the ports firewalled Windows/AD hosts most often still
+  answer (88 Kerberos, 389 LDAP, 5985 WinRM, + mail/DB ports) and retries a dropped
+  probe once more (`--max-retries` 1 → 2). More importantly, a **partial** sweep no
+  longer silently drops the non-responders: recce now **reconfirms** them with a fast
+  `-Pn` top-100-ports scan (`scanner.reconfirm_hosts`) — a host that answers on any port
+  is definitively up, so a firewalled-but-alive box that blocks ping is recovered into
+  the enumeration instead of being written off as down. Bounded (one sweep, `--open`,
+  fail-fast, skipped above `reconfirm_cap` = 1024 non-responders), and disableable with
+  `--no-reconfirm`. This complements the existing 0-response → auto-`-Pn` fallback, the
+  0-port congestion-adaptive re-scan, and the UDP liveness probe.
+- **`--targets-up` — authoritative target list (no false "no hosts" from a timeout).**
+  Target `@files` now parse `IP hostname` pairs (space / comma / tab / `hosts`-file
+  style) — the name flows into the report and the IP stays the scan target. With
+  `--targets-up`, recce treats the list as authoritative: it implies `-Pn` and
+  **pre-seeds every target into the datastore up front** (with its provided hostname,
+  `up_reason` = `target-list`), so a slow, timed-out, crashed or killed scan can never
+  make a real host vanish from the report — the host is already there and scanning only
+  enriches it. Pre-seeding persists immediately to SQLite, so even a hard-killed run
+  keeps every target (rebuildable with `recce report`). Use it when you have a complete
+  IP/hostname list you trust.
+- **Full-port scan is explicit and partial coverage is flagged.** A full 65535-port TCP
+  sweep is already the default (the `standard`/`thorough` profiles), but a reduced scan
+  could be mistaken for complete. recce now prints the **port scope** at the start of the
+  enum phase — a full sweep is stated plainly, and a top-N scan (`quick` profile /
+  `--top-ports` / `--fast`) prints a loud `PARTIAL, NOT a full scan` warning pointing at
+  `--all-ports`. The scope is recorded and echoed by `status`; `--all-ports` now
+  explicitly overrides the profile (applied last, so it wins over `quick`/`--top-ports`)
+  to force a full sweep on demand. Combined with the existing host-timeout truncation
+  flagging, a scan is never silently narrower than it looks.
+
+- **Engagement-readiness hardening.**
+  - **Basic UDP coverage in the enum phase.** A TCP-only sweep misses UDP services, so
+    `enum` now also sweeps a curated set of high-value UDP ports (DNS, DHCP, TFTP, NTP,
+    NetBIOS, SNMP, IKE/VPN, syslog, IPMI, MSSQL-browser, SIP, SSDP, mDNS) with service
+    detection + the cheap SNMP/DNS/NTP/NBT/IKE scripts, folding any open UDP services
+    into the host. On by default (needs root; auto-skips with a warning otherwise);
+    `--no-udp` to skip. `--udp-top N` still drives the larger vulns-phase UDP scan.
+  - **Exclude IPs from scope, from a file, persistently.** `--exclude` now accepts
+    `@file` (one IP/range/CIDR per line, `IP hostname` lines welcome) alongside inline
+    tokens, and the exclusion set is **persisted to the engagement** — once an IP is
+    excluded it stays out of scope on every later phase/re-run without re-typing.
+  - **Fewer form-fuzzing side effects.** The `--crawl` form fuzzer now refuses to submit
+    a form whose action or fields signal a real side effect — delete/pay/checkout/
+    invite/send/subscribe/upload/… actions, transactional/content fields (amount, card,
+    email, message, …), or any file-upload — and **records** the skipped forms as an
+    info finding so nothing is silently untested. Login/search/generic forms (where
+    injection lives) stay fuzzable. `--fuzz-risky-forms` opts back into submitting
+    state-changing forms on a throwaway target (file uploads are never submitted).
+
+### Added (high-fidelity decoder + probe tests)
+- **Fuzz-invariant harness for every Layer-1 decoder** (`tests/test_fuzz_decoders.py`).
+  Each pure decoder (SNMP `parse_response`, BSON `bson_parse`, LDAP `parse_search_entry`
+  / `result_code` / `_op_tag`, NTLM `parse_type2`, SMB2/SMB1 negotiate, `web.fingerprint`,
+  `parse_nmap_xml`) is hammered with every truncation, byte-flip, corrupted length field,
+  random splice and targeted structural attack (deep nesting, unterminated cstrings) of a
+  real message. A SIGALRM watchdog bounds each call so an infinite loop or non-advancing
+  offset fails the test instead of hanging the suite; each decoder is checked against its
+  *own* allowed-exception set, so any undeclared exception (the class its caller can't
+  catch) is flagged.
+- **Golden wire-vector tests** (`tests/test_wire_vectors.py`) assert the exact parsed
+  output for a real message per protocol — the other half of fidelity, catching a decoder
+  that stops mis-reads a field (offset/endianness/sign) even when it never raises.
+- **Fake-transport probe tests** (`tests/test_probe_transport.py`) stand up tiny 127.0.0.1
+  replay servers and point the real `smb`/`ftp`/`docker`/`kubernetes`/`web.scan_endpoint`
+  probes at them — no socket or parser mocking, so the exact socket→parse→findings path a
+  live target drives is exercised. Closes the loopback-server gap for the probes that had
+  none (SNMP/MongoDB/LDAP already had them); includes an integration-level regression guard
+  for the `_is_tls` plain-HTTP bug.
+- **Tool-output text-parser fuzzing.** The same harness now mutates a real stdout sample
+  of every parser that ingests external-tool output — `mssql.parse_nxc_mssql` / `parse_enum`
+  / `parse_dbowner` / `parse_exec` / `parse_datamine` / `parse_permmine` / `parse_write_proof`,
+  `credenum.parse_nxc_smb` / `parse_getuserspns` / `parse_getnpusers` / `parse_secretsdump`
+  / `parse_ssh_enum`, and `bloodhound.parse_tgs` / `parse_asrep` / `parse_secretsdump` — with
+  line truncation, field/sentinel corruption, injected noise lines, ANSI/unicode/NUL and pure
+  garbage. Asserts each degrades to an empty/partial result of the right *type* rather than
+  crashing the credentialed-enum phase, plus a `dbs`-argument-mismatch case for the db-scoped
+  MSSQL parsers. (All 15 held up — the parsers were already defensively written; this locks
+  the contract in as a regression guard.)
+- Shared fixtures live in `tests/wire_vectors.py`, so the fuzzer and the golden tests
+  mutate/parse byte-for-byte the same real message.
+
+### Fixed (high-fidelity test batch)
+- **`bson_parse` could crash a MongoDB probe with an unhandled `RecursionError`.** A
+  hostile/corrupt daemon sending a deeply nested BSON document (embedded-doc / array types)
+  recursed past Python's stack limit; `mongodb.command` catches `struct.error`/`IndexError`/
+  `ValueError` but **not** `RecursionError`, so it would escape and kill the enum phase.
+  `bson_parse` now caps nesting depth (`_MAX_BSON_DEPTH = 100`; real replies nest a few
+  levels) and stops safely. Found on the first run of the new fuzz harness.
+
+### Fixed (audit + end-to-end run)
+- **Plain-HTTP services on odd ports were scanned as HTTPS and missed entirely.**
+  `_is_tls` substring-matched the *product* name, so any product containing "http"+"s"
+  ("SimpleHTTPServer" → "…**https**erver"), "ssl" or "tls" was wrongly treated as TLS —
+  a plain-HTTP 8080 got probed over TLS, the handshake failed, and **every** web finding
+  (.git/.env/SQLi/etc.) on that port was silently lost. Now only the nmap service +
+  tunnel decide TLS; an explicit `http` service is trusted as plaintext. (Found by the
+  end-to-end run.)
+- **A hostname target or large CIDR could abort the whole scope.** `_expand_token`
+  misparsed a hyphenated FQDN (`mail-1.corp.example`) or a typo (`10.0.0.10-`) as a
+  numeric range and raised `ValueError`, rejecting *every* target; and it materialised
+  an entire CIDR with no cap (an IPv4 `/8` = 16M, an IPv6 `/64` = astronomical) → hang/
+  OOM before any scan. Now a range only expands when both sides are numeric, and a
+  network above 65 536 addresses is refused with a clear message.
+- **`parse_nmap_xml` could raise despite its "never raises" contract** — a well-formed
+  XML with an empty/odd numeric attribute (`portid=""`) crashed the run on the main
+  thread. Numeric attributes now parse tolerantly.
+- **MongoDB BSON parser hung forever on a hostile/corrupt document** (a negative string/
+  binary length made the parse offset stand still); the wire reader also had no
+  message-length cap. Both are now bounded, so a decoy/misbehaving daemon can't hang or
+  OOM the probe.
+- **Docker probe crashed on a malformed JSON array**, the LDAP pass-the-hash **sealed
+  channel crashed the module on a truncated/tampered frame**, and a **`--targets-up`
+  seed marked a truncated enum as complete** on merge — all now degrade cleanly / are
+  preserved.
+- **Review-coverage could never reach 100%**: unconfirmed `-Pn` phantom hosts were
+  counted in the denominator but appear on no sheet. Coverage now counts confirmed-up
+  hosts only, matching the Checklist. (Directly relevant to per-host completion tracking.)
+- Smaller hardening: `PROFILES` are deep-copied per run (were shared mutable singletons);
+  `Host.from_json` tolerates schema drift (unknown keys) on a carried-over datastore;
+  `--exclude` persistence and masscan partial-sweep now fail/​warn instead of silently
+  losing hosts; HTTP-Basic default-cred probe capped at a real 5 attempts; SNMP replies
+  are correlated by request-id (UDP); report generation survives a null severity.
+
+### Fixed (full-codebase audit)
+- **`_discover` crashed the caller on invalid targets.** Its error paths returned a
+  3-tuple after the callers were updated to unpack 4 values, so a bad CIDR / empty
+  scope raised inside `cmd_enum`/`cmd_scan` instead of exiting clean. Return the 4-tuple.
+- **`store._merge` silently dropped port enrichment on re-persist.** Six `Port` fields
+  (`reason`, `ostype`, `servicefp`, `detect_source`, `banner`, `binary`) were not
+  merged, so the on-target `binary`/`detect_source` set by `ingest`/`deploy` never
+  survived. Now merged; account `attrs`/`detail` also fold in on a key collision.
+- **`_fold_host` dropped `up_reason`/`state`**, hiding an imported port-less host that
+  was kept up only by its `report-listed` reason.
+- **Docker/Kubernetes truncated large API responses.** A single 256 KB read cut a busy
+  node's `/pods` or the apiserver's `/secrets` mid-buffer; JSON parse failed and a
+  critical exposure was downgraded to "reachable". Read to EOF (16 MB cap); an
+  oversized list body still counts as a real list.
+- **SMB2 negotiate trusted an error reply.** Offering a bare 3.1.1 dialect makes strict
+  servers return `STATUS_INVALID_PARAMETER`, which was read as dialect-0 /
+  signing-not-required and emitted a bogus finding. Validate command/status/
+  StructureSize; stop offering 3.1.1 without contexts.
+- **FTP write-proof claimed "fully reversible" even when the DELE failed**, leaving the
+  marker behind. Track `cleanup_ok`, retry the delete, and soften the finding text.
+- **Prove-engine verdicts:** the EOL recipe swallowed legacy-RCE findings ("just
+  upgrade"); the null-session verdict false-CONFIRMED a *credentialed* share listing;
+  OpenSSH `9.8` (non-portable, fixed) was mislabeled LIKELY; RCE findings (SambaCry,
+  Ghostcat, …) got no Verification row at all. Fixed each and added a version-CVE
+  catch-all.
+- **Overview host-index deep-links** pointed at the wrong Checklist rows for one
+  generation after an update added a host to an already-seen subnet (the row
+  precompute walked linearly while the writer buckets by group). Bucket identically.
+- **Misc:** TLS cert expiry parsed in local time vs a UTC now (`calendar.timegm`); the
+  SNMP finding fired on a bare "public"/"private" substring; a masscan intermediate
+  temp file was left behind; `cmd_smb`/`cmd_ftp` didn't auto-tick the Checklist when a
+  live layer ran under `--no-probe`; `cmd_web` never cleared a stale manual web tick on
+  re-run; xlsx dropdown/CF values weren't escaped.
+
+### Changed (audit: performance + cleanup)
+- **searchsploit is now cached process-wide** (lock-guarded), so N hosts on the same
+  product cost one query instead of one-per-host-thread as the docstring always claimed.
+- **Kubernetes** reuses the TLS/plaintext scheme learned from `/version` for its
+  follow-up requests; **MSSQL** caches the SQL Browser (UDP 1434) probe per IP — both
+  cut redundant connects on large scopes.
+- **Privesc** marks its step in the worker and persists once (dropped a second
+  full-host pass); `_generate_reports` loads credentials once instead of twice.
+- **Dedup:** `svccommon.findings_to_vulns` replaces five near-identical copies; the
+  service sheets share one `_write_findings_table`; duplicate severity maps and a
+  fragile band-label string hack in the workbook builder removed.
+
+### Added
+- **UDP liveness fallback for silent `-Pn` hosts.** Under `-Pn` a host that answers
+  nothing on TCP is genuinely ambiguous — dead, or alive behind a default-drop
+  firewall. When the TCP sweep (and its verify re-scan) come back with zero ports on
+  a host we're scanning on faith, recce now sends a UDP ping to common services
+  (DNS/DHCP/NTP/NetBIOS/SNMP/IKE/Syslog/RIP/IPMI/SSDP/mDNS). A service reply *or* an
+  ICMP port-unreachable comes back with a real nmap status reason, so the host flips
+  from UNKNOWN to **confirmed up** instead of being written off as down. Runs `-sn`
+  (not `-Pn`) so nmap's up/down verdict is meaningful again; needs root for raw UDP
+  and logs a skip otherwise; `--no-udp-fallback` disables it. The discovery-phase
+  reply reason (echo-reply/syn-ack/arp-response) now also propagates into the stored
+  host, so a ping-only responder is recorded as proven-up even with no open ports.
+
+### Changed
+- **`Host.is_up` no longer counts `enumerated` as proof of life.** The enum phase
+  marks every host it *tries* (including a dead `-Pn` IP that answered nothing), so
+  liveness now rests only on real evidence: an open port, a finding/script/account,
+  a genuine discovery/UDP reply, or DNS/ARP/OS data.
+- **Checklist shows only hosts confirmed UP — and never writes a live host off as
+  down.** A new one-directional `Host.is_up` gates the Checklist: a host stays on
+  the list on *any* concrete proof of life (an open port, enumeration/a finding, a
+  real nmap discovery reply, or DNS/ARP/OS evidence), so a live host is never
+  dropped; only IPs with zero evidence (e.g. `-Pn` phantoms across a 900-host
+  sweep) fall away. The nmap status *reason* is now parsed (`echo-reply`,
+  `syn-ack`, `arp-response`, … = a real reply; `user-set` = the `-Pn` blanket
+  assume-up, which is **not** proof), and a store merge can never downgrade a
+  confirmed reply back to an assume-up. Scanned-but-unconfirmed IPs are tallied
+  explicitly on the Overview ("Scanned, not confirmed up — treat as UNKNOWN, not
+  down") and in the Markdown/HTML summaries, so nothing is silently lost.
+- **Legend line on the Checklist tab itself.** A one-line legend now sits above the
+  header (green step headers = auto-ticked by recce, amber = your manual sign-off;
+  ☑/☐/— key; and the up-only rule spelled out). The workbook writer, freeze pane,
+  auto-filter and every tracking read-back now locate the header row instead of
+  assuming row 1, so the shifted header round-trips operator edits intact.
+
+## [0.2.4] - 2026-07-23
 
 ## [0.2.4] - 2026-07-23
 

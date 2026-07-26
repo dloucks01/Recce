@@ -6,7 +6,7 @@ the reporting layer never has to care which tool produced the data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from typing import Any
 
 
@@ -174,6 +174,9 @@ class Host:
     ip: str
     subnet: str = ""
     state: str = "up"
+    up_reason: str = ""            # nmap status reason: echo-reply / syn-ack / arp-
+                                   # response = a real reply (proof of life); "user-set"
+                                   # = the -Pn blanket assume-up, which is NOT proof
     hostnames: list[str] = field(default_factory=list)
     mac: str = ""
     vendor: str = ""
@@ -198,6 +201,10 @@ class Host:
     db_scanned: bool = False       # the `db` phase ran against this host
     privesc_checked: bool = False  # the `privesc` phase ran against this host
     cred_enumerated: bool = False  # the `credenum` phase ran against this host
+    access_gained: bool = False    # recce confirmed a foothold here (valid creds /
+                                   # local admin / unauth RCE), or the operator
+                                   # recorded one via `recce access`
+    access_detail: str = ""        # how access was gained (short, for the report)
     last_scanned: str = ""
     reviewed: bool = False
     notes: str = ""
@@ -209,6 +216,41 @@ class Host:
     @property
     def open_ports(self) -> list[Port]:
         return [p for p in self.ports if p.state == "open"]
+
+    # nmap status reasons that mean the host genuinely REPLIED (proof of life).
+    # "user-set" is the -Pn blanket assume-up and does NOT count. "" / "unknown" /
+    # "no-response" are non-committal. Everything else is an actual packet back.
+    _NOT_A_REPLY = ("", "user-set", "unknown", "no-response", "unknown-response")
+
+    @property
+    def is_up(self) -> bool:
+        """Positive, defensible proof the host is up. Deliberately conservative in
+        one direction only: it must NEVER treat a live host as down (a missed host
+        is a hole in the assessment), so ANY concrete sign of life makes it up, and
+        only a host with zero evidence at all is treated as not-confirmed-up.
+
+        Signals, any one of which is proof:
+          * an open port                 - unambiguous, the host answered a probe
+          * a finding / script / account - a service or NSE script got a response
+          * a real nmap discovery reply  - echo-reply / syn-ack / arp-response, or
+                                           a UDP-fallback reply (NOT the -Pn "user-
+                                           set" assume-up, which is not a response)
+          * DNS / ARP / OS evidence      - it answered a name/MAC/fingerprint probe
+
+        `enumerated` is deliberately NOT a signal: the pipeline sets it on every host
+        it runs the enum phase against, including a dead -Pn IP that answered nothing,
+        so it means "we tried", not "it replied".
+        """
+        if self.open_ports:
+            return True
+        if (self.vulns or self.host_scripts
+                or self.local_findings or self.accounts):
+            return True
+        if self.up_reason and self.up_reason not in self._NOT_A_REPLY:
+            return True
+        if self.hostnames or self.mac or self.os_name:
+            return True
+        return False
 
     @property
     def status(self) -> str:
@@ -236,18 +278,25 @@ class Host:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "Host":
+        # Filter each row to the dataclass's known fields so a results.sqlite written by
+        # a different recce version (a renamed/removed field) loads instead of raising
+        # TypeError and aborting the whole phase.
+        def _keep(kls, row):
+            allowed = {f.name for f in fields(kls)}
+            return {k: v for k, v in row.items() if k in allowed}
         ports = [
-            Port(**{**p, "scripts": [Script(**s) for s in p.get("scripts", [])]})
+            Port(**{**_keep(Port, p),
+                    "scripts": [Script(**_keep(Script, s)) for s in p.get("scripts", [])]})
             for p in data.get("ports", [])
         ]
-        vulns = [Vuln(**v) for v in data.get("vulns", [])]
-        accounts = [Account(**a) for a in data.get("accounts", [])]
-        exploits = [Exploit(**e) for e in data.get("exploits", [])]
-        host_scripts = [Script(**s) for s in data.get("host_scripts", [])]
-        core = {
+        vulns = [Vuln(**_keep(Vuln, v)) for v in data.get("vulns", [])]
+        accounts = [Account(**_keep(Account, a)) for a in data.get("accounts", [])]
+        exploits = [Exploit(**_keep(Exploit, e)) for e in data.get("exploits", [])]
+        host_scripts = [Script(**_keep(Script, s)) for s in data.get("host_scripts", [])]
+        core = _keep(cls, {
             k: v
             for k, v in data.items()
             if k not in ("ports", "vulns", "accounts", "exploits", "host_scripts")
-        }
+        })
         return cls(ports=ports, vulns=vulns, accounts=accounts, exploits=exploits,
                    host_scripts=host_scripts, **core)

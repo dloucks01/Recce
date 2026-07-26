@@ -169,6 +169,9 @@ class Sheet:
         self.col_widths: dict[int, float] = {}
         self.hidden_cols: set[int] = set()
         self.freeze_header = False
+        self.header_row = 1            # 1-based row the column headers sit on; >1 when
+                                      # a legend/note row precedes them (freeze + filter
+                                      # + custom height all follow this row, not row 1)
         self.freeze_cols = 0            # also freeze the first N columns (left pane)
         self.hide_gridlines = False     # hide native gridlines (we draw our own rules)
         self.header_height: float | None = None
@@ -259,7 +262,7 @@ class Sheet:
         for r, row in enumerate(self._rows, start=1):
             cells = []
             attrs = f' r="{r}"'
-            if r == 1 and self.header_height:
+            if r == self.header_row and self.header_height:
                 attrs += f' ht="{self.header_height:.0f}" customHeight="1"'
             lvl = self._row_outline[r - 1] if r - 1 < len(self._row_outline) else 0
             if lvl:
@@ -284,7 +287,7 @@ class Sheet:
 
     def _pane_xml(self) -> str:
         """Frozen pane: header row and/or the first N identity columns."""
-        x, y = self.freeze_cols, (1 if self.freeze_header else 0)
+        x, y = self.freeze_cols, (self.header_row if self.freeze_header else 0)
         if not x and not y:
             return ""
         top_left = f"{col_letter(x + 1)}{y + 1}"
@@ -325,21 +328,29 @@ class Sheet:
 
         autofilter = ""
         if self.autofilter_cols:
-            autofilter = f'<autoFilter ref="A1:{col_letter(self.autofilter_cols)}1"/>'
+            hr = self.header_row
+            autofilter = (f'<autoFilter ref="A{hr}:'
+                          f'{col_letter(self.autofilter_cols)}{hr}"/>')
+
+        # Values sit inside an Excel formula-string literal ("...") within XML element
+        # text: XML-escape &<> AND double any interior " (Excel's string escape), or a
+        # list/CF value containing those chars produces a workbook Excel rejects.
+        def _formula_str(s) -> str:
+            return _xml_text(str(s).replace('"', '""'))
 
         cf = ""
         for i, (sq, value, dxf_id) in enumerate(self._cf_rules):
             cf += (f'<conditionalFormatting sqref="{sq}">'
                    f'<cfRule type="cellIs" dxfId="{dxf_id}" priority="{i + 1}" operator="equal">'
-                   f'<formula>"{value}"</formula></cfRule></conditionalFormatting>')
+                   f'<formula>"{_formula_str(value)}"</formula></cfRule></conditionalFormatting>')
 
         dv = ""
         if self._dv_rules:
             body = ""
             for sq, values in self._dv_rules:
                 body += (f'<dataValidation type="list" allowBlank="1" showInputMessage="1" '
-                         f'showErrorMessage="1" sqref="{sq}"><formula1>"{values}"</formula1>'
-                         f'</dataValidation>')
+                         f'showErrorMessage="1" sqref="{sq}"><formula1>"{_formula_str(values)}"'
+                         f'</formula1></dataValidation>')
             dv = f'<dataValidations count="{len(self._dv_rules)}">{body}</dataValidations>'
 
         hl = ""
@@ -499,10 +510,12 @@ def read_sheets(path: str) -> dict[str, list[list[str]]]:
             for row in data.findall(f"{_NS}row"):
                 cells: list[str] = []
                 max_c = 0
+                next_ci = 0                     # running column for cells lacking an r= ref
                 staged: dict[int, str] = {}
                 for c in row.findall(f"{_NS}c"):
                     ref = c.get("r", "")
-                    ci = _col_index(ref) if ref else (len(cells) + 1)
+                    ci = _col_index(ref) if ref else (next_ci + 1)
+                    next_ci = ci
                     ctype = c.get("t", "")
                     val = ""
                     if ctype == "inlineStr":

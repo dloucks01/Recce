@@ -5,9 +5,9 @@ client-certificate enforcement) is a full host compromise: anyone who can reach 
 can create a container that bind-mounts the host root and runs as root, i.e. instant
 root-level RCE on the Docker host. recce reads the API unauthenticated - /version,
 /info, /containers/json, /images/json - and, if it answers, reports a CONFIRMED
-critical finding (the successful unauthenticated read IS the proof; recce does NOT
-create a container). Everything folds into the main totals and a dedicated Docker
-tab. Airgapped-safe, stdlib only.
+critical finding (the successful unauthenticated read IS the proof). Everything folds
+into the main totals and a dedicated Docker tab. Airgapped, stdlib only. Safety
+posture: see SECURITY.md.
 """
 from __future__ import annotations
 
@@ -33,6 +33,22 @@ def _scheme(port: int) -> str:
     return "https" if port == 2376 else "http"
 
 
+_READ_CAP = 16 * 1024 * 1024   # hard ceiling on a single response body (16 MB)
+
+
+def _read_capped(resp, cap: int = _READ_CAP) -> bytes:
+    """Read an HTTP response to EOF, bounded by `cap` - so a large /containers/json
+    or /images/json isn't truncated mid-buffer (which broke json parsing)."""
+    chunks, total = [], 0
+    while total < cap:
+        chunk = resp.read(min(65536, cap - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def _get(ip: str, port: int, path: str, timeout: float = _TIMEOUT):
     """GET a Docker API path. Returns (status, parsed_json_or_text) or None."""
     conn = None
@@ -45,7 +61,7 @@ def _get(ip: str, port: int, path: str, timeout: float = _TIMEOUT):
         conn.request("GET", path, headers={"Accept": "application/json",
                                            "User-Agent": "recce-docker/1.0"})
         resp = conn.getresponse()
-        body = resp.read(262144).decode("utf-8", "replace")
+        body = _read_capped(resp).decode("utf-8", "replace")
         try:
             return resp.status, json.loads(body)
         except ValueError:
@@ -92,12 +108,13 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
             {"image": c.get("Image", ""),
              "names": [n.lstrip("/") for n in (c.get("Names") or [])],
              "command": c.get("Command", ""), "state": c.get("State", "")}
-            for c in cj[1][:25]]
+            for c in cj[1][:25] if isinstance(c, dict)]
     ij = _get(ip, port, "/images/json", timeout)
     if ij and ij[0] == 200 and isinstance(ij[1], list):
         tags = []
         for im in ij[1]:
-            tags.extend(im.get("RepoTags") or [])
+            if isinstance(im, dict):
+                tags.extend(im.get("RepoTags") or [])
         out["image_tags"] = [t for t in tags if t and t != "<none>:<none>"][:40]
     return out
 
@@ -249,24 +266,9 @@ def proof_html(command, output, banner: str = "") -> str:
 # --- top-level analyze ----------------------------------------------------------
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from .models import Vuln
-    by_ip: dict[str, list] = {}
-    for f in fs:
-        parts = f["target"].split(":")
-        ip = parts[0]
-        port = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 2375
-        evidence = f.get("detail", "")
-        if f.get("narrative"):
-            evidence += f"\n\nWhat this enables:\n{f['narrative']}"
-        if f.get("command"):
-            evidence += f"\n\nProve / next step:\n{f['command']}"
-        by_ip.setdefault(ip, []).append(Vuln(
-            ip=ip, port=port, protocol="tcp",
-            script_id=f"docker:{f['title'][:40]}", state="finding", title=f["title"],
-            severity=f["severity"], source="docker", confidence="confirmed",
-            cwes=list(f.get("cwes") or ["CWE-284"]),
-            output=evidence.strip(), remediation=f.get("remediation", "")))
-    return by_ip
+    """Docker findings -> {ip: [Vuln]} (source='docker')."""
+    from .svccommon import findings_to_vulns as _f2v
+    return _f2v(fs, "docker", 2375)
 
 
 def analyze(hosts: list[Host], active: bool = True) -> dict:

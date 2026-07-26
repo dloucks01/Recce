@@ -56,17 +56,28 @@ def sample_hosts():
     return hosts
 
 
+def header_index(rows, *must_have):
+    """Row index of the real column-header row (the first row that holds every
+    token in must_have). A legend/note line can precede the header, so we locate
+    it instead of assuming row 0."""
+    for i, r in enumerate(rows):
+        if all(tok in r for tok in must_have):
+            return i
+    return 0
+
+
 def rows_by_ip(sheets, title):
     """Return (header, {ip: [row-as-dict, ...]}) for a sheet with an IP column.
 
     Skips collapsible group-header band rows (they carry a label in the IP column
     but no Key), so callers only see real data rows keyed by a bare IP."""
     rows = sheets[title]
-    hdr = rows[0]
+    hidx = header_index(rows, "IP")
+    hdr = rows[hidx]
     ipc = hdr.index("IP")
     kidx = hdr.index("Key") if "Key" in hdr else None
     out: dict = {}
-    for r in rows[1:]:
+    for r in rows[hidx + 1:]:
         if kidx is not None and (len(r) <= kidx or not r[kidx]):
             continue                       # group-header band row - not data
         if len(r) > ipc and r[ipc]:
@@ -505,9 +516,10 @@ class WorkbookStructureTest(unittest.TestCase):
                      "Users & Accounts", "Priv-Esc"):
             self.assertIn(name, sheets)
         self.assertNotIn("Exploits", sheets)   # no exploit data -> sheet omitted
-        # Tracked sheets carry a Key column so read-back can find every row.
+        # Tracked sheets carry a Key column so read-back can find every row (the
+        # Checklist header sits below its legend line, so locate it, don't assume row 0).
         for name in ("Checklist", "Services", "Vulnerabilities"):
-            self.assertIn("Key", sheets[name][0])
+            self.assertIn("Key", sheets[name][header_index(sheets[name], "Key")])
 
     def test_openpyxl_can_open_the_workbook(self):
         try:
@@ -531,7 +543,9 @@ class WorkbookStructureTest(unittest.TestCase):
             out = os.path.join(d, "wb.xlsx")
             build_workbook(sample_hosts(), out)
             wb = load_workbook(out)
-        self.assertEqual(wb["Checklist"].freeze_panes, "D2")   # header + 3 id cols
+        # Checklist header is on row 2 (a legend line precedes it), so the freeze
+        # splits below row 2; 3 identity cols frozen => D3.
+        self.assertEqual(wb["Checklist"].freeze_panes, "D3")   # header + 3 id cols
         self.assertEqual(wb["Services"].freeze_panes, "C2")
         self.assertFalse(wb["Checklist"].sheet_view.showGridLines)
         vs = wb["Vulnerabilities"]
@@ -664,11 +678,14 @@ class WorkbookStructureTest(unittest.TestCase):
                 import re as _re
                 wb = load_workbook(path)
                 ck = wb["Checklist"]
-                ipc = [c.value for c in ck[1]].index("IP") + 1
+                # The header sits below a legend line - find the row carrying "IP".
+                hrow = next(r for r in range(1, ck.max_row + 1)
+                            if "IP" in [c.value for c in ck[r]])
+                ipc = [c.value for c in ck[hrow]].index("IP") + 1
                 # The IP column also carries the collapsible subnet-band labels; keep
                 # only the rows whose IP cell is a bare IPv4 (the real host rows).
                 ip_row = {}
-                for r in range(2, ck.max_row + 1):
+                for r in range(hrow + 1, ck.max_row + 1):
                     v = ck.cell(row=r, column=ipc).value
                     if isinstance(v, str) and _re.fullmatch(r"\d+\.\d+\.\d+\.\d+", v):
                         ip_row[v] = r
@@ -686,6 +703,16 @@ class WorkbookStructureTest(unittest.TestCase):
             # Regenerate preserving row order -> links must still be correct.
             build_workbook(sample_hosts(), out, order_map=read_key_order(out))
             _check(out)
+            # And after a NEW host is added to an already-seen subnet (it appends at
+            # the saved-order tail but the writer re-groups it under its subnet). The
+            # linear precompute mis-counted band rows here; the bucketed one must not.
+            from recce.report_excel import update_workbook
+            from recce.models import Host, Port
+            extra = Host(ip="10.0.10.99", subnet="10.0.10.0/24", state="up",
+                         hostnames=["late01"], os_name="Linux",
+                         ports=[Port(portid=22, service="ssh", state="open")])
+            update_workbook(out, sample_hosts() + [extra])
+            _check(out)
 
     def test_step_headers_colour_auto_vs_manual(self):
         try:
@@ -697,14 +724,19 @@ class WorkbookStructureTest(unittest.TestCase):
             out = os.path.join(d, "wb.xlsx")
             build_workbook(sample_hosts(), out)
             ws = load_workbook(out)["Checklist"]
-        hdr = [c.value for c in ws[1]]
-        auto = {"Enumerated", "Vuln-scan", "Web", "DB", "Priv-esc"}
-        manual = {"AD", "Access", "Creds", "Lateral"}
+        # Header is on row 2 (a legend line precedes it) - locate the row with "IP".
+        hrow = next(r for r in range(1, ws.max_row + 1)
+                    if "IP" in [c.value for c in ws[r]])
+        hdr = [c.value for c in ws[hrow]]
+        # Access is auto now: recce derives it from credentialed enum (creds/admin/
+        # SSH/MSSQL) and it auto-ticks like the other tool phases.
+        auto = {"Enumerated", "Vuln-scan", "Web", "DB", "Priv-esc", "Access"}
+        manual = {"AD", "Creds", "Lateral"}
         for h in auto:
-            c = ws.cell(row=1, column=hdr.index(h) + 1)
+            c = ws.cell(row=hrow, column=hdr.index(h) + 1)
             self.assertEqual(c.fill.fgColor.rgb, "FF2E7D32", f"{h} should be auto-green")
         for h in manual:
-            c = ws.cell(row=1, column=hdr.index(h) + 1)
+            c = ws.cell(row=hrow, column=hdr.index(h) + 1)
             self.assertEqual(c.fill.fgColor.rgb, "FFC55A11", f"{h} should be manual-amber")
         # Sanity: the split matches the tracking module's source of truth.
         self.assertEqual(manual, {h for h, s in tr.STEP_COLUMNS.items()
@@ -841,6 +873,37 @@ class ScannerCommandTest(unittest.TestCase):
         self.assertIn("--host-timeout", cmd)
         self.assertIn("smb-os-discovery", j)          # AD enrichment scripts
         self.assertIn("80,445", j)                    # exactly the ports given
+
+    def test_udp_liveness_probe_is_a_udp_ping_without_pn(self):
+        import recce.scanner as s
+        orig_root = s._is_root
+        s._is_root = lambda: True                     # pretend we have raw-socket caps
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                calls = self._capture(s.udp_liveness_probe, "1.2.3.4",
+                                      os.path.join(d, "u.xml"), s.PROFILES["standard"])
+        finally:
+            s._is_root = orig_root
+        cmd = calls[0][0]
+        j = " ".join(cmd)
+        self.assertIn("-sn", cmd)                     # ping-only (nmap's up verdict)
+        self.assertNotIn("-Pn", cmd)                  # NOT -Pn, so up/down is meaningful
+        self.assertTrue(any(a.startswith("-PU") for a in cmd))  # UDP ping probes
+        self.assertIn("161", j)                       # SNMP among the probed ports
+        self.assertIn("53", j)                        # DNS among the probed ports
+        self.assertIn("1.2.3.4", cmd)
+
+    def test_udp_liveness_probe_needs_root(self):
+        import recce.scanner as s
+        orig_root = s._is_root
+        s._is_root = lambda: False
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                calls = self._capture(s.udp_liveness_probe, "1.2.3.4",
+                                      os.path.join(d, "u.xml"), s.PROFILES["standard"])
+        finally:
+            s._is_root = orig_root
+        self.assertEqual(calls, [])                    # no nmap run without root
 
     def test_vuln_scan_safe_vs_aggressive(self):
         import recce.scanner as s
@@ -1144,7 +1207,7 @@ class EnvironmentAndTargetsTest(unittest.TestCase):
             with open(f, "w") as fh:
                 fh.write("10.0.0.1\n# a comment\n10.0.0.2   # trailing\n"
                          "10.0.1.0/30\n\n")
-            hosts, sm = load_targets(["@" + f])
+            hosts, sm, _ = load_targets(["@" + f])
         self.assertIn("10.0.0.1", hosts)
         self.assertIn("10.0.0.2", hosts)
         self.assertIn("10.0.1.1", hosts)                 # expanded from the CIDR
@@ -1294,9 +1357,16 @@ class UsabilityAndDiscoveryTest(unittest.TestCase):
         def enum(ip, ports, out, profile, creds=None):
             return fps(ip, out, profile)
 
-        saved = (s.check_environment, s.discover_hosts, s.full_port_scan, s.enum_scan)
+        def empty_udp(ip, out, profile):
+            with open(out, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun></nmaprun>')
+            return out, None
+
+        saved = (s.check_environment, s.discover_hosts, s.full_port_scan, s.enum_scan,
+                 s.udp_basic_scan)
         s.check_environment = lambda p: []
         s.discover_hosts, s.full_port_scan, s.enum_scan = empty_disc, fps, enum
+        s.udp_basic_scan = empty_udp
         try:
             with tempfile.TemporaryDirectory() as d:
                 buf = io.StringIO()
@@ -1311,7 +1381,7 @@ class UsabilityAndDiscoveryTest(unittest.TestCase):
                 self.assertTrue(all(h.open_ports for h in hosts))
         finally:
             (s.check_environment, s.discover_hosts,
-             s.full_port_scan, s.enum_scan) = saved
+             s.full_port_scan, s.enum_scan, s.udp_basic_scan) = saved
 
 
 class PhaseIdempotencyTest(unittest.TestCase):
@@ -2026,7 +2096,7 @@ class EnumRobustnessTest(unittest.TestCase):
         store.set_scope("10.0.0.0/24", 254)
 
         def fake_worker(ip, profile, paths, creds, port_map, subnet_map,
-                        active_probe=True):
+                        active_probe=True, disc_reason="", provided_name=""):
             if ip == "10.0.0.11":            # worker raises
                 raise RuntimeError("boom")
             if ip == "10.0.0.12":            # timed out -> None + issue
@@ -2130,24 +2200,24 @@ class EnumRobustnessTest(unittest.TestCase):
             self.addCleanup(shutil.rmtree, d, ignore_errors=True)
             paths = {"raw": d}
             # discovered-live 0-port host -> verified
-            cli._enum_worker("1.2.3.4", scanner.ScanProfile(ping_discovery=True),
-                             paths, None, None, {})
+            cli._enum_worker("1.2.3.4", scanner.ScanProfile(ping_discovery=True,
+                             udp_basic=False), paths, None, None, {})
             self.assertEqual(calls["verify"], 1)
             # -Pn (assume-up) without --verify-all -> NOT re-scanning every dead IP
             calls["verify"] = 0
             cli._enum_worker("1.2.3.5",
-                             scanner.ScanProfile(ping_discovery=False, verify_all=False),
+                             scanner.ScanProfile(ping_discovery=False, verify_all=False, udp_basic=False),
                              paths, None, None, {})
             self.assertEqual(calls["verify"], 0)
             # -Pn WITH --verify-all -> verified
             cli._enum_worker("1.2.3.6",
-                             scanner.ScanProfile(ping_discovery=False, verify_all=True),
+                             scanner.ScanProfile(ping_discovery=False, verify_all=True, udp_basic=False),
                              paths, None, None, {})
             self.assertEqual(calls["verify"], 1)
             # verify disabled -> never
             calls["verify"] = 0
             cli._enum_worker("1.2.3.7",
-                             scanner.ScanProfile(ping_discovery=True, verify=False),
+                             scanner.ScanProfile(ping_discovery=True, verify=False, udp_basic=False),
                              paths, None, None, {})
             self.assertEqual(calls["verify"], 0)
         finally:

@@ -26,6 +26,16 @@ _CVSS_RE = re.compile(
 _VULNERS_RE = re.compile(r"CVE-\d{4}-\d{4,7}\s+([0-9]{1,2}\.[0-9])\b", re.IGNORECASE)
 
 
+def _to_int(value, default: int = 0) -> int:
+    """Tolerant int() for XML attributes: a well-formed nmap XML can still carry an
+    empty/odd numeric attribute (portid="", accuracy=""), and parse_nmap_xml promises
+    to never raise - it returns [] on bad input, not a ValueError up the call stack."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _severity_from_cvss(score: float) -> str:
     if score >= 9.0:
         return "critical"
@@ -153,7 +163,10 @@ def _weak_config(host_ip: str, port: Port | None, script: Script) -> Vuln | None
         sev, title, cwe = "high", "SMTP open relay", ["CWE-269"]
     elif sid == "nfs-showmount" and "/" in out:
         sev, title, cwe = "low", "NFS exports readable", ["CWE-284"]
-    elif sid.startswith("snmp") and ("public" in low or "private" in low):
+    elif sid.startswith("snmp") and re.search(
+            r"valid credential|(?:public|private)\b[^\n]*\bvalid\b", low):
+        # Require the snmp-brute "public - Valid credentials" signal, not a bare
+        # "public"/"private" substring that could just be a device description.
         sev, title, cwe = "medium", "SNMP community string exposed", ["CWE-1392", "CWE-319"]
     elif sid == "dns-zone-transfer" and "domain" in low and "failed" not in low:
         sev, title, cwe = "medium", "DNS zone transfer allowed", ["CWE-200"]
@@ -247,6 +260,7 @@ def parse_nmap_xml(path: str) -> list[Host]:
     for hnode in root.findall("host"):
         status = hnode.find("status")
         state = status.get("state", "unknown") if status is not None else "unknown"
+        up_reason = status.get("reason", "") if status is not None else ""
         if state == "down":
             continue
 
@@ -263,7 +277,8 @@ def parse_nmap_xml(path: str) -> list[Host]:
         if not ip:
             continue
 
-        host = Host(ip=ip, state=state, mac=mac, vendor=vendor, last_scanned=start)
+        host = Host(ip=ip, state=state, up_reason=up_reason, mac=mac, vendor=vendor,
+                    last_scanned=start)
 
         hn_node = hnode.find("hostnames")
         if hn_node is not None:
@@ -277,16 +292,16 @@ def parse_nmap_xml(path: str) -> list[Host]:
         if os_node is not None:
             matches = os_node.findall("osmatch")
             if matches:
-                best = max(matches, key=lambda m: int(m.get("accuracy", "0")))
+                best = max(matches, key=lambda m: _to_int(m.get("accuracy", "0")))
                 host.os_name = best.get("name", "")
-                host.os_accuracy = int(best.get("accuracy", "0"))
+                host.os_accuracy = _to_int(best.get("accuracy", "0"))
                 oclass = best.find("osclass")
                 if oclass is not None:
                     host.os_family = oclass.get("osfamily", "")
 
         dist = hnode.find("distance")
         if dist is not None:
-            host.distance = int(dist.get("value", "0"))
+            host.distance = _to_int(dist.get("value", "0"))
 
         # Ports.
         ports_node = hnode.find("ports")
@@ -297,7 +312,7 @@ def parse_nmap_xml(path: str) -> list[Host]:
                 if pstate in ("closed", "filtered"):
                     continue  # keep only open / open|filtered
                 port = Port(
-                    portid=int(pnode.get("portid", "0")),
+                    portid=_to_int(pnode.get("portid", "0")),
                     protocol=pnode.get("protocol", "tcp"),
                     state=pstate or "open",
                     reason=st.get("reason", "") if st is not None else "",
@@ -426,7 +441,10 @@ def parse_gnmap(path: str) -> list[Host]:
         ip, hostname = m.group(1), m.group(2)
         host = hosts.get(ip)
         if host is None:
-            host = Host(ip=ip, state="up")
+            # A host explicitly listed in an imported scan report is treated as up:
+            # the grepable format carries no status reason, and hiding a host the
+            # operator's own report enumerated would be the worst kind of miss.
+            host = Host(ip=ip, state="up", up_reason="report-listed")
             hosts[ip] = host
         if hostname and hostname not in host.hostnames:
             host.hostnames.append(hostname)
@@ -484,7 +502,8 @@ def parse_normal(path: str) -> list[Host]:
         m = _NORMAL_HOST.search(line)
         if m:
             hostname, ip = (m.group(1) or ""), (m.group(2) or m.group(3))
-            cur = Host(ip=ip, state="up")
+            # Explicitly listed in an imported report => up (see parse_grepable).
+            cur = Host(ip=ip, state="up", up_reason="report-listed")
             if hostname:
                 cur.hostnames.append(hostname)
             hosts.append(cur)
