@@ -1421,8 +1421,9 @@ _UNAUTH_SWEEP = [
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
 # the netexec/impacket phase plus the authenticated facets of the deep modules. The
-# unauth-only modules (web/snmp/mongodb/docker/k8s) are intentionally absent; you run
-# `sweep` for those. Each handler here keys its authenticated path off args.username.
+# unauth-only modules (web/snmp/mongodb/redis/elasticsearch/rsync/nfs/kerberos/docker/
+# k8s) are intentionally absent; you run `sweep` for those. Each handler here keys its
+# authenticated path off args.username.
 _AUTH_SWEEP = [
     ("credenum", "cmd_credenum"), ("ldap", "cmd_ldap"), ("smb", "cmd_smb"),
     ("mssql", "cmd_mssql"), ("ftp", "cmd_ftp"),
@@ -1516,8 +1517,9 @@ def _run_sweep(args: argparse.Namespace, *, authenticated: bool) -> int:
 
 def cmd_sweep(args: argparse.Namespace) -> int:
     """Unauthenticated deep pass: run every applicable credential-free module
-    (web/smb/ftp/ldap/snmp/mongodb/docker/kubernetes/mssql) in one shot after `enum`,
-    instead of typing each by hand. Each self-skips when there's no matching service;
+    (web/smb/ftp/ldap/snmp/mongodb/redis/elasticsearch/rsync/nfs/kerberos/docker/
+    kubernetes/mssql) in one shot after `enum`, instead of typing each by hand. Each
+    self-skips when there's no matching service;
     the workbook is rebuilt once at the end. For the authenticated modules use
     `credsweep`."""
     return _run_sweep(args, authenticated=False)
@@ -4147,6 +4149,14 @@ def cmd_kerberos(args: argparse.Namespace) -> int:
               f"({analysis['realm']}). Enumerate users (ldap/ad) or pass --userlist.")
         store.close()
         return 0
+    # If every AS-REQ came back "no_reply", the DC never answered - don't present
+    # that as "0 valid" (which reads like a clean, complete test).
+    if active and all(r["state"] == "no_reply" for r in analysis["results"]):
+        print(f"[!] The DC {analysis['dc_ip']}:88 did not answer any AS-REQ "
+              f"({st['users_tested']} attempted). Check the DC IP / that TCP 88 is "
+              "reachable, then re-run. Nothing was concluded about these accounts.")
+        store.close()
+        return 0
     print(f"[+] Kerberos {analysis['realm']} @ {analysis['dc_ip']}: tested "
           f"{st['users_tested']} user(s) -> {st['valid']} valid, "
           f"{st['roastable']} AS-REP roastable.")
@@ -5106,7 +5116,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # One command instead of ~9: run every applicable credential-free deep module.
     sw = sub.add_parser("sweep",
                         help="run ALL applicable deep modules after enum in one shot "
-                             "(web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)")
+                             "(web/smb/ftp/ldap/snmp/mongodb/redis/elasticsearch/rsync/"
+                             "nfs/kerberos/docker/k8s/mssql)")
     sw.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
     _add_common(sw)
@@ -5509,7 +5520,8 @@ plain-English, step-by-step walkthrough. The core loop is short:
   2.  recce enum  <targets> -o eng        find hosts, ports, services -> workbook
   3.  recce vulns -o eng                   vuln-scan what enum found
   4.  recce sweep -o eng                   ALL credential-free deep modules at once
-                                          (web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)
+                                          (web/smb/ftp/ldap/snmp/mongodb/redis/
+                                          elasticsearch/rsync/nfs/kerberos/docker/k8s/mssql)
   5.  recce credsweep -u USER -p PASS -d DOMAIN -o eng
                                           ALL authenticated modules once you have creds
                                           (credenum + authenticated ldap/smb/mssql/ftp)
@@ -5518,8 +5530,9 @@ Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options)
 or check progress and the suggested next step:  recce status -o eng
 
 Want to focus one service instead of the whole sweep?  Each still has its own
-command - recce web|smb|ftp|ldap|snmp|mongodb|docker|k8s|mssql -o eng  (or add
--u/-p/-d to smb/ldap/mssql/ftp for their authenticated depth). See the Runbook tab.
+command - recce web|smb|ftp|ldap|snmp|mongodb|redis|elasticsearch|rsync|nfs|
+kerberos|docker|k8s|mssql -o eng  (or add -u/-p/-d to smb/ldap/mssql/ftp for their
+authenticated depth). See the Runbook tab.
 
 Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
 SharpHound / Certipy data?   recce ad loot.zip certipy.json -u USER -p PASS -d DOMAIN
