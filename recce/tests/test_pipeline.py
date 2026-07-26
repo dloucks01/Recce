@@ -8183,6 +8183,189 @@ class ElasticsearchTest(unittest.TestCase):
             E.is_elasticsearch = orig
 
 
+class RsyncTest(unittest.TestCase):
+    """Deep rsync module: a mock rsync daemon (@RSYNCD greeting, #list, per-module
+    OK/AUTHREQD), anonymous-access detection, findings, prove, `recce rsync`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import threading
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(3.0)
+                sock.sendall(b"@RSYNCD: 31.0\n")
+                # Read the client's version echo + the request line.
+                buf = b""
+                while buf.count(b"\n") < 2:
+                    try:
+                        c = sock.recv(256)
+                    except OSError:
+                        return
+                    if not c:
+                        return
+                    buf += c
+                lines = buf.decode().split("\n")
+                req = lines[1] if len(lines) > 1 else ""
+                if req == "#list":
+                    sock.sendall(b"backups\tnightly server backups\n")
+                    sock.sendall(b"public\tanonymous share\n")
+                    sock.sendall(b"secret\trestricted\n")
+                    sock.sendall(b"@RSYNCD: EXIT\n")
+                elif req == "secret":
+                    sock.sendall(b"@RSYNCD: AUTHREQD abcdef\n")
+                else:                                   # backups / public: anonymous OK
+                    sock.sendall(b"@RSYNCD: OK\n")
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_list_and_access(self):
+        from recce import rsync as R
+        pr = R.list_modules("127.0.0.1", self.port, timeout=3.0)
+        self.assertTrue(pr["reachable"])
+        self.assertEqual([m["name"] for m in pr["modules"]],
+                         ["backups", "public", "secret"])
+        self.assertEqual(R.probe_module("127.0.0.1", self.port, "backups", 3.0), "open")
+        self.assertEqual(R.probe_module("127.0.0.1", self.port, "secret", 3.0), "auth")
+
+    def test_findings_and_prove(self):
+        from recce import rsync as R, proofs
+        analysis = R.analyze([Host(ip="127.0.0.1",
+                                   ports=[Port(portid=self.port, state="open",
+                                               service="rsync")])], active=True)
+        # is_rsync gates on port 873; drive findings directly off the probe instead.
+        pr = {("10.0.8.8", 873): R.list_modules("127.0.0.1", self.port, 3.0)}
+        for m in pr[("10.0.8.8", 873)]["modules"]:
+            m["access"] = R.probe_module("127.0.0.1", self.port, m["name"], 3.0)
+        h = Host(ip="10.0.8.8", ports=[Port(portid=873, service="rsync", state="open")])
+        fs = R.findings([h], pr)
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("rsync module readable without authentication", titles)
+        self.assertIn("rsync modules enumerable", titles)
+        h.vulns = R.findings_to_vulns(fs)["10.0.8.8"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_cmd_rsync_end_to_end(self):
+        from recce import cli, xlsx, rsync as R
+        from recce.store import Store
+        orig = R.is_rsync
+        R.is_rsync = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="rsync")]))
+                st.close()
+                self.assertEqual(cli.main(["rsync", "-o", out]), 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("rsync", sheets)
+                vtxt = "\n".join(" ".join(map(str, r)) for r in sheets["Vulnerabilities"])
+                self.assertIn("rsync", vtxt)
+        finally:
+            R.is_rsync = orig
+
+
+class NfsTest(unittest.TestCase):
+    """Deep NFS module: a mock ONC RPC server (portmapper DUMP + mountd EXPORT over
+    record marking), world-export detection, findings, prove, `recce nfs`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import struct
+        import threading
+        from recce import nfs as N
+
+        def xstr(s):
+            b = s.encode()
+            return struct.pack(">I", len(b)) + b + b"\x00" * ((4 - len(b) % 4) % 4)
+
+        def reply(xid, results):
+            body = (struct.pack(">III", xid, 1, 0)      # xid, REPLY, MSG_ACCEPTED
+                    + struct.pack(">II", 0, 0)          # verf AUTH_NULL
+                    + struct.pack(">I", 0)              # accept_stat SUCCESS
+                    + results)
+            return struct.pack(">I", 0x80000000 | len(body)) + body
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                sock.settimeout(3.0)
+                rec = N._recv_record(sock, 3.0)
+                if rec is None:
+                    return
+                xid, mtype, rpcvers, prog, vers, proc = struct.unpack_from(">IIIIII", rec, 0)
+                myport = self.server.server_address[1]
+                if prog == N._PMAP_PROG and proc == 4:          # portmap DUMP
+                    res = b""
+                    for pr, ve, po in ((N._MOUNT_PROG, 3, myport),
+                                       (N._NFS_PROG, 3, 2049)):
+                        res += struct.pack(">IIIII", 1, pr, ve, N._IPPROTO_TCP, po)
+                    res += struct.pack(">I", 0)
+                    sock.sendall(reply(xid, res))
+                elif prog == N._MOUNT_PROG and proc == 5:       # mountd EXPORT
+                    res = b""
+                    res += struct.pack(">I", 1) + xstr("/srv/backups") \
+                        + struct.pack(">I", 1) + xstr("*") + struct.pack(">I", 0)
+                    res += struct.pack(">I", 1) + xstr("/home") \
+                        + struct.pack(">I", 1) + xstr("10.0.0.0/24") + struct.pack(">I", 0)
+                    res += struct.pack(">I", 0)
+                    sock.sendall(reply(xid, res))
+                else:
+                    sock.sendall(reply(xid, b""))
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_probe_lists_exports(self):
+        from recce import nfs as N
+        pr = N.probe("127.0.0.1", timeout=3.0, pmport=self.port)
+        self.assertTrue(pr["reachable"])
+        self.assertTrue(pr["nfs"])
+        dirs = [e["dir"] for e in pr["exports"]]
+        self.assertEqual(dirs, ["/srv/backups", "/home"])
+        self.assertTrue(N._is_world(pr["exports"][0]["groups"]))     # '*'
+        self.assertFalse(N._is_world(pr["exports"][1]["groups"]))    # subnet
+
+    def test_findings_and_prove(self):
+        from recce import nfs as N, proofs
+        pr = {"10.0.8.9": N.probe("127.0.0.1", timeout=3.0, pmport=self.port)}
+        h = Host(ip="10.0.8.9", ports=[Port(portid=2049, service="nfs", state="open"),
+                                       Port(portid=111, service="rpcbind", state="open")])
+        fs = N.findings([h], pr)
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("NFS export shared to any host", titles)
+        self.assertIn("NFS exports enumerable", titles)
+        h.vulns = N.findings_to_vulns(fs)["10.0.8.9"]
+        self.assertIn(proofs.CONFIRMED, [r["verdict"] for r in proofs.verify_host(h)])
+
+    def test_rpc_reply_framing(self):
+        from recce import nfs as N
+        import struct
+        body = struct.pack(">III", 0x1003, 1, 0) + struct.pack(">II", 0, 0) \
+            + struct.pack(">I", 0) + b"payload!!"
+        self.assertEqual(N._parse_reply(body, 0x1003), b"payload!!")
+        self.assertIsNone(N._parse_reply(body, 0x9999))          # wrong xid
+
+
 class DiscoveryReconfirmTest(unittest.TestCase):
     """False-negative hardening: the discovery probe set, and the reconfirm re-probe
     that recovers firewalled hosts which block ping but answer a port scan."""

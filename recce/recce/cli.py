@@ -330,7 +330,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["ldap"] = json.loads(ldap_blob)
         except ValueError:
             pass
-    for _mk in ("snmp", "mongodb", "redis", "elasticsearch"):
+    for _mk in ("snmp", "mongodb", "redis", "elasticsearch", "rsync", "nfs"):
         _blob = store.get_meta(_mk)
         if _blob:
             try:
@@ -1414,7 +1414,8 @@ def _sweep_defaults(args: argparse.Namespace) -> None:
 _UNAUTH_SWEEP = [
     ("web", "cmd_web"), ("smb", "cmd_smb"), ("ftp", "cmd_ftp"), ("ldap", "cmd_ldap"),
     ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("redis", "cmd_redis"),
-    ("elasticsearch", "cmd_elasticsearch"), ("docker", "cmd_docker"),
+    ("elasticsearch", "cmd_elasticsearch"), ("rsync", "cmd_rsync"),
+    ("nfs", "cmd_nfs"), ("docker", "cmd_docker"),
     ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
@@ -4002,6 +4003,94 @@ def cmd_elasticsearch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rsync(args: argparse.Namespace) -> int:
+    """Deep rsync-daemon enumeration: speak the rsync daemon protocol (stdlib), list
+    the modules, and test each for anonymous access - an @RSYNCD: OK module is a
+    CONFIRMED unauthenticated file exposure. Read-only (never transfers a file)."""
+    from . import rsync as _rsync
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose rsync.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = _rsync.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No rsync endpoints in the datastore (no port 873). Run `enum` "
+              "against the file hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} rsync endpoint(s):")
+    for t in tgts:
+        mods = t.get("modules", 0)
+        state = (f"{t.get('open', 0)}/{mods} module(s) open" if mods
+                 else "probed" if active else "reachable")
+        print(f"      {t['ip']}:{t['port']}  {state}")
+
+    _fold_service_findings(store, hosts, analysis, "rsync",
+                           _rsync.findings_to_vulns, "rsync")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> rsync sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_nfs(args: argparse.Namespace) -> int:
+    """Deep NFS enumeration: speak ONC RPC (stdlib) to the portmapper + mountd, list
+    the exports (showmount -e), and flag any shared to every host - a world-mountable
+    export is a CONFIRMED exposure. Read-only (never mounts)."""
+    from . import nfs as _nfs
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose NFS.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = _nfs.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No NFS endpoints in the datastore (no port 2049/111). Run `enum` "
+              "against the file hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} NFS host(s):")
+    for t in tgts:
+        exp = t.get("exports", 0)
+        if t.get("world"):
+            state = f"{t['world']}/{exp} export(s) WORLD-mountable"
+        elif exp:
+            state = f"{exp} export(s) listed"
+        else:
+            state = "probed" if active else "reachable"
+        print(f"      {t['ip']}  {state}")
+
+    _fold_service_findings(store, hosts, analysis, "nfs",
+                           _nfs.findings_to_vulns, "NFS")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> NFS sheet written; findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -4083,11 +4172,13 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     Ordered highest-impact first so `status` surfaces the critical exposures."""
     from . import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
                    snmp as _snmp, mongodb as _mongo, redis as _redis,
-                   elasticsearch as _es)
+                   elasticsearch as _es, rsync as _rsync, nfs as _nfs)
     mods = [
         ("MongoDB", "mongodb", _mongo.is_mongodb, "recce mongodb"),
         ("Redis", "redis", _redis.is_redis, "recce redis"),
         ("Elasticsearch", "elasticsearch", _es.is_elasticsearch, "recce elasticsearch"),
+        ("rsync", "rsync", _rsync.is_rsync, "recce rsync"),
+        ("NFS", "nfs", _nfs.is_nfs, "recce nfs"),
         ("Docker", "docker", docker.is_docker, "recce docker"),
         ("Kubernetes", "kubernetes", k8s.is_k8s, "recce k8s"),
         ("MSSQL", "mssql", mssql.is_mssql, "recce mssql -u USER -p PASS -d DOM"),
@@ -5240,6 +5331,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ep.add_argument("-o", "--output-dir", default="engagement")
     ep.add_argument("--title", default="Recce Engagement")
     ep.set_defaults(func=cmd_elasticsearch)
+
+    # rsync-daemon enumeration.
+    syp = sub.add_parser("rsync",
+                         help="rsync daemon: list modules (873) + prove anonymous "
+                              "access = CONFIRMED unauthenticated file exposure")
+    syp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: "
+                          "all rsync hosts in the datastore)")
+    syp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    syp.add_argument("-o", "--output-dir", default="engagement")
+    syp.add_argument("--title", default="Recce Engagement")
+    syp.set_defaults(func=cmd_rsync)
+
+    # NFS / mountd enumeration.
+    nfp = sub.add_parser("nfs", aliases=["showmount"],
+                         help="NFS: ONC RPC portmapper + mountd export list (showmount "
+                              "-e) -> world-mountable export = CONFIRMED exposure")
+    nfp.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: "
+                          "all NFS hosts in the datastore)")
+    nfp.add_argument("--no-probe", action="store_true",
+                     help="skip the live probe; just write the commands")
+    nfp.add_argument("-o", "--output-dir", default="engagement")
+    nfp.add_argument("--title", default="Recce Engagement")
+    nfp.set_defaults(func=cmd_nfs)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
