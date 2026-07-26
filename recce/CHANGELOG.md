@@ -4,6 +4,17 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Changed
+- **Attack path is now framed honestly as PROJECTED, not a proven kill chain.** recce
+  builds the path from confirmed findings (`_confirmed_vulns` excludes "potential"
+  version guesses) and observes each step's precondition — but it does **not** execute
+  the chain (recce never exploits). The report's Attack-path section now carries a
+  "projected" tag and a prominent note: the route is precondition-grounded but has not
+  been walked end-to-end, every step gives the command to run + how to validate, and
+  lateral-movement steps are options that apply only once you hold a valid credential.
+  The workbook's Attack Path tab description says the same. No overclaim that the path
+  "works."
+
 ### Added
 - **Read-only "Assessment coverage" checklist in the HTML report.** A per-host,
   per-subnet progress grid mirroring the workbook Checklist (✓ done · ☐ to-do · —

@@ -1055,8 +1055,11 @@ def _build_guide(wb, meta: dict) -> None:
         ("Exploitation", "Every CONFIRMED finding (remote service exposures AND local "
                          "priv-esc) mapped to the exact existing tool + command (your "
                          "values filled in) + how to validate. Run `recce exploitplan`."),
-        ("Attack Path", "The confirmed findings chained into a staged path (foothold -> "
-                        "priv-esc -> creds -> lateral -> domain). Run `recce attackpath`."),
+        ("Attack Path", "A PROJECTED route: confirmed findings chained into a staged "
+                        "path (foothold -> priv-esc -> creds -> lateral -> domain). "
+                        "recce grounds each step in what it observed but does NOT "
+                        "execute it - each row gives the command to run + how to "
+                        "validate. Run `recce attackpath`."),
         ("Priv-Esc", "Per-host escalation findings from the local sweep "
                      "(recce deploy/ingest) + remote signals. Un-swept hosts show a "
                      "'run recce deploy' to-do; dead IPs get no rows."),

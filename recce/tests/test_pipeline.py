@@ -2816,6 +2816,11 @@ class HtmlReportTest(unittest.TestCase):
         # Attack-path graph is embedded (Mermaid), copyable and offline.
         self.assertIn('class="mermaid', html)
         self.assertIn("flowchart LR", html)
+        # The attack path is framed honestly: projected, precondition-grounded, and
+        # explicitly NOT executed by recce (nothing reads as a proven kill chain).
+        self.assertIn("projected", html)
+        self.assertIn("not</b> been walked end-to-end", html)
+        self.assertIn("recce does not exploit", html)
 
     def test_detailed_findings_section(self):
         from recce import report_html
