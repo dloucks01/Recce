@@ -5,6 +5,18 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Expanded, grounded executive summary + "How findings are scored" in the HTML
+  report.** The exec summary now adds a **Confirmed** tile (and a **Footholds** tile
+  when access was gained) and a plain-language **assessment** that separates what recce
+  *confirmed by direct observation* from what is **potential** — inferred from a
+  service's version/banner and explicitly "flagged for manual verification, not
+  presented as fact." A new **How findings are scored** section explains *why* a rating
+  is assigned: the **severity** bands (Critical ≥ CVSS 9.0, High 7.0–8.9, Medium
+  4.0–6.9, Low < 4.0, plus impact-based for observed misconfigs) and the **confidence**
+  labels (Confirmed / Likely / Potential). Every finding now carries a **confidence
+  badge** and a one-line **"why this rating"** basis (e.g. "rated High from the
+  published CVSS score of CVE-…"), and the findings table gains a Confidence column —
+  so nothing in the report reads as fact that recce did not actually observe.
 - **Visual "At a glance" dashboard in the HTML report.** `report.html` now opens with
   a graphics band aimed at a non-technical reader: an inline-SVG **severity donut**
   (finding mix at a glance), a **Machines by risk** bar chart (how many live hosts fall
