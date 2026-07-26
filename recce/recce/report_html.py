@@ -23,6 +23,15 @@ _SEV_BG = {"critical": "#fbe9e9", "high": "#fbf0e7", "medium": "#fbf6e3",
            "low": "#eaf5eb", "info": "#eef1f1"}
 _SEV_ORDER = ["critical", "high", "medium", "low", "info"]
 
+# How sure recce is that a finding is real. Drives the honesty of the report: a
+# "potential" finding (inferred from a version/banner) is never shown as fact.
+_CONF = {
+    "confirmed": ("Confirmed", "#2E7D32"),
+    "likely": ("Likely", "#9C7A00"),
+    "": ("Reported", "#5F6F6E"),
+    "potential": ("Potential", "#C15A11"),
+}
+
 _CSS = """
 :root{--tl:#0f766e;--tl2:#115e59;--ink:#1a2422;--mut:#5f6f6e;--line:#e3e8e7;--bg:#f7faf9}
 *{box-sizing:border-box}
@@ -74,6 +83,10 @@ tr:nth-child(even) td{background:#fafcfb}
 .hbar .track{flex:1;background:#eef1f1;border-radius:6px;height:14px;overflow:hidden}
 .hbar .fill{height:100%;border-radius:6px;min-width:2px}
 .hbar .v{width:28px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
+.scorelist{margin-top:4px}
+.scorerow{display:flex;align-items:baseline;gap:10px;margin:9px 0;font-size:13px;flex-wrap:wrap}
+.scorerow .tag{margin-left:auto}
+.basis{font-size:12px;color:var(--mut);margin:6px 0 0}
 .stage{margin:14px 0}
 .stage .sh{font-weight:700;color:var(--tl2);margin-bottom:4px}
 .step{border-left:3px solid var(--line);padding:4px 0 4px 12px;margin:6px 0}
@@ -107,6 +120,9 @@ def _exec_summary(hosts, domains, creds):
     open_ports = sum(len(h.open_ports) for h in hosts)
     findings = group_findings(hosts)
     crit = sum(1 for f in findings if f.severity in ("critical", "high"))
+    confirmed = sum(1 for f in findings if (f.confidence or "").lower() == "confirmed")
+    potential = sum(1 for f in findings if (f.confidence or "").lower() == "potential")
+    accessed = sum(1 for h in hosts if getattr(h, "access_gained", False))
     dcs = ad.domain_controllers(hosts)
     doms = domains or ad.derive_domains(hosts)
     up = sum(1 for h in hosts if h.is_up)          # only confirmed-up hosts
@@ -115,12 +131,39 @@ def _exec_summary(hosts, domains, creds):
         _tile(open_ports, "Open ports"),
         _tile(len(findings), "Findings"),
         _tile(crit, "High / Critical", alert=crit > 0),
+        _tile(confirmed, "Confirmed"),
         _tile(f"{len(doms)} / {len(dcs)}", "Domains / DCs"),
     ]
+    if accessed:
+        tiles.append(_tile(accessed, "Footholds"))
     if creds:
         tiles.append(_tile(len(creds), "Credentials"))
     out = ['<section><h2>Executive summary</h2>',
            f'<div class="tiles">{"".join(tiles)}</div>']
+
+    # A grounded assessment: state plainly what is proven vs. what still needs a human,
+    # so nothing in the report reads as fact that recce did not actually observe.
+    if findings:
+        bits = [f"recce recorded <b>{len(findings)}</b> distinct finding"
+                f"{'s' if len(findings) != 1 else ''} across <b>{up}</b> live "
+                f"host{'s' if up != 1 else ''}"]
+        bits.append(f"<b>{crit}</b> rated high or critical" if crit
+                    else "none rated high or critical")
+        if confirmed:
+            bits.append(f"<b>{confirmed}</b> confirmed by direct observation")
+        assess = [", ".join(bits) + "."]
+        if potential:
+            assess.append(
+                f"<b>{potential}</b> {'is' if potential == 1 else 'are'} marked "
+                "<b>potential</b> — inferred from a service's version or banner and "
+                "flagged for manual verification, not presented as fact.")
+        assess.append("Every finding below lists the exact evidence it is based on; "
+                      "recce does not exploit — “confirmed” means the condition was "
+                      "observed directly (e.g. an unauthenticated read, or an nmap "
+                      "detection script's VULNERABLE verdict).")
+        out.append('<div class="narr">'
+                   + "".join(f"<p>{p}</p>" for p in assess) + "</div>")
+
     narr = ap.narrative(hosts)
     if narr:
         out.append('<div class="narr">'
@@ -222,21 +265,78 @@ def _dashboard(hosts):
     return "".join(out)
 
 
+def _conf_badge(confidence):
+    label, col = _CONF.get((confidence or "").lower(), _CONF[""])
+    return f'<span class="badge" style="background:{col}">{escape(label)}</span>'
+
+
+def _severity_basis(f):
+    """A short, honest 'why this rating' line for one finding, from how it was found."""
+    src = f.sources
+    sev = f.severity.title()
+    if f.cves and ("version-db" in src or "nse" in src):
+        return (f"Rated <b>{sev}</b> from the published CVSS score of its CVE"
+                f"{'s' if len(f.cves) > 1 else ''} ({escape(', '.join(f.cves[:3]))}).")
+    if "probe" in src or "config" in src:
+        return (f"Rated <b>{sev}</b> by the impact of the misconfiguration recce "
+                "observed directly.")
+    if "nse" in src:
+        return f"Rated <b>{sev}</b> by the nmap detection script's classification."
+    if "cred" in src:
+        return f"Rated <b>{sev}</b> by the access it grants, confirmed by recce."
+    return f"Rated <b>{sev}</b>."
+
+
+def _scoring_legend():
+    """Explain, up front, what the severity and confidence labels mean — so a
+    non-technical reader can trust and interpret everything below."""
+    sev = [
+        ("critical", "Trivially exploitable with severe impact — e.g. unauthenticated "
+                     "remote code execution, or full host / domain compromise.", "CVSS ≥ 9.0"),
+        ("high", "A serious weakness with a realistic exploitation path.", "CVSS 7.0–8.9"),
+        ("medium", "A meaningful weakness, but harder to exploit or lower impact.", "CVSS 4.0–6.9"),
+        ("low", "A minor issue or a hardening gap.", "CVSS < 4.0"),
+    ]
+    sev_rows = "".join(
+        f'<div class="scorerow">{_sev_badge(s)}<span>{escape(meaning)}</span>'
+        f'<span class="tag">{basis}</span></div>' for s, meaning, basis in sev)
+    conf = [
+        ("confirmed", "recce observed the condition directly with a non-intrusive "
+                      "check — the evidence is shown on the finding."),
+        ("likely", "strong indicators, but not positively proven."),
+        ("potential", "inferred from a service's version or banner; not exploited or "
+                      "confirmed. Verify before reporting."),
+    ]
+    conf_rows = "".join(
+        f'<div class="scorerow">{_conf_badge(c)}<span>{escape(meaning)}</span></div>'
+        for c, meaning in conf)
+    return (
+        '<section><h2>How findings are scored</h2><div class="dash">'
+        '<div class="panel"><h3>Severity — how bad is it</h3>'
+        '<p class="basis">CVE-based findings inherit the published CVSS score; '
+        'observed misconfigurations are rated by their impact.</p>'
+        f'<div class="scorelist">{sev_rows}</div></div>'
+        '<div class="panel"><h3>Confidence — how sure are we</h3>'
+        f'<div class="scorelist">{conf_rows}</div>'
+        '<p class="basis">Nothing here is presented as fact without evidence — every '
+        'finding below shows exactly what it was based on.</p></div></div></section>')
+
+
 def _findings_table(hosts):
     rows = []
     for f in list_findings(hosts, min_severity="info"):
         aff = ", ".join(f["affected"][:6]) + ("…" if len(f["affected"]) > 6 else "")
         cve = ", ".join(f["cves"][:3])
-        tag = "" if f["real"] else '<span class="tag">potential</span>'
         rows.append(
             f'<tr><td class="mono">{escape(f["id"])}</td><td>{_sev_badge(f["severity"])}</td>'
-            f'<td>{escape(f["title"])}{tag}</td><td class="mono">{escape(aff)}</td>'
+            f'<td>{_conf_badge(f["confidence"])}</td>'
+            f'<td>{escape(f["title"])}</td><td class="mono">{escape(aff)}</td>'
             f'<td class="mono">{escape(cve)}</td></tr>')
     if not rows:
         return '<section><h2>Findings</h2><p class="muted">No findings recorded.</p></section>'
     return ('<section><h2>Findings</h2><table><thead><tr><th>ID</th><th>Severity</th>'
-            '<th>Finding</th><th>Affected</th><th>CVE</th></tr></thead><tbody>'
-            + "".join(rows) + "</tbody></table></section>")
+            '<th>Confidence</th><th>Finding</th><th>Affected</th><th>CVE</th></tr>'
+            '</thead><tbody>' + "".join(rows) + "</tbody></table></section>")
 
 
 _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -273,9 +373,11 @@ def _findings_detail(hosts):
             meta.append(f'<span><b>Tools:</b> {escape(tools)}</span>')
         border = _SEV.get(f.severity, "#5F6F6E")
         card = [f'<div class="fcard" style="border-left-color:{border}">',
-                f'<h3>{_sev_badge(f.severity)} {escape(f.title)}</h3>',
+                f'<h3>{_sev_badge(f.severity)} {_conf_badge(f.confidence)} '
+                f'{escape(f.title)}</h3>',
                 f'<div class="meta">{"".join(meta)}</div>',
-                f'<div class="mono muted">Affected: {escape(aff)}</div>']
+                f'<div class="mono muted">Affected: {escape(aff)}</div>',
+                f'<div class="basis">{_severity_basis(f)}</div>']
         if f.remediation:
             card.append('<div class="rem"><div class="h">Recommendation</div>'
                         f'<div>{escape(f.remediation)}</div></div>')
@@ -348,6 +450,7 @@ def build_html(hosts: list[Host], out_path: str, *, title: str = "",
         '<div class="wrap">',
         _exec_summary(hosts, domains, creds),
         _dashboard(hosts),
+        _scoring_legend(),
         _findings_table(hosts),
         _attack_path(hosts),
         _findings_detail(hosts),

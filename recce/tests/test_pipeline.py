@@ -2857,6 +2857,38 @@ class HtmlReportTest(unittest.TestCase):
         for bad in ("src=", "<link", "<script"):         # nothing is fetched
             self.assertNotIn(bad, html)
 
+    def test_scoring_legend_and_grounding(self):
+        """The report explains why a severity is assigned and never presents an
+        unverified finding as fact: a scoring legend (severity bands + confidence
+        meanings), a per-finding confidence badge + 'why this rating' basis line, and
+        a grounded exec assessment."""
+        from recce import report_html
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.7", os_family="Linux",
+                 ports=[Port(portid=80, service="http")],
+                 vulns=[Vuln(ip="10.0.0.7", port=80, protocol="tcp",
+                             script_id="apache-cve", title="Apache < 2.4.59 vulns",
+                             severity="high", source="version-db",
+                             confidence="potential", ids=["CVE-2024-27316"],
+                             output="Apache httpd 2.4.41")])
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html([h], p, title="Grounding")
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        # Scoring legend explains severity + confidence.
+        self.assertIn("How findings are scored", html)
+        self.assertIn("CVSS", html)
+        for level in ("Critical", "High", "Medium", "Low"):
+            self.assertIn(level, html)
+        # A potential finding is labelled as such (not shown as fact) and the exec
+        # assessment flags it for verification.
+        self.assertIn("Potential", html)
+        self.assertIn("flagged for manual verification", html)
+        # Per-finding 'why this rating' basis references the CVSS/CVE source.
+        self.assertIn('class="basis"', html)
+        self.assertIn("CVE-2024-27316", html)
+
     def test_empty_hosts_ok(self):
         from recce import report_html
         with tempfile.TemporaryDirectory() as d:

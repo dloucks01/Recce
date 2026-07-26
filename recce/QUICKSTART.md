@@ -233,7 +233,7 @@ work on **just that subset** of what's already enumerated — e.g.
 | File | What it is |
 |---|---|
 | **`enumeration.xlsx`** | the tracking workbook you work out of |
-| **`report.html`** | self-contained client-ready page — visual **At a glance** dashboard (severity donut, machines-by-risk, most-affected systems), exec summary, findings, attack path |
+| **`report.html`** | self-contained client-ready page — visual **At a glance** dashboard, an expanded **exec summary** (confirmed vs potential), a **How findings are scored** legend (severity + confidence), findings with per-item confidence + evidence, attack path |
 | `enumeration.md` / `services.csv` | notes-friendly + flat pivot data |
 | `writeups/*.docx` | per-finding Word write-ups + a combined report (after `writeups`) |
 | `exploit-plan/*` | runnable msf `.rc` + per-host plans (after `exploitplan`) |
