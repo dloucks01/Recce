@@ -5,6 +5,19 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Wall-clock budget + live progress for the deep-service probe loops** (`svcprobe`).
+  The credential-free modules probe hosts sequentially on raw sockets; a large target
+  list with slow/filtered hosts (a /24 with no SNMP, thousands of AS-REP attempts)
+  could run for many minutes with no output — indistinguishable from a hang — and a
+  Ctrl-C lost everything probed so far. A shared driver now gives redis / elasticsearch
+  / rsync / nfs / mongodb / snmp / kerberos three properties: an optional **`--budget
+  SECONDS`** cap (stops early and keeps partial results), **throttled per-target
+  progress** (`[i/N] redis 10.0.0.7 …`) so a long run reads as working, and **Ctrl-C
+  safety** (a keyboard interrupt stops the loop and the partial results are still folded
+  + saved). When a run stops early the CLI says so explicitly, so partial coverage is
+  never mistaken for a complete assessment. Behaviour is unchanged when `--budget` is
+  omitted.
+
 - **Credential-less AD roasting (`recce kerberos` / `asrep`).** A minimal Kerberos
   client — hand-rolled ASN.1 DER over TCP 88, no impacket — that needs **no credential**,
   only a DC and candidate usernames (from the LDAP/SharpHound accounts recce already
