@@ -359,10 +359,11 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     try:
         from . import netmap
         eng_dir = os.path.dirname(paths["html"])
+        ad_blob = meta.get("ad_bloodhound")
         with open(os.path.join(eng_dir, "architecture.mmd"), "w", encoding="utf-8") as fh:
-            fh.write(netmap.mermaid(hosts, domains))
+            fh.write(netmap.mermaid(hosts, domains, ad_blob))
         with open(os.path.join(eng_dir, "architecture.dot"), "w", encoding="utf-8") as fh:
-            fh.write(netmap.dot(hosts, domains))
+            fh.write(netmap.dot(hosts, domains, ad_blob))
         # Standalone, directly-viewable AD tier-0 diagram (open the .svg in any
         # browser). It needs the xmlns the embedded copy omits to render as a file.
         arch = (meta.get("ad_bloodhound") or {}).get("architecture")
@@ -4323,6 +4324,13 @@ def cmd_demo(args: argparse.Namespace) -> int:
         from . import vulndb
         vulndb.assess_host_inplace(h)   # offline version->CVE findings
         h.enumerated = True
+        # Confirmed footholds, so the map's access overlay has something to show.
+        if h.ip == "10.0.20.6":
+            h.access_gained = True
+            h.access_detail = "vsftpd 2.3.4 backdoor (RCE) → shell"
+        elif h.ip == "10.0.10.25":
+            h.access_gained = True
+            h.access_detail = "SMB admin via reused local Administrator hash"
         # Leave one host enumerated-only to show the Checklist's mixed states.
         if h.ip != "10.0.20.6":
             for p in h.ports:
@@ -4331,10 +4339,35 @@ def cmd_demo(args: argparse.Namespace) -> int:
             h.privesc_checked = True
         store.upsert_host(h)
     _demo_bloodhound(store)
+    _demo_credentials(store)
     _generate_reports(store, paths, "DEMO engagement")
     store.close()
     print("[+] Demo reports generated from bundled sample scan.")
     return 0
+
+
+def _demo_credentials(store: Store) -> None:
+    """Seed a few captured credentials so the demo report's Credentials section
+    renders. Secrets are masked in the shareable HTML; the workbook keeps the full
+    values. Offline and deterministic."""
+    from .models import Credential
+    for c in (
+        Credential(username="jsmith", secret="Summer2024!", kind="password",
+                   domain="corp.local", source="cracked",
+                   origin_ip="10.0.10.10",
+                   notes="Kerberoast TGS cracked offline (hashcat -m 13100)."),
+        Credential(username="Administrator", secret="aad3b435b51404eeaad3b435b51404ee",
+                   kind="nthash", domain="", source="secretsdump",
+                   origin_ip="10.0.20.6",
+                   notes="Local SAM hash dumped after the vsftpd backdoor shell."),
+        Credential(username="admin", secret="admin", kind="password",
+                   domain="", source="default", origin_ip="10.0.20.5",
+                   notes="Default web-app login accepted on 10.0.20.5:80."),
+    ):
+        try:
+            store.add_credential(c)
+        except (ValueError, OSError):
+            pass
 
 
 def _demo_bloodhound(store: Store) -> None:

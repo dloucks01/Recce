@@ -8,10 +8,15 @@ from recce.models import Host, Port
 from recce.models import Domain
 
 
-def _h(ip, subnet="10.0.10.0/24", ports=(), roles=(), os_name="", hostname=""):
+def _h(ip, subnet="10.0.10.0/24", ports=(), roles=(), os_name="", hostname="",
+       access=False, vulns=()):
+    from recce.models import Vuln
     return Host(ip=ip, subnet=subnet, state="up", up_reason="syn-ack",
                 hostnames=[hostname] if hostname else [], os_name=os_name,
-                roles=list(roles),
+                roles=list(roles), access_gained=access,
+                vulns=[Vuln(ip=ip, port=None, protocol="tcp", script_id="v",
+                            title="v", severity=sev, source="nse",
+                            confidence=conf) for sev, conf in vulns],
                 ports=[Port(portid=p, protocol="tcp", state="open", service=s)
                        for p, s in ports])
 
@@ -109,6 +114,54 @@ class MermaidTest(unittest.TestCase):
         h = _h("10.0.0.1", hostname='we"ird[name]', ports=[(80, "http")])
         mm = netmap.mermaid([h])
         self.assertNotIn('"we"ird', mm)                # inner quote neutralised
+
+
+class NetworkMapEnrichmentTest(unittest.TestCase):
+    """The network map is enriched from SharpHound + other findings: DCs confirmed
+    from AD ground-truth, an access overlay, and a per-host risk dot."""
+
+    def _ad(self):
+        return {"architecture": {"nodes": {
+            "S-1-5-21-1-1-1-1000": {"type": "Computer", "label": "DC01.CORP.LOCAL",
+                                    "dc": True, "hv": True, "tier": 1}},
+            "edges": [], "trusts": [], "truncated": False}}
+
+    def test_dc_confirmed_from_sharphound(self):
+        # A host with only 445 open and no DC role — SharpHound says it's a DC.
+        dc = _h("10.0.10.10", ports=[(445, "microsoft-ds")], hostname="dc01.corp.local")
+        self.assertEqual(netmap.primary_role(dc), "File/SMB")     # ports alone
+        self.assertEqual(netmap.role_with_ad(dc, netmap.ad_dc_names(self._ad())), "DC")
+        s = netmap.svg([dc], None, self._ad())
+        import xml.dom.minidom as md
+        md.parseString(s)
+        self.assertIn("#C00000", s)                               # DC role colour
+
+    def test_access_and_risk_overlay(self):
+        owned = _h("10.0.20.6", subnet="10.0.20.0/24", ports=[(21, "ftp")],
+                   hostname="web02", access=True, vulns=[("critical", "confirmed")])
+        s = netmap.svg([owned])
+        import xml.dom.minidom as md
+        md.parseString(s)
+        self.assertIn("#2E7D32", s)                     # green access outline/badge
+        self.assertIn("✓", s)                           # access check mark
+        self.assertIn("#C00000", s)                     # critical risk dot
+        self.assertIn("access confirmed", s)            # legend key present
+
+    def test_potential_vuln_not_counted_as_risk(self):
+        # An unverified 'potential' finding must NOT light the risk dot.
+        h = _h("10.0.0.9", ports=[(80, "http")], vulns=[("high", "potential")])
+        self.assertEqual(netmap.worst_severity(h), "")
+        s = netmap.svg([h])
+        self.assertNotIn("access confirmed", s)         # no access, no overlay legend
+
+    def test_summary_reports_access_and_confirmed_dc(self):
+        hosts = [_h("10.0.10.10", ports=[(445, "microsoft-ds")], hostname="dc01"),
+                 _h("10.0.20.6", subnet="10.0.20.0/24", ports=[(21, "ftp")],
+                    hostname="web02", access=True, vulns=[("critical", "confirmed")])]
+        lines = " ".join(netmap.summary(hosts, None, self._ad()))
+        self.assertIn("1 with confirmed access", lines)
+        self.assertIn("1 with critical/high findings", lines)
+        self.assertIn("AD-confirmed Domain Controller", lines)
 
 
 class AdArchitectureSvgTest(unittest.TestCase):
