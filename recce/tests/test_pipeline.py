@@ -2839,12 +2839,33 @@ class HtmlReportTest(unittest.TestCase):
         self.assertIn("Backdoor shell on 6200 confirmed", html)  # evidence excerpt
         self.assertIn("10.0.0.6:21", html)                    # affected system
 
+    def test_visual_dashboard(self):
+        """The 'At a glance' dashboard renders inline-SVG visuals for a non-technical
+        reader, and stays self-contained (no xmlns/external refs in the SVG)."""
+        from recce import report_html
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "report.html")
+            report_html.build_html(self._hosts(), p, title="Viz")
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        for section in ("At a glance", "Findings by severity", "Machines by risk"):
+            self.assertIn(section, html)
+        self.assertIn("<svg", html)                      # the severity donut
+        self.assertIn("<circle", html)                   # donut segment(s)
+        self.assertIn('class="hbar"', html)              # risk / affected bars
+        self.assertNotIn("xmlns", html)                  # inline SVG stays self-contained
+        for bad in ("src=", "<link", "<script"):         # nothing is fetched
+            self.assertNotIn(bad, html)
+
     def test_empty_hosts_ok(self):
         from recce import report_html
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "r.html")
             report_html.build_html([], p, title="Empty")
             self.assertTrue(os.path.exists(p))
+            # The donut degrades gracefully to a zero-state ring with no findings.
+            with open(p, encoding="utf-8") as fh:
+                self.assertIn("<svg", fh.read())
 
 
 class PrivEscVerdictTest(unittest.TestCase):

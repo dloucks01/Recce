@@ -5,6 +5,13 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Visual "At a glance" dashboard in the HTML report.** `report.html` now opens with
+  a graphics band aimed at a non-technical reader: an inline-SVG **severity donut**
+  (finding mix at a glance), a **Machines by risk** bar chart (how many live hosts fall
+  into each worst-severity bucket), and a **Most-affected systems** bar chart (hosts
+  ranked by high + critical findings). All rendered with inline SVG/CSS — no external
+  assets, no JavaScript — so the single file still opens offline in any browser and
+  prints cleanly. Replaces the old plain severity-bar rollup.
 - **Initial-access tracking — the `Access` step is now auto-derived, and a new
   `access` command.** recce marks a host as *access gained* the moment a credentialed
   phase confirms a foothold — a valid credential or local admin from `credenum` /
