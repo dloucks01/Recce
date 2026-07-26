@@ -32,9 +32,15 @@ test. The following are enforced in the code, not just recommended:
 - **Read-only by default.** Enumeration reads; it does not modify targets.
   - **SNMP** guesses community strings and *reads* the MIB — it **never sends a SET**
     (a read-write community is flagged by name only, never exercised).
-  - **MongoDB / LDAP / MSSQL / Docker / Kubernetes / SMB / FTP** deep modules read
-    posture, versions and (where authorized) directory/DB objects. They do not write,
-    drop, exec, or reconfigure.
+  - **MongoDB / Redis / Elasticsearch / LDAP / MSSQL / Docker / Kubernetes / SMB /
+    FTP / rsync / NFS** deep modules read posture, versions and (where authorized)
+    directory/DB/index/share objects. They do not write, drop, exec, or reconfigure —
+    e.g. **Redis** reads `CONFIG GET` (never SET/SAVE), **Elasticsearch** issues GETs
+    only, **rsync** reads the module list + the OK/AUTHREQD verdict (never transfers a
+    file), and **NFS** reads the mountd export list (never mounts).
+  - **Kerberos AS-REP roasting** requests tickets with no pre-auth and captures the
+    AS-REP hash — it makes **no logon attempt**, so it triggers no account lockouts;
+    username enumeration reads the KDC's pre-auth response only.
 - **Non-destructive active checks.** Where recce actively confirms a finding, the probe
   is chosen to prove exposure without causing damage:
   - **SQL injection** payloads live in the SELECT/WHERE context (quote-break +
