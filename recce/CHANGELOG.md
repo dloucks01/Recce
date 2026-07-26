@@ -4,6 +4,17 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Added
+- **Architecture / network map from the enumeration** (`netmap.py`). A new **Network
+  map** section in the HTML report — plus standalone `architecture.mmd` (Mermaid) and
+  `architecture.dot` (Graphviz) files — drawn from what recce observed: each **subnet**
+  as a network segment (subgraph), every host as a **role-tagged, colour-coded node**
+  (DC / DB / Web / Mail / File-SMB / Workstation), and **AD domains** with DC-of edges
+  and observed **trust** edges. It is explicitly a **logical** map, not a physical or
+  routing topology — recce doesn't trace links or firewall rules between hosts, so only
+  relationships it actually saw are drawn (nothing inferred). Self-contained, no
+  external assets; render the Mermaid in any viewer or `dot -Tpng architecture.dot`.
+
 ### Changed
 - **Attack path is now framed honestly as PROJECTED, not a proven kill chain.** recce
   builds the path from confirmed findings (`_confirmed_vulns` excludes "potential"

@@ -15,6 +15,7 @@ from . import ad
 from . import attackpath as ap
 from . import credentials as cr
 from . import tracking as tr
+from . import netmap as nm
 from .report_docx import (list_findings, group_findings, cwe_label, _vuln_type,
                           _tools_line)
 
@@ -401,6 +402,27 @@ def _findings_detail(hosts):
     return "".join(cards)
 
 
+def _network_map(hosts, domains):
+    """A logical architecture map from the enumeration: the text summary always
+    renders; the Mermaid diagram is embedded (collapsed) and also written to
+    architecture.mmd. Explicitly a logical, not physical, topology."""
+    if not any(h.is_up for h in hosts):
+        return ""
+    lines = nm.summary(hosts, domains)
+    diagram = nm.mermaid(hosts, domains)
+    return (
+        '<section><h2>Network map</h2>'
+        '<div class="narr">' + "".join(f"<p>{escape(l)}</p>" for l in lines) + '</div>'
+        '<p class="basis">A <b>logical</b> map from the enumeration — network segments, '
+        "each host's role, and the AD domains / trusts recce observed. It is not a "
+        'physical or routing topology: recce does not trace links or firewall rules '
+        'between hosts, so only relationships it actually saw are drawn.</p>'
+        '<details class="graph"><summary>Network diagram (Mermaid — paste into '
+        'mermaid.live or GitHub, or render the <b>architecture.mmd</b> file)</summary>'
+        f'<pre class="mermaid mono">{escape(diagram)}</pre></details>'
+        '</section>')
+
+
 def _attack_path(hosts):
     steps = ap.build(hosts)
     if not steps:
@@ -522,6 +544,7 @@ def build_html(hosts: list[Host], out_path: str, *, title: str = "",
         '<div class="wrap">',
         _exec_summary(hosts, domains, creds),
         _dashboard(hosts),
+        _network_map(hosts, domains),
         _scoring_legend(),
         _findings_table(hosts),
         _attack_path(hosts),

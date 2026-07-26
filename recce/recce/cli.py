@@ -346,6 +346,17 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     from .report_html import build_html
     build_html(hosts, paths["html"], title=title, domains=domains,
                credentials=credentials, generated=_now(), tracking=tracking)
+    # Standalone architecture diagram sources (render with any Mermaid viewer, or
+    # `dot -Tpng architecture.dot`). Best-effort - never block a report on these.
+    try:
+        from . import netmap
+        eng_dir = os.path.dirname(paths["html"])
+        with open(os.path.join(eng_dir, "architecture.mmd"), "w", encoding="utf-8") as fh:
+            fh.write(netmap.mermaid(hosts, domains))
+        with open(os.path.join(eng_dir, "architecture.dot"), "w", encoding="utf-8") as fh:
+            fh.write(netmap.dot(hosts, domains))
+    except OSError:
+        pass
     if not quiet:
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
