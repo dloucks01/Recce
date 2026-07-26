@@ -405,7 +405,14 @@ def _attack_path(hosts):
     steps = ap.build(hosts)
     if not steps:
         return ""
-    out = ['<section><h2>Attack path</h2>']
+    out = ['<section><h2>Attack path <span class="tag">projected</span></h2>',
+           '<div class="narr"><p>A <b>prioritised route</b> grounded in recce\'s '
+           'confirmed findings: each step\'s precondition was directly observed by '
+           'recce (e.g. the exposed service, the confirmed injection), and unverified '
+           '"potential" version guesses are excluded. It has <b>not</b> been walked '
+           'end-to-end — recce does not exploit, so every step below gives the exact '
+           'command to run and how to validate it. Lateral-movement steps are options '
+           'that become available once you hold a valid credential.</p></div>']
     cur = None
     for s in steps:
         if s["stage"] != cur:
