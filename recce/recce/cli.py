@@ -29,7 +29,7 @@ from .models import Host
 from .report_excel import read_workbook_edits, update_workbook
 from .report_markdown import build_csv, build_markdown
 from .store import Store, StoreError
-from .targets import apply_exclusions, expand_excludes, ip_matcher, load_targets
+from .targets import expand_excludes, ip_matcher, load_targets
 
 BANNER = r"""
   ____  _____ ____ ____ _____
@@ -348,7 +348,6 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     gen = _now()
     build_html(hosts, paths["html"], title=title, domains=domains,
                credentials=credentials, generated=gen, tracking=tracking,
-               ad_bloodhound=meta.get("ad_bloodhound"),
                assets_link=os.path.basename(paths["assets"]))
     build_assets_html(hosts, paths["assets"], title=title, domains=domains,
                       credentials=credentials, generated=gen,
@@ -4273,7 +4272,19 @@ def cmd_review(args: argparse.Namespace) -> int:
                 keys += [tr.svc_key(ip, p.protocol, p.portid) for p in h.open_ports]
     for spec in args.service or []:
         ip, _, port = spec.partition(":")
-        keys.append(tr.svc_key(ip, "tcp", int(port)))
+        if not port.isdigit():
+            print(f"[!] Skipping --service {spec!r}: expected IP:PORT (numeric port).")
+            continue
+        portid = int(port)
+        # Resolve the real protocol from the stored host so a UDP service ticks the
+        # right coverage key (hardcoding tcp silently no-ops for UDP items).
+        proto = "tcp"
+        h = store.get_host(ip)
+        if h:
+            match = next((p for p in h.open_ports if p.portid == portid), None)
+            if match:
+                proto = match.protocol
+        keys.append(tr.svc_key(ip, proto, portid))
     keys += args.key or []
 
     if not keys:

@@ -147,11 +147,55 @@ class ParserTest(unittest.TestCase):
             id="vuln-x", output="VULNERABLE\nCVE-2021-1\nCVSS:3.1/AV:N/AC:L\n"))
         self.assertNotEqual(v2.severity, "low")
 
+    def test_not_vulnerable_is_not_a_finding(self):
+        """Regression (audit): a patched host whose NSE script prints
+        'State: NOT VULNERABLE' must NOT produce a Vuln — the substring
+        'VULNERABLE' inside 'NOT VULNERABLE' previously created a false high."""
+        from recce.parser import _classify_vuln
+        from recce.models import Script, Port
+        p = Port(portid=445, protocol="tcp", service="microsoft-ds")
+        self.assertIsNone(_classify_vuln(
+            "10.0.0.9", p, Script(id="smb-vuln-ms17-010",
+                                  output="\n  State: NOT VULNERABLE\n")))
+        # A genuinely VULNERABLE result with no embedded CVSS is still a finding,
+        # and a known-RCE family rates critical (not the generic 'high').
+        v = _classify_vuln("10.0.0.9", p, Script(
+            id="smb-vuln-ms17-010", output="\n  State: VULNERABLE\n"))
+        self.assertIsNotNone(v)
+        self.assertEqual(v.severity, "critical")
+
     def test_ad_users_extracted(self):
         dc = next(h for h in self.hosts if h.ip == "10.0.10.10")
         users = [a.name for a in dc.accounts if a.kind == "user"]
         self.assertIn("Administrator", users)
         self.assertIn("svc_sql", users)
+
+
+class VulnDbRangeTest(unittest.TestCase):
+    """Regression (audit): version-range accuracy for false-finding-prone sigs."""
+
+    def _ssh(self, ver):
+        from recce import vulndb
+        from recce.models import Host, Port
+        h = Host(ip="1.1.1.1", ports=[Port(portid=22, protocol="tcp", service="ssh",
+                                           product="OpenSSH", version=ver)])
+        vulndb.assess_host_inplace(h)
+        return [v.title for v in h.vulns]
+
+    def test_regresshion_range_not_eq_patched(self):
+        # 9.8p1 is the FIX — must not be flagged; 9.6p1 is vulnerable — must be.
+        self.assertFalse(any("regreSSHion" in t for t in self._ssh("9.8p1")))
+        self.assertTrue(any("regreSSHion" in t for t in self._ssh("9.6p1")))
+
+    def test_os_version_maps_windows_product_names(self):
+        # BlueKeep os_lt gate needs an NT version from nmap's product-name OS string.
+        from recce import vulndb
+        from recce.models import Host
+        self.assertEqual(vulndb._os_version(Host(ip="x", os_name="Microsoft Windows 7")), "6.1")
+        self.assertEqual(vulndb._os_version(
+            Host(ip="x", os_name="Microsoft Windows Server 2008 R2")), "6.1")
+        self.assertEqual(vulndb._os_version(
+            Host(ip="x", os_name="Microsoft Windows Server 2012")), "6.2")
 
 
 class ProductGroupingTest(unittest.TestCase):

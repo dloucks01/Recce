@@ -199,7 +199,13 @@ def load_graph(path: str) -> dict:
             if props:
                 cur["props"].update({k: v for k, v in props.items() if v is not None})
 
+    def _nsid(sid):
+        # Match add_node's key normalization so edge endpoints line up with node keys
+        # even for lowercase (older / hand-built) SharpHound JSON.
+        return sid.upper() if isinstance(sid, str) and sid.startswith("s-1-") else sid
+
     def add_edge(src, label, dst):
+        src, dst = _nsid(src), _nsid(dst)
         if src and dst and src != dst:
             edges.append((src, label, dst))
 
@@ -415,6 +421,9 @@ def architecture(graph: dict, max_nodes: int = 60) -> dict:
     # Tier 1: high-value groups / objects (Domain Admins, Administrators, ...).
     for sid, node in hv.items():
         if sid not in keep:
+            if len(keep) >= max_nodes:
+                truncated = True
+                break
             keep[sid] = 1
     # Tier 1: Domain Controllers (the computers that anchor the domain).
     for sid, node in nodes.items():
@@ -443,9 +452,11 @@ def architecture(graph: dict, max_nodes: int = 60) -> dict:
             keep[msid] = 2
 
     # Tier 2 also: any principal holding a control edge (ACL / DCSync) INTO a kept
-    # tier-0 object — it can seize tier-0, so the diagram must show it.
+    # tier-0/tier-1 object (a domain, high-value group or DC) — it can seize tier-0,
+    # so the diagram must show it. (Control over a tier-2 member is a further hop and
+    # is left to the attack-path section.)
     for src, label, dst in graph["edges"]:
-        if dst not in keep or src in keep:
+        if src in keep or keep.get(dst, 9) > 1:
             continue
         if label == "DCSync" or label in _CONTROL_RIGHTS:
             if len(keep) >= max_nodes:

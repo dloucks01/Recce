@@ -73,31 +73,46 @@ def _classify_vuln(host_ip: str, port: Port | None, script: Script) -> Vuln | No
     """Turn a vuln-flavored NSE script result into a Vuln, or None if not relevant."""
     sid = script.id
     out = script.output or ""
+    up = out.upper()
+    # "VULNERABLE" as a real positive state, NOT the substring inside "NOT VULNERABLE"
+    # (a patched host that prints "State: NOT VULNERABLE" must not become a finding).
+    positive = re.search(r"(?<!NOT )VULNERABLE", up) is not None
     is_vuln_family = (
-        "VULNERABLE" in out.upper()
+        positive
         or sid.startswith("vuln")
         or sid == "vulners"
-        or "CVE-" in out.upper()
+        or "CVE-" in up
     )
     if not is_vuln_family:
         return None
-    # Skip scripts that explicitly report not-vulnerable with nothing else useful.
-    if "VULNERABLE" not in out.upper() and "CVE-" not in out.upper() and sid != "vulners":
+    # Explicitly not-vulnerable (patched) → drop it; never report a NOT-VULNERABLE
+    # script as a finding.
+    if "NOT VULNERABLE" in up and not positive:
+        return None
+    # Skip scripts that report nothing actionable (no positive state, no CVE).
+    if not positive and "CVE-" not in up and sid != "vulners":
         return None
 
     state = ""
     m = re.search(r"State:\s*(.+)", out)
     if m:
         state = m.group(1).strip()
-    elif "VULNERABLE" in out.upper():
+    elif positive:
         state = "VULNERABLE"
 
     ids = sorted(set(_CVE_RE.findall(out)))
     cvss_scores = [float(g) for tup in _CVSS_RE.findall(out) for g in tup if g]
     cvss_scores += [float(s) for s in _VULNERS_RE.findall(out)]
-    severity = _severity_from_cvss(max(cvss_scores)) if cvss_scores else (
-        "high" if "VULNERABLE" in out.upper() else "info"
-    )
+    # A confirmed-vulnerable NSE script with no embedded CVSS defaults to "high", but
+    # a few well-known families are unambiguously critical (RCE) - rate them so.
+    _CRITICAL_SIDS = ("smb-vuln-ms17-010", "smb-vuln-ms08-067", "rdp-vuln-ms12-020",
+                      "smb-vuln-cve-2017-7494", "smb-double-pulsar-backdoor")
+    if cvss_scores:
+        severity = _severity_from_cvss(max(cvss_scores))
+    elif positive:
+        severity = "critical" if any(s in sid for s in _CRITICAL_SIDS) else "high"
+    else:
+        severity = "info"
 
     title = sid
     tm = re.search(r"Title:\s*(.+)", out)
