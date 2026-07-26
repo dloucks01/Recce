@@ -21,6 +21,11 @@ All notable changes to recce are documented here. Dates are UTC.
   - Both take `--skip`/`--only-modules` to narrow the set and `--no-probe` to fold
     passively; a module that errors is isolated (logged, the sweep continues) rather
     than aborting the run.
+  - Surfaced everywhere: the `recce` quickstart, `status`'s suggested-next-step (points
+    to `sweep` when several deep-dives are pending), the workbook **Start Here** +
+    **Runbook** tabs, `README.md`, `QUICKSTART.md`, `CHEATSHEET.html` and `SECURITY.md`
+    (which notes `sweep` is credential-free/read-only and `credsweep` is the
+    authenticated pass) were all updated to lead with the two grouped commands.
 - **Live end-to-end smoke test** (`tests/test_live_smoke.py`). Stands up real localhost
   web / MongoDB-wire / FTP servers and drives the actual `recce` CLI against them —
   `import` → `sweep` folds genuine findings from the live probes (MongoDB unauth

@@ -4117,10 +4117,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     elif db_t and db_d < db_t:
         nxt = f"recce db -o {o}   # enumerate the databases"
     elif any(m["applicable"] > m["covered"] for m in svc_cov):
-        m = next(m for m in svc_cov if m["applicable"] > m["covered"])
-        gap = m["applicable"] - m["covered"]
-        nxt = (f"{m['command']} -o {o}   # deep-enum {m['name']} "
-               f"({gap} applicable host(s) not yet run)")
+        pend = [m for m in svc_cov if m["applicable"] > m["covered"]]
+        if len(pend) == 1:
+            m = pend[0]
+            gap = m["applicable"] - m["covered"]
+            nxt = (f"{m['command']} -o {o}   # deep-enum {m['name']} "
+                   f"({gap} applicable host(s) not yet run)")
+        else:
+            names = ", ".join(m["name"] for m in pend)
+            nxt = (f"recce sweep -o {o}   # run the deep modules in one shot "
+                   f"({names} pending; add creds via `recce credsweep`)")
     elif pe_done < len(hosts):
         nxt = f"recce privesc -o {o}   # build the priv-esc playbook"
     else:
@@ -4929,34 +4935,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 _QUICKSTART = r"""
-recce - phased enumeration & reporting. You mostly need three commands:
+recce - phased enumeration & reporting. The core loop is short:
 
-  1.  recce doctor                         check this box can run everything
-  2.  recce enum   <targets> -o eng        find hosts, ports, services -> workbook
-  3.  recce vulns  -o eng                   vuln-scan what enum found
+  1.  recce doctor                       check this box can run everything
+  2.  recce enum  <targets> -o eng        find hosts, ports, services -> workbook
+  3.  recce vulns -o eng                   vuln-scan what enum found
+  4.  recce sweep -o eng                   ALL credential-free deep modules at once
+                                          (web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)
+  5.  recce credsweep -u USER -p PASS -d DOMAIN -o eng
+                                          ALL authenticated modules once you have creds
+                                          (credenum + authenticated ldap/smb/mssql/ftp)
 
-Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options)
-and, when you want more depth, run any of:
-      recce db -o eng · privesc -o eng · credenum -u USER -p PASS -d DOMAIN -o eng
-      recce writeups -o eng · recce status -o eng
+Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options),
+or check progress and the suggested next step:  recce status -o eng
+
+Want to focus one service instead of the whole sweep?  Each still has its own
+command - recce web|smb|ftp|ldap|snmp|mongodb|docker|k8s|mssql -o eng  (or add
+-u/-p/-d to smb/ldap/mssql/ftp for their authenticated depth). See the Runbook tab.
 
 Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
 SharpHound / Certipy data?   recce ad loot.zip certipy.json -u USER -p PASS -d DOMAIN
                              (AD vulns + ESC findings + paths to Domain Admin)
-MSSQL servers in scope?      recce mssql -u USER -p PASS -d DOMAIN -o eng
-                             (pre-auth probes + access/priv matrix + attack chain)
-SMB / file shares?           recce smb -o eng   (signing/SMBv1 posture + share enum;
-                             add -u/-p and --prove-write for a reversible write proof)
-FTP servers?                 recce ftp -o eng   (anonymous/AUTH-TLS + known backdoors;
-                             --prove-write for a reversible writable-dir proof)
-Docker API (2375/2376)?      recce docker -o eng   (CONFIRM unauth API = root RCE)
-Kubernetes cluster?          recce k8s -o eng   (kubelet / kube-apiserver / etcd)
-LDAP / AD directory?         recce ldap -o eng   (anon bind + RootDSE + anon read;
-                             add -u/-p/-d or --hash <NT> for authenticated / PtH enum)
-SNMP (161/udp)?              recce snmp -o eng   (community guessing + read-only walk
-                             of users / processes / software -> spray list)
-MongoDB (27017-19)?          recce mongodb -o eng   (CONFIRM unauth listDatabases)
-
 Have a complete IP/hostname list?  recce enum @scope.txt --targets-up
                              (lines: 'IP hostname'; pre-seeds every host so a
                              timeout never drops a real target from the report)

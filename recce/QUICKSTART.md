@@ -44,6 +44,8 @@ cd recce
 | **Enumerate** | `sudo ./bin/recce enum <targets> -o eng` | discover hosts/ports/services → fills the sheet |
 | _(have a scan?)_ | `./bin/recce import scan.xml -o eng` | build the sheet from existing nmap output |
 | **Vuln-scan** | `sudo ./bin/recce vulns -o eng` | NSE + offline CVE/CWE engine + TLS/HTTP probes |
+| **Deep pass (unauth)** | `./bin/recce sweep -o eng` | **all** credential-free deep modules at once (web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql) — skips services you don't have |
+| **Deep pass (auth)** | `./bin/recce credsweep -u U -p P -d dom -o eng` | **all** authenticated modules at once (credenum + authenticated ldap/smb/mssql/ftp) |
 | **Per-service** | `./bin/recce services -o eng` | prints the exact enum command for each open port |
 | **Databases** | `sudo ./bin/recce db -o eng` | database services |
 | **Priv-esc** | `./bin/recce privesc -o eng` | per-host escalation playbook |
