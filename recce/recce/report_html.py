@@ -407,21 +407,25 @@ def _findings_detail(hosts):
     return "".join(cards)
 
 
-def _network_map(hosts, domains):
-    """A logical architecture map from the enumeration: the text summary always
-    renders; the Mermaid diagram is embedded (collapsed) and also written to
-    architecture.mmd. Explicitly a logical, not physical, topology."""
+def _network_map(hosts, domains, ad_data=None):
+    """A logical architecture map from the enumeration, enriched from findings: which
+    hosts recce gained access to, each host's worst confirmed finding, and DCs
+    confirmed from SharpHound. The text summary always renders; the inline SVG draws
+    directly. Explicitly a logical, not physical, topology."""
     if not any(h.is_up for h in hosts):
         return ""
-    lines = nm.summary(hosts, domains)
+    lines = nm.summary(hosts, domains, ad_data)
     return (
         '<section><h2>Network map</h2>'
         '<div class="narr">' + "".join(f"<p>{escape(l)}</p>" for l in lines) + '</div>'
         '<p class="basis">A <b>logical</b> map from the enumeration — network segments, '
-        "each host's role, and the AD domains / trusts recce observed. It is not a "
-        'physical or routing topology: recce does not trace links or firewall rules '
-        'between hosts, so only relationships it actually saw are drawn.</p>'
-        f'<div class="netmap">{nm.svg(hosts, domains)}</div>'
+        "each host's role, and the AD domains / trusts recce observed — enriched from "
+        'the findings: a host recce <b>gained access to</b> gets a green outline + ✓, '
+        'each card carries a <b>risk dot</b> for its worst confirmed finding, and '
+        'Domain Controllers are <b>confirmed from the BloodHound data</b> where present. '
+        'It is not a physical or routing topology: recce does not trace links or '
+        'firewall rules between hosts, so only relationships it actually saw are drawn.</p>'
+        f'<div class="netmap">{nm.svg(hosts, domains, ad_data)}</div>'
         '<p class="basis">This diagram renders here directly (and prints to PDF). The '
         'same map is also written as <b>architecture.mmd</b> (Mermaid) and '
         '<b>architecture.dot</b> (Graphviz) next to this report, for those tools.</p>'
@@ -745,7 +749,7 @@ def build_assets_html(hosts: list[Host], out_path: str, *, title: str = "",
         + (f' · {escape(generated)}' if generated else "") + '</div>'
         + nav + '</div></header>',
         '<div class="wrap">',
-        _network_map(hosts, domains),
+        _network_map(hosts, domains, ad_bloodhound),
         _ad_architecture(ad_bloodhound),
         _key_info(hosts, domains),
         _accounts_section(hosts),

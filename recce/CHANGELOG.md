@@ -5,6 +5,14 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Network map enriched from SharpHound + other findings.** The logical map now
+  overlays what the engagement actually established: hosts recce **gained access to**
+  get a green outline + ✓ badge (and an "N owned" tally per segment), each host card
+  carries a **risk dot** for its worst *confirmed* finding (unverified "potential"
+  guesses are excluded), and **Domain Controllers are confirmed from the BloodHound
+  data** — a DC that only had 445 open is still marked. The text summary gains a
+  grounded "Status:" line (how many hosts owned / at critical-high risk) and an
+  AD-confirmed-DC line. The same enrichment flows into `architecture.mmd` / `.dot`.
 - **AD architecture diagram from the BloodHound / SharpHound collection**
   (`bloodhound.architecture()` + `netmap.ad_svg()`), rendered as an **inline SVG that
   draws directly in the HTML report** (and prints to PDF) — no BloodHound GUI, Neo4j,

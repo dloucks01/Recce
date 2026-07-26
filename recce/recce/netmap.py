@@ -62,25 +62,89 @@ def primary_role(host: Host) -> str:
     return "Host"
 
 
-def summary(hosts: list[Host], domains=None) -> list[str]:
+# --- enrichment from SharpHound / other findings --------------------------------
+
+def ad_dc_names(ad) -> set:
+    """Short, upper-cased Domain Controller names from a BloodHound analysis blob
+    (the tier-0 architecture). Used to *confirm* which enumerated hosts are DCs from
+    AD ground-truth — a DC that only had 445 open still gets marked."""
+    arch = (ad or {}).get("architecture") or {} if isinstance(ad, dict) else {}
+    out = set()
+    for n in (arch.get("nodes") or {}).values():
+        if n.get("dc") and n.get("label"):
+            out.add(str(n["label"]).split(".")[0].upper())
+    return out
+
+
+def _host_short(host: Host) -> str:
+    hn = host.hostname or ""
+    return hn.split(".")[0].upper() if hn else ""
+
+
+def role_with_ad(host: Host, dc_names: set) -> str:
+    """Primary role, but promoted to DC when SharpHound says this host is a DC."""
+    if dc_names and _host_short(host) in dc_names:
+        return "DC"
+    return primary_role(host)
+
+
+_SEV_ORDER = ["critical", "high", "medium", "low"]
+
+
+def worst_severity(host: Host) -> str:
+    """Highest severity among the host's *confirmed* vulns (excludes unverified
+    'potential' version guesses), or '' if none. Grounds the map's risk overlay."""
+    best = ""
+    for v in getattr(host, "vulns", []) or []:
+        if getattr(v, "confidence", "") == "potential":
+            continue
+        sev = (getattr(v, "severity", "") or "").lower()
+        if sev in _SEV_ORDER and (best == "" or
+                                  _SEV_ORDER.index(sev) < _SEV_ORDER.index(best)):
+            best = sev
+    return best
+
+
+def has_access(host: Host) -> bool:
+    return bool(getattr(host, "access_gained", False))
+
+
+def summary(hosts: list[Host], domains=None, ad_data=None) -> list[str]:
     """A short, grounded description of the architecture, for the report/CLI."""
     up = [h for h in hosts if h.is_up]
     if not up:
         return ["No hosts enumerated yet."]
+    dc_names = ad_dc_names(ad_data)
     subnets = sorted({h.subnet or "unknown" for h in up}, key=_ipkey)
     counts: dict[str, int] = {}
     for h in up:
-        counts[primary_role(h)] = counts.get(primary_role(h), 0) + 1
+        r = role_with_ad(h, dc_names)
+        counts[r] = counts.get(r, 0) + 1
     roles = ", ".join(f"{n}× {r}" for r, n in
                       sorted(counts.items(), key=lambda kv: _ROLE_ORDER.index(kv[0])))
     doms = domains or ad.derive_domains(up)
     lines = [f"{len(up)} host(s) across {len(subnets)} network segment(s): {roles}."]
+    # Status overlay from findings: what we own and where the risk is.
+    accessed = [h for h in up if has_access(h)]
+    risky = [h for h in up if worst_severity(h) in ("critical", "high")]
+    status = []
+    if accessed:
+        status.append(f"{len(accessed)} with confirmed access")
+    if risky:
+        status.append(f"{len(risky)} with critical/high findings")
+    if status:
+        lines.append("Status: " + ", ".join(status) + ".")
     if doms:
         dparts = []
         for d in doms:
             dcs = ", ".join(d.dc_ips) if getattr(d, "dc_ips", None) else "no DC seen"
             dparts.append(f"{d.name} (DC: {dcs})")
         lines.append("AD domain(s): " + "; ".join(dparts) + ".")
+    if dc_names:
+        confirmed = sorted({_host_short(h) for h in up if _host_short(h) in dc_names})
+        if confirmed:
+            lines.append("AD-confirmed Domain Controller(s) from BloodHound: "
+                         + ", ".join(confirmed) + ".")
     return lines
 
 
@@ -91,13 +155,15 @@ def _label(s: str, n: int = 26) -> str:
     return (s[: n - 1] + "…") if len(s) > n else s
 
 
-def mermaid(hosts: list[Host], domains=None) -> str:
+def mermaid(hosts: list[Host], domains=None, ad_data=None) -> str:
     """A Mermaid diagram: one subgraph per subnet (network segment), role-coloured
-    host nodes, plus AD domain nodes with DC-of edges and trust edges. Paste into any
-    Mermaid viewer / GitHub / mermaid.live."""
+    host nodes, plus AD domain nodes with DC-of edges and trust edges. DCs are
+    confirmed from SharpHound and hosts recce holds access to are marked. Paste into
+    any Mermaid viewer / GitHub / mermaid.live."""
     up = [h for h in hosts if h.is_up]
     if not up:
         return 'flowchart TB\n  empty["No hosts enumerated yet"]\n'
+    dc_names = ad_dc_names(ad_data)
     by_subnet: dict[str, list[Host]] = {}
     for h in up:
         by_subnet.setdefault(h.subnet or "unknown", []).append(h)
@@ -113,13 +179,14 @@ def mermaid(hosts: list[Host], domains=None) -> str:
             node = f"h{i}"
             nid[h.ip] = node
             i += 1
+            role = role_with_ad(h, dc_names)
             parts = [_label(h.ip, 18)]
             if h.hostname:
                 parts.append(_label(h.hostname, 20))
-            parts.append(primary_role(h))
+            parts.append(role + ("  ✓ access" if has_access(h) else ""))
             if h.os_name:
                 parts.append(_label(h.os_name, 22))
-            out.append(f'    {node}["{"<br/>".join(parts)}"]:::{_ROLE_CLASS[primary_role(h)]}')
+            out.append(f'    {node}["{"<br/>".join(parts)}"]:::{_ROLE_CLASS[role]}')
         out.append("  end")
 
     # AD domains: a node per domain, an edge from each in-scope DC to it, and trust
@@ -173,24 +240,34 @@ def _x(s, n=30):
     return _e(s)
 
 
-def svg(hosts: list[Host], domains=None) -> str:
+_SEV_DOT = {"critical": "#C00000", "high": "#E8863D"}
+_ACCESS_STROKE = "#2E7D32"        # green outline for a host we hold access to
+
+
+def svg(hosts: list[Host], domains=None, ad_data=None) -> str:
     """A directly-viewable inline SVG of the network map — renders in any browser
     with no tools or JavaScript (and prints to PDF). Subnet columns of role-coloured
-    host cards, AD domain nodes below with edges to their DCs, and a legend. For a
-    large estate (>50 live hosts) it aggregates each subnet to role counts instead of
-    drawing every host, so it stays readable."""
+    host cards, AD domain nodes below with edges to their DCs, and a legend. Enriched
+    from other findings: hosts recce **gained access** to get a green outline + ✓, and
+    each card carries a **risk dot** for its worst confirmed finding; SharpHound
+    ground-truth **confirms Domain Controllers** (a DC that only had 445 open is still
+    marked). For a large estate (>50 live hosts) it aggregates each subnet to role
+    counts instead of drawing every host, so it stays readable."""
     from html import escape as _e
     up = [h for h in hosts if h.is_up]
     if not up:
         return ('<svg viewBox="0 0 320 60" width="320" height="60" role="img" '
                 'aria-label="Network map"><text x="12" y="34" font-size="14" '
                 'fill="#5f6f6e">No hosts enumerated yet.</text></svg>')
+    dc_names = ad_dc_names(ad_data)
     by_subnet: dict[str, list[Host]] = {}
     for h in up:
         by_subnet.setdefault(h.subnet or "unknown", []).append(h)
     subnets = sorted(by_subnet, key=_ipkey)
     doms = domains or ad.derive_domains(up)
     aggregate = len(up) > 50
+    any_access = any(has_access(h) for h in up)
+    any_risk = any(worst_severity(h) in _SEV_DOT for h in up)
 
     colW, cardW, cardH, cardGap, colGap = 210, 196, 50, 10, 26
     m, headerH = 18, 30
@@ -217,11 +294,17 @@ def svg(hosts: list[Host], domains=None) -> str:
                    f'fill="#115e59">{_x(sub, 24)} '
                    f'<tspan fill="#5f6f6e" font-weight="400">'
                    f'({len(rows)})</tspan></text>')
+        owned = sum(1 for h in rows if has_access(h))
+        if owned:
+            els.append(f'<text x="{x + 46}" y="{m + 18}" font-size="11" '
+                       f'font-weight="700" fill="{_ACCESS_STROKE}">✓ {owned} '
+                       'owned</text>')
         y = m + headerH
         if aggregate:
             counts: dict[str, int] = {}
             for h in rows:
-                counts[primary_role(h)] = counts.get(primary_role(h), 0) + 1
+                counts[role_with_ad(h, dc_names)] = \
+                    counts.get(role_with_ad(h, dc_names), 0) + 1
             for role in _ROLE_ORDER:
                 if role not in counts:
                     continue
@@ -232,14 +315,30 @@ def svg(hosts: list[Host], domains=None) -> str:
             max_rows = max(max_rows, len(counts))
         else:
             for h in rows:
-                role = primary_role(h)
+                role = role_with_ad(h, dc_names)
                 fill, stroke = _ROLE_COLOR[role]
+                accessed = has_access(h)
+                if accessed:
+                    stroke = _ACCESS_STROKE       # green outline = we hold access
                 l1 = _x(h.ip, 22)
                 l2 = _x((h.hostname + "  ") if h.hostname else "") + _e(role)
                 l3 = _x(h.os_name, 30) if h.os_name else ""
                 lines = [(l1, True), (l2, False)] + ([(l3, False)] if l3 else [])
                 els.append(card(x, y, fill, stroke, lines))
-                if "Domain Controller" in (h.roles or []):
+                # Overlays (top-right): risk dot for the worst confirmed finding,
+                # then a green ✓ when recce confirmed access to this host.
+                bx = x + cardW - 12
+                sev = worst_severity(h)
+                if sev in _SEV_DOT:
+                    els.append(f'<circle cx="{bx:.0f}" cy="{y + 13}" r="5.5" '
+                               f'fill="{_SEV_DOT[sev]}"/>')
+                    bx -= 17
+                if accessed:
+                    els.append(f'<circle cx="{bx:.0f}" cy="{y + 13}" r="7" '
+                               f'fill="{_ACCESS_STROKE}"/>')
+                    els.append(f'<text x="{bx:.0f}" y="{y + 17}" text-anchor="middle" '
+                               f'font-size="10" font-weight="700" fill="#fff">✓</text>')
+                if role == "DC":
                     dc_anchor[h.ip] = (x + cardW / 2, y + cardH)
                 y += cardH + cardGap
             max_rows = max(max_rows, len(rows))
@@ -276,9 +375,30 @@ def svg(hosts: list[Host], domains=None) -> str:
                    f'fill="#3a4644">{_e(role)}</text>')
         lx += 30 + len(role) * 7
 
-    width = max(x0 + len(subnets) * (colW + colGap), lx + 20,
+    # Overlay keys (only shown when they apply, so the legend stays honest).
+    leg2_y = leg_y + 20
+    lx2 = x0
+    if any_access:
+        els.append(f'<circle cx="{lx2 + 6}" cy="{leg2_y - 4}" r="7" '
+                   f'fill="{_ACCESS_STROKE}"/>')
+        els.append(f'<text x="{lx2 + 6}" y="{leg2_y}" text-anchor="middle" '
+                   f'font-size="10" font-weight="700" fill="#fff">✓</text>')
+        els.append(f'<text x="{lx2 + 18}" y="{leg2_y}" font-size="11" '
+                   f'fill="#3a4644">access confirmed (green outline)</text>')
+        lx2 += 250
+    if any_risk:
+        els.append(f'<circle cx="{lx2 + 6}" cy="{leg2_y - 4}" r="5.5" fill="#C00000"/>')
+        els.append(f'<text x="{lx2 + 16}" y="{leg2_y}" font-size="11" '
+                   f'fill="#3a4644">critical</text>')
+        lx2 += 82
+        els.append(f'<circle cx="{lx2 + 6}" cy="{leg2_y - 4}" r="5.5" fill="#E8863D"/>')
+        els.append(f'<text x="{lx2 + 16}" y="{leg2_y}" font-size="11" '
+                   f'fill="#3a4644">high finding</text>')
+        lx2 += 110
+
+    width = max(x0 + len(subnets) * (colW + colGap), lx + 20, lx2 + 20,
                 x0 + max(1, len(doms or [])) * (colW + colGap))
-    height = leg_y + 20
+    height = (leg2_y if (any_access or any_risk) else leg_y) + 20
     return (f'<svg viewBox="0 0 {int(width)} {int(height)}" width="{int(width)}" '
             f'height="{int(height)}" role="img" aria-label="Network architecture map" '
             f'font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'
@@ -434,12 +554,14 @@ def ad_svg(arch: dict) -> str:
             + "".join(els) + "</svg>")
 
 
-def dot(hosts: list[Host], domains=None) -> str:
-    """Graphviz DOT of the same map (render: dot -Tpng architecture.dot -o arch.png)."""
+def dot(hosts: list[Host], domains=None, ad_data=None) -> str:
+    """Graphviz DOT of the same map (render: dot -Tpng architecture.dot -o arch.png).
+    DCs are confirmed from SharpHound and accessed hosts are marked."""
     up = [h for h in hosts if h.is_up]
     lines = ["digraph architecture {", "  rankdir=TB; node [shape=box, style=rounded];"]
     if not up:
         return lines[0] + '\n  empty [label="No hosts enumerated yet"];\n}\n'
+    dc_names = ad_dc_names(ad_data)
     by_subnet: dict[str, list[Host]] = {}
     for h in up:
         by_subnet.setdefault(h.subnet or "unknown", []).append(h)
@@ -451,9 +573,10 @@ def dot(hosts: list[Host], domains=None) -> str:
             node = f"h{i}"
             nid[h.ip] = node
             i += 1
+            role = role_with_ad(h, dc_names) + ("  [ACCESS]" if has_access(h) else "")
             label = "\\n".join(
                 [h.ip] + ([h.hostname] if h.hostname else [])
-                + [primary_role(h)] + ([h.os_name] if h.os_name else []))
+                + [role] + ([h.os_name] if h.os_name else []))
             lines.append(f'    {node} [label="{label}"];')
         lines.append("  }")
     for di, d in enumerate(domains or ad.derive_domains(up) or []):
