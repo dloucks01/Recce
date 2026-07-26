@@ -1198,6 +1198,17 @@ def _build_runbook(wb, meta: dict) -> None:
     cmd("web -o eng", "Scan every web endpoint (any port). Add creds with -u/-p to scan "
                       "authenticated.")
 
+    section("2c. Deep pass - one command instead of running each module by hand",
+            "After enum, rather than typing web/smb/ftp/ldap/snmp/mongodb/docker/k8s/"
+            "mssql one at a time, run the whole pass at once. Each module self-skips "
+            "when there's no matching service; the workbook rebuilds once at the end.")
+    cmd("sweep -o eng", "UNAUTHENTICATED pass: every applicable credential-free module. "
+                        "Add --vulns to also run the NSE vuln scan; --only-modules / "
+                        "--skip to narrow. Refuses creds (use credsweep for those).")
+    cmd("credsweep -u user -p pass -d corp.local -o eng",
+        "AUTHENTICATED pass (needs -u/-p): credenum (netexec/impacket) + authenticated "
+        "ldap/smb/mssql/ftp in one shot. Run once you have creds; see section 5.")
+
     section("3. Databases (optional) - deep DB enumeration")
     cmd("db -o eng", "Enumerate + vuln-scan discovered database services. Fills Databases.")
 
@@ -1210,7 +1221,9 @@ def _build_runbook(wb, meta: dict) -> None:
 
     section("5. Credentialed enum - authenticated power moves",
             "Two accounts are supported: a normal user does the enumeration; an "
-            "optional privileged account runs the admin-only checks.")
+            "optional privileged account runs the admin-only checks. Tip: "
+            "`credsweep -u ... -p ... -d ...` runs credenum AND the authenticated "
+            "ldap/smb/mssql/ftp modules in one shot.")
     cmd("credenum -u user -p pass -d corp.local -o eng",
         "Authenticated SMB/LDAP enum with the user account: shares, roasting, "
         "delegation, local-admin reach. Fills Users & Accounts, AD sheets.")

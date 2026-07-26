@@ -73,6 +73,15 @@ so an operator never trips it by accident:
 The `vulns` phase is **safe-by-default** (non-intrusive detection + the offline CVE DB);
 intrusive scripts only run when you ask.
 
+The two grouped deep-pass commands keep this split explicit:
+
+- **`sweep`** is **credential-free and read-only** — it runs only the unauthenticated
+  stdlib probes and refuses credentials (it points you at `credsweep` instead), so it
+  can never send an auth attempt or write as a side-effect of a flag.
+- **`credsweep`** is the **authenticated** pass and requires `-u/-p`: it sends
+  credentials over the network (auth attempts) and drives the netexec/impacket tooling.
+  It runs the write-impact proofs only if you add `--prove-write` (per the table above).
+
 ---
 
 ## 4. recce references tools — it does not weaponize

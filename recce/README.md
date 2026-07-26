@@ -173,6 +173,20 @@ sudo python -m recce vulns -o acme --unscanned     # only what's left
 sudo python -m recce vulns -o acme --aggressive    # intrusive vuln NSE
 sudo python -m recce vulns -o acme --fast          # top-signal only + progress/ETA
 
+# ── Phase 3: the deep pass — one command instead of ~9 ──
+#   sweep = every applicable credential-free deep module in one shot; each
+#   self-skips when the datastore has no matching service, and the workbook is
+#   rebuilt once at the end. Run the individual commands only to focus.
+python -m recce sweep -o acme                       # web/smb/ftp/ldap/snmp/
+                                                    # mongodb/docker/k8s/mssql
+python -m recce sweep -o acme --only-modules web smb   # narrow to a couple
+python -m recce sweep -o acme --vulns               # also run the NSE vuln scan
+python -m recce sweep -o acme --skip mssql          # exclude one
+
+#   credsweep = the authenticated counterpart, once you have creds: the
+#   netexec/impacket phase (credenum) + authenticated ldap/smb/mssql/ftp.
+python -m recce credsweep -u alice -p 'Passw0rd!' -d corp.local -o acme
+
 # ── Databases (per host / subnet / range, safe by default) ──
 sudo python -m recce db -o acme                    # all DB services
 sudo python -m recce db 10.0.20.6 -o acme --aggressive  # brute/xp_cmdshell
@@ -286,6 +300,19 @@ datastore, runs the vulnerability + weak-config scripts below, marks each port
 curated non-destructive detection set so they run, with nothing extra to remember.
 `--aggressive` adds the full intrusive `vuln` category (XSS/SQLi/DoS probes — can
 hang printers/OT/old services). Optional top-N UDP with `--udp-top`.
+
+**`sweep` / `credsweep` (the deep pass — one command each):** after `enum`
+(+`vulns`), rather than running the deep service modules one at a time, `sweep`
+runs every applicable **credential-free** module (`web` / `smb` / `ftp` / `ldap` /
+`snmp` / `mongodb` / `docker` / `kubernetes` / `mssql`) and `credsweep` runs the
+**authenticated** ones (`credenum` plus the authenticated facets of `ldap` /
+`smb` / `mssql` / `ftp`). Each module self-skips when the datastore has no
+matching service, findings fold into the same sheets, and the workbook rebuilds
+once at the end. `sweep` refuses credentials (a credentialed action must be
+explicit — use `credsweep`); `credsweep` requires `-u/-p`. Both take
+`--only-modules` / `--skip` to narrow the set. The per-module commands (below)
+still exist for when you want to focus one service or pass module-specific
+options.
 
 ## Enumeration & vulnerability identification
 
