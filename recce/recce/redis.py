@@ -116,7 +116,9 @@ def _read_reply(sock: socket.socket, timeout: float = _TIMEOUT):
     hit, or the socket goes idle. Returns the parsed value (or None)."""
     buf = b""
     sock.settimeout(timeout)
-    while len(buf) < _MAX_REPLY:
+    # Allow a little headroom over _MAX_REPLY so a bulk string AT the cap can still
+    # buffer its framing ($<len>\r\n ... \r\n) instead of truncating to None.
+    while len(buf) < _MAX_REPLY + 64:
         try:
             val, _ = _parse(buf, 0)
             return val
@@ -181,8 +183,15 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict:
                 out["auth_required"] = True
             return out
         if isinstance(info, str):
-            out["unauth"] = True
             d = _info_dict(info)
+            # Only claim an unauthenticated Redis when the peer positively looks like
+            # Redis (PONG to PING, or an INFO carrying redis_version) - so a non-Redis
+            # service on 6379 that happens to emit a RESP-shaped reply is not a false
+            # critical.
+            if pong != "PONG" and not d.get("redis_version"):
+                out["error"] = "not a Redis service (no PONG / redis_version)"
+                return out
+            out["unauth"] = True
             out["version"] = d.get("redis_version", "")
             out["os"] = d.get("os", "")
             out["role"] = d.get("role", "")

@@ -8345,6 +8345,30 @@ class NfsTest(unittest.TestCase):
         self.assertTrue(N._is_world(pr["exports"][0]["groups"]))     # '*'
         self.assertFalse(N._is_world(pr["exports"][1]["groups"]))    # subnet
 
+    def test_is_world_scoped_wildcard_not_world(self):
+        # Regression (audit): a scoped wildcard is a domain restriction, NOT everyone.
+        from recce import nfs as N
+        self.assertTrue(N._is_world([]))                             # no restriction
+        self.assertTrue(N._is_world(["*"]))                          # bare wildcard
+        self.assertTrue(N._is_world(["(everyone)"]))
+        self.assertFalse(N._is_world(["*.corp.example.com"]))        # domain-scoped
+        self.assertFalse(N._is_world(["10.0.0.0/8"]))
+
+    def test_recv_record_bounds_hostile_fragments(self):
+        # Regression (audit): a never-last fragment stream must terminate, not hang.
+        from recce import nfs as N
+        import io
+        class _FakeSock:
+            def __init__(self):
+                self.n = 0
+            def settimeout(self, t):
+                pass
+            def recv(self, n):
+                # Always a non-last 4-byte fragment header + 4 bytes of body.
+                self.n += 1
+                return b"\x00\x00\x00\x04" if self.n % 2 else b"AAAA"
+        self.assertIsNone(N._recv_record(_FakeSock(), 1.0))          # bounded -> None
+
     def test_findings_and_prove(self):
         from recce import nfs as N, proofs
         pr = {"10.0.8.9": N.probe("127.0.0.1", timeout=3.0, pmport=self.port)}

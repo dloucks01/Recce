@@ -350,16 +350,25 @@ def findings(dc_ip: str, realm: str, results: list[dict],
     roasted = [r for r in results if r["state"] == "roastable"]
     for r in roasted:
         priv = r["user"].lower() in privileged
+        et = r.get("etype")
+        # etype 23 (RC4) is the classic hashcat -m 18200 hash; an AES AS-REP (17/18,
+        # issued when RC4 is disabled) is still roastable but cracks with john's
+        # krb5asrep format, not -m 18200 - say so honestly.
+        if et == 23:
+            crack = f"hashcat -m 18200 asrep.hash rockyou.txt   # {r['user']}@{realm}"
+        else:
+            crack = (f"john --format=krb5asrep asrep.hash   # AES AS-REP (etype {et}), "
+                     "not hashcat -m 18200")
         out.append(_finding(
             "critical" if priv else "high",
             "AS-REP roastable account (pre-auth disabled)"
             + (" - privileged" if priv else ""),
             tgt,
             f"{r['user']}@{realm} has DONT_REQ_PREAUTH set; recce captured a live "
-            f"AS-REP (etype {r.get('etype')}) with no credential. Crack it offline for "
-            f"the plaintext password.\n\n{r.get('hash', '')}",
-            "hashcat",
-            f"hashcat -m 18200 asrep.hash rockyou.txt   # {r['user']}@{realm}",
+            f"AS-REP (etype {et}) with no credential. Crack it offline for the "
+            f"plaintext password.\n\n{r.get('hash', '')}",
+            "hashcat" if et == 23 else "john",
+            crack,
             "Require Kerberos pre-authentication on the account (clear DONT_REQ_PREAUTH) "
             "and enforce a long random password.",
             ["CWE-262"], kind="asrep_roast"))
@@ -426,6 +435,9 @@ def analyze(hosts: list[Host], users: list[str] | None = None,
             results.append(roast_user(dc_ip, realm, u))
     fs = findings(dc_ip, realm, results, privileged) if results else []
     return {"dc_ip": dc_ip, "realm": realm, "results": results, "findings": fs,
+            # `targets` lets _service_module_coverage credit the DC as scanned even
+            # when nothing was roastable (no folded vuln would otherwise mark it).
+            "targets": [{"ip": dc_ip, "port": 88}] if dc_ip else [],
             "runbooks": [{"target": f"{dc_ip}:88", "ip": dc_ip,
                           "credfree": runbook(dc_ip, realm), "credentialed": []}]
             if dc_ip else [],
