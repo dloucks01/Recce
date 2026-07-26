@@ -1222,6 +1222,13 @@ def _phase_credenum(store, paths, args) -> None:
         print("    Install netexec + impacket, or ensure ssh is on PATH, then re-run.")
         print("!" * 64)
         return
+    # SMB/AD creds given but no SMB tool -> the SMB/AD half silently does nothing.
+    # Say so explicitly (consistent with cmd_smb/cmd_mssql) rather than finishing
+    # with a success message and zero accounts.
+    if (creds or admin_creds) and not tools.get("netexec"):
+        print("[!] netexec/impacket not installed - SMB/AD credentialed enum "
+              "(accounts, shares, secretsdump) will be SKIPPED. Install netexec + "
+              "impacket for the full credentialed pass; only the tools listed above run.")
     targets = _selected_hosts(store.all_hosts(), args)
     if not targets:
         print("[!] No hosts in scope.")
@@ -2240,6 +2247,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         degraded = [n for n, req, _ in tools if not req and not presence.get(n)]
         print("  READY." + (f"  Optional tools missing: {', '.join(degraded)}."
                             if degraded else "  All tools present."))
+        # Tell the user HOW to get each missing optional tool, not just its name.
+        _install = {
+            "masscan": "apt install masscan",
+            "searchsploit": "apt install exploitdb",
+            "netexec": "pipx install netexec  (+ pipx install impacket)",
+            "ssh": "apt install openssh-client",
+        }
+        for n in degraded:
+            if n in _install:
+                print(f"      - {n}: {_install[n]}")
         verdict = 0
     return verdict
 
@@ -4131,6 +4148,13 @@ def cmd_kerberos(args: argparse.Namespace) -> int:
 
     active = not args.no_probe
     realm = getattr(args, "domain", "") or store.get_meta("domain") or ""
+    # AS-REQ is one TCP connection to the DC per user, sequentially. Warn before a
+    # large, slow, and network-noisy run so it isn't mistaken for a hang.
+    n_users = len(users) if users is not None else len(_krb.candidate_users(hosts))
+    if active and n_users > 200:
+        print(f"[*] Testing {n_users} username(s) against the DC - one AS-REQ each, "
+              f"sequentially ({n_users} connections to a single DC). This can take a "
+              "while and is network-noisy; narrow with --userlist / --user if needed.")
     analysis = _krb.analyze(hosts, users=users, realm=realm,
                             dc_ip=getattr(args, "dc_ip", "") or "",
                             privileged=privileged, active=active)
@@ -4855,10 +4879,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "typical engagement:\n"
             "  1. recce doctor                     # verify this box\n"
             "  2. recce enum 10.0.0.0/24 -o eng    # discover + services\n"
-            "  3. open eng/enumeration.xlsx -> Start Here tab\n"
-            "  4. recce vulns -o eng               # vuln-scan open ports\n"
-            "  5. recce db -o eng ; recce privesc -o eng\n"
-            "  6. recce status -o eng              # what's left\n\n"
+            "  3. recce vulns -o eng               # vuln-scan open ports\n"
+            "  4. recce sweep -o eng               # ALL credential-free deep modules\n"
+            "  5. recce credsweep -u U -p P -d DOM -o eng   # once you have creds\n"
+            "  6. recce status -o eng              # what's left; open eng/enumeration.xlsx\n\n"
             "targets: single IP, several IPs, range (10.0.0.10-40), CIDR, or @file.\n"
             "run 'recce <command> -h' for a command's options."
         ),
@@ -5096,10 +5120,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cd.add_argument("--add", action="append", metavar="USER:SECRET",
                     help="add a captured credential: 'user:secret', "
                          "'DOMAIN\\user:secret' (a 32-hex secret => NT hash). Repeatable.")
-    cd.add_argument("--user", help="add a credential: username")
-    cd.add_argument("--pass", dest="password", help="add a credential: password")
-    cd.add_argument("--hash", help="add a credential: NT hash (for pass-the-hash)")
-    cd.add_argument("--domain", help="add a credential: AD domain (blank = local)")
+    cd.add_argument("-u", "--user", help="add a credential: username")
+    cd.add_argument("-p", "--pass", dest="password", help="add a credential: password")
+    cd.add_argument("-H", "--hash", help="add a credential: NT hash (for pass-the-hash)")
+    cd.add_argument("-d", "--domain", help="add a credential: AD domain (blank = local)")
     cd.add_argument("--plan", action="store_true",
                     help="build the spray plan (write users/passwords/hashes files "
                          "+ print the netexec/impacket commands)")
