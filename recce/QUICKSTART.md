@@ -9,77 +9,42 @@
 
 ---
 
-## 0 · Before you begin (read this first)
+## 0 · Before you begin
 
-**What recce does, in plain terms:** you give it the addresses of computers you
-are *allowed* to test; it looks at each one, notes what it is running and where it
-might be weak, and writes everything into a single spreadsheet you tick off as you
-go. You don't have to remember commands — after each step, `recce status` tells you
-the exact next one to run.
+**What recce does:** you give it the addresses you're authorized to test; it scans
+each one, records what it runs and where it's weak, and writes everything into a
+single spreadsheet you tick off as you go. After each step, `recce status` prints
+the exact next command — you don't have to memorise the flow.
 
-**What you need:**
+**You need:** Kali (or any Linux with `python3` 3.9+ and `nmap`), the in-scope
+addresses from your team, and written authorization. Only point recce at systems
+you're allowed to test.
 
-- **A computer running Kali Linux** (a free operating system built for security
-  testing). recce is normally run from Kali. If you don't have it, ask whoever set
-  up your engagement — this is not something you install on an everyday laptop.
-- **The list of addresses you're allowed to test** ("your scope"). One computer
-  looks like `10.0.10.5`; a whole block looks like `10.0.10.0/24`. Your team gives
-  you these — you do **not** guess them.
-- **Written permission** to test those addresses. Only ever point recce at systems
-  you are authorized to assess. If you're unsure, stop and ask.
-
-**How to run a command:** open the **Terminal** app, type (or copy-paste) the
-command, and press **Enter**. A few conventions used below:
-
-- A line starting with **`#`** is a note for you, *not* a command — don't type it.
-- **`sudo`** means "run with administrator rights." It may ask for your password;
-  the letters won't appear as you type — that's normal, just type it and press Enter.
-- Replace anything in **`< >`** (like `<targets>`) with your own value; leave the
-  rest exactly as written.
-- **`./bin/recce`** and **`python3 -m recce`** are the same thing — use whichever runs.
-
-If a step doesn't work, see **§7 Troubleshooting** or ask your team. Re-running any
-recce command is always safe — it never double-counts or loses your ticks.
-
-**Words you'll see:**
-
-| Word | Plain meaning |
-|---|---|
-| **target** | a computer you're testing, named by its address (e.g. `10.0.10.5`) |
-| **subnet** | a block of addresses written `10.0.10.0/24` (here, `.1` through `.254`) |
-| **port / service** | a "door" on a computer and the program answering behind it — a website, file-sharing, a database, etc. |
-| **enumerate** | list what a computer is running (recce's first pass) |
-| **vulnerability** ("vuln") | a known weakness a service may have |
-| **credentials** ("creds") | a username + password (or a password hash) that logs in |
-| **foothold / access** | you got in — a valid login or admin rights on a host |
-| **the workbook** | `enumeration.xlsx`, the spreadsheet recce fills in and you track your work in |
-| **`-o eng`** | the folder recce keeps everything in — **keep it the same every command** |
-| **`sudo`** | run with administrator rights (so the scan can see more) |
-| **`-Pn`** | "assume the host is up" — add it when a host shows zero open ports |
+**Conventions in this guide:** lines starting with `#` are notes, not commands;
+replace anything in `< >` with your value; `./bin/recce` and `python3 -m recce`
+are interchangeable; prefix scans with `sudo` for full detection. Re-running any
+command is safe — it never double-counts or loses your ticks. **Keep `-o eng`
+identical across every command** — it's the one engagement folder they all share.
 
 ---
 
 ## 1 · Get it running
 
-Nothing to install — Kali already has Python and the tools recce uses. Only
-**`nmap`** is truly required; everything else is optional and skipped cleanly if
-it's missing.
-
-First, move into the recce folder and run the self-check:
+Only **`nmap`** is required (Kali has it); every other tool is optional and its
+phase is skipped cleanly if absent. From the recce folder, run the self-check:
 
 ```bash
 cd recce
-./bin/recce doctor          # run this first: confirms the tool can run here
+./bin/recce doctor          # confirms the tool can run here
 ```
 
-**You'll see:** a checklist of tools (green **OK** for what's present, `-` for
-optional ones that aren't), then a short self-scan, ending in **`READY.`** If it
-says `READY`, you're good to go. If `nmap` shows as missing, install it first
-(ask your team how, or `sudo apt install nmap` on Kali).
+**You'll see:** a list of tools (**OK** = present, `-` = optional and absent), a
+short self-scan, and a final **`READY.`** line. If `nmap` shows missing, install
+it (`sudo apt install nmap`) and re-run.
 
 > [!TIP]
-> `./bin/recce` is just a shortcut for `python3 -m recce` — use whichever works.
-> Run scans with **`sudo`** so the scan can see the most (SYN/OS detection).
+> `./bin/recce` is a shortcut for `python3 -m recce` — use whichever works. Run
+> scans with **`sudo`** for SYN scan + OS detection.
 
 > [!NOTE]
 > **Getting it onto Kali** (Windows host → Kali guest): best is `git clone` *inside
@@ -177,10 +142,9 @@ sudo ./bin/recce vulns -o eng
 ```bash
 ./bin/recce sweep -o eng
 ```
-**You'll see:** each service type checked in turn (web, SMB/file-shares, databases,
-etc.), skipping any you don't have. One command replaces running nine by hand.
-**Have credentials** (a username + password you're allowed to use)? Run the
-authenticated version too:
+**You'll see:** each service type checked in turn (web, SMB, databases, etc.),
+skipping any you don't have — one command instead of nine. **Have credentials?**
+Run the authenticated pass too:
 ```bash
 ./bin/recce credsweep -u alice -p 'Passw0rd!' -d corp.local -o eng
 ```
