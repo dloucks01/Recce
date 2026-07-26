@@ -87,7 +87,11 @@ def bson_parse(data: bytes, i: int = 0, _depth: int = 0) -> tuple[dict, int]:
             out[name], i = bson_parse(data, i, _depth + 1)
         elif etype == 0x04:                            # array (doc with "0","1",... keys)
             sub, i = bson_parse(data, i, _depth + 1)
-            out[name] = [sub[k] for k in sorted(sub, key=lambda x: int(x))]
+            # BSON arrays use decimal string keys; a hostile daemon could send
+            # non-numeric ones. Sort numeric keys, keep any stragglers by insertion
+            # order, rather than letting int() blow away the whole reply.
+            out[name] = [sub[k] for k in sorted(sub, key=lambda x: (0, int(x))
+                                                if x.isdigit() else (1, 0))]
         elif etype == 0x05:                            # binary
             blen = struct.unpack_from("<i", data, i)[0]
             if blen < 0:
@@ -150,7 +154,13 @@ def command(sock, doc: bytes, request_id: int, timeout: float) -> dict | None:
             return None                                 # can't make us buffer ~2 GB
         rest = _recvn(sock, length - 4)
         msg = hdr + rest
-        reply, _ = bson_parse(msg, 16 + 4 + 1)         # header(16) + flagBits(4) + kind(1)
+        # The BSON body offset depends on the reply opcode: OP_MSG (2013) has
+        # header(16) + flagBits(4) + kind(1) = 21; legacy OP_REPLY (1) has a 20-byte
+        # reply header after the 16-byte msg header = 36. Read the opcode (bytes
+        # 12..16) instead of assuming OP_MSG so pre-3.6 servers still fingerprint.
+        opcode = struct.unpack_from("<i", msg, 12)[0]
+        body_at = 36 if opcode == 1 else 21
+        reply, _ = bson_parse(msg, body_at)
         return reply
     except (OSError, struct.error, IndexError, ValueError):
         return None

@@ -8,6 +8,7 @@ table. Built from the same data as the workbook; stdlib-only.
 from __future__ import annotations
 
 import math
+import os
 from html import escape
 
 from .models import Host
@@ -662,7 +663,10 @@ def _mask_secret(secret, kind):
     if kind == "nthash":
         return f'NT hash …{escape(secret[-4:])}'
     if kind == "ssh-key":
-        return f'SSH key: {escape(secret)}'
+        # `secret` is a key path or key material; show only the basename so nothing
+        # sensitive (full path / private key) leaks into the shareable HTML.
+        base = escape(os.path.basename(secret.rstrip("/")) or secret[:8])
+        return f'SSH key: …/{base}'
     if len(secret) <= 3:
         return "•" * len(secret)
     return (escape(secret[0]) + "•" * (len(secret) - 2) + escape(secret[-1])
@@ -718,7 +722,7 @@ def _page(title, body):
 
 def build_html(hosts: list[Host], out_path: str, *, title: str = "",
                domains=None, credentials=None, generated: str = "",
-               tracking=None, ad_bloodhound=None, assets_link: str = "") -> str:
+               tracking=None, assets_link: str = "") -> str:
     """Write the self-contained findings report. Architecture diagrams and the
     users / credentials / key-information inventory live in a companion page
     (see build_assets_html); `assets_link` is the relative filename to link to it.

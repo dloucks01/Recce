@@ -195,7 +195,9 @@ class Store:
                 merged.local_findings.append(f)
         # Roles / ntlm / signing enrichment.
         merged.roles = sorted(set(old.roles) | set(new.roles))
-        merged.ntlm = {**new.ntlm, **old.ntlm}
+        # Newer non-empty facts win (consistent with the rest of _merge); a later,
+        # richer NTLM capture must not be overwritten by the older scan.
+        merged.ntlm = {**old.ntlm, **{k: v for k, v in new.ntlm.items() if v}}
         if new.smb_signing and new.smb_signing != "unknown":
             merged.smb_signing = new.smb_signing
         merged.defenses = list(dict.fromkeys(old.defenses + new.defenses))

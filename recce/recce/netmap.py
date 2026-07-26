@@ -464,7 +464,11 @@ def ad_svg(arch: dict, owned_labels=None) -> str:
     boxW, boxH, hGap, vGap, m = 156, 40, 18, 96, 22
     ncols = max(1, max(len(v) for v in tiers.values()))
     width = m * 2 + ncols * (boxW + hGap) - hGap
-    row_y = {0: m + 24, 1: m + 24 + vGap, 2: m + 24 + 2 * vGap}
+    # Domain trust arcs are drawn ABOVE the tier-0 row; reserve headroom when any
+    # exist so the arc + "trust" label don't clip against the top of the viewBox.
+    top_pad = 26 if trusts else 0
+    y0 = m + 24 + top_pad
+    row_y = {0: y0, 1: y0 + vGap, 2: y0 + 2 * vGap}
 
     pos: dict[str, tuple] = {}
     for t in (0, 1, 2):
@@ -485,9 +489,11 @@ def ad_svg(arch: dict, owned_labels=None) -> str:
         return cx, cy
 
     # Per-node risk from incoming control edges: DCSync = critical, other ACL = high.
+    # Only count edges whose target is actually drawn (in `pos`) so the risk legend
+    # key never appears without a matching dot on the page.
     node_risk: dict[str, str] = {}
     for src, label, dst in edges:
-        if label == "MemberOf":
+        if label == "MemberOf" or dst not in pos:
             continue
         sev = "critical" if label == "DCSync" else "high"
         if node_risk.get(dst) != "critical":
@@ -542,7 +548,7 @@ def ad_svg(arch: dict, owned_labels=None) -> str:
             f'<rect x="{x:.0f}" y="{y:.0f}" width="{boxW}" height="{boxH}" rx="{rx:.0f}" '
             f'fill="{fill}" stroke="{stroke}" stroke-width="{3 if held else 1.6}"/>'
             f'<text x="{cx:.0f}" y="{cy - 2:.0f}" text-anchor="middle" font-size="11.5" '
-            f'font-weight="700" fill="#1a2422">{_x(n.get("label") or sid, 22)}</text>'
+            f'font-weight="700" fill="#1a2422">{_x(n.get("label") or sid, 17)}</text>'
             f'<text x="{cx:.0f}" y="{cy + 12:.0f}" text-anchor="middle" font-size="9.5" '
             f'fill="#5f6f6e">{_x(tag, 18)}</text>']
         # Overlays (top-right): risk dot for the worst incoming control edge, then a

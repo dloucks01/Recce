@@ -263,14 +263,17 @@ def _parse_tlv(data: bytes, i: int) -> tuple[int, bytes, int]:
 
 
 def result_code(msg: bytes):
-    """resultCode from a response LDAPMessage (bind/search-done), or None."""
+    """resultCode from a response LDAPMessage (bind/search-done), or None. `msg` is
+    None when the server closed the socket or sent a short/garbage frame."""
+    if not msg:
+        return None
     try:
         _, body, _ = _parse_tlv(msg, 0)             # outer SEQUENCE
         _, _msgid, i = _parse_tlv(body, 0)          # messageID
         _, op, _ = _parse_tlv(body, i)              # protocolOp (a *Response)
         _, rc, _ = _parse_tlv(op, 0)                # resultCode ENUMERATED
         return rc[0] if rc else None
-    except (IndexError, ValueError):
+    except (IndexError, ValueError, TypeError):
         return None
 
 
@@ -645,9 +648,10 @@ def enum_authenticated(ip: str, port: int, base: str, creds: dict,
         return {"users": users, "computers": computers,
                 "domain": dom[0] if dom else {}, "bind_dn": _bind_dn(creds),
                 "bind_method": method, "error": None}
-    except (OSError, struct.error, ValueError) as e:
-        # struct.error/ValueError can surface from a truncated/tampered sealed frame
-        # on the pass-the-hash path - degrade to "bind failed", never crash the module.
+    except (OSError, struct.error, ValueError, TypeError) as e:
+        # struct.error/ValueError/TypeError can surface from a truncated/tampered
+        # sealed frame or a None response on the pass-the-hash path - degrade to
+        # "bind failed", never crash the module.
         return {"error": f"enumeration error: {e}"}
     finally:
         try:
