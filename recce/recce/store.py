@@ -178,6 +178,8 @@ class Store:
         merged.db_scanned = old.db_scanned or new.db_scanned
         merged.privesc_checked = old.privesc_checked or new.privesc_checked
         merged.cred_enumerated = old.cred_enumerated or new.cred_enumerated
+        merged.access_gained = old.access_gained or new.access_gained
+        merged.access_detail = new.access_detail or old.access_detail
         merged.last_scanned = new.last_scanned or old.last_scanned
         merged.subnet = new.subnet or old.subnet
 

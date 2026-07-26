@@ -62,6 +62,7 @@ cd recce
 | **Attack path** | `./bin/recce attackpath -o eng` | chains findings → domain compromise |
 | **Credentials** | `./bin/recce creds --add 'dom\u:p' -o eng` | stack creds → spray plan (`--plan`) |
 | **Write-ups** | `./bin/recce writeups -o eng` | one Word doc per real finding |
+| **Access** | `./bin/recce access -o eng` | footholds per host (auto-derived from credentialed enum); record your own with `--host IP --note '...'` |
 | **Status** | `./bin/recce status -o eng` | what's left + the next command |
 
 > [!IMPORTANT]

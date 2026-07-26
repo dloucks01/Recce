@@ -201,6 +201,10 @@ class Host:
     db_scanned: bool = False       # the `db` phase ran against this host
     privesc_checked: bool = False  # the `privesc` phase ran against this host
     cred_enumerated: bool = False  # the `credenum` phase ran against this host
+    access_gained: bool = False    # recce confirmed a foothold here (valid creds /
+                                   # local admin / unauth RCE), or the operator
+                                   # recorded one via `recce access`
+    access_detail: str = ""        # how access was gained (short, for the report)
     last_scanned: str = ""
     reviewed: bool = False
     notes: str = ""

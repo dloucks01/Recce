@@ -33,12 +33,32 @@ STEP_COLUMNS = {"Enumerated": "enum", "Vuln-scan": "vuln", "Web": "web",
                 "Creds": "creds", "Lateral": "lateral"}
 
 # Steps whose value is a pure manual operator sign-off (never auto-completed).
-MANUAL_STEPS = {"ad", "access", "creds", "lateral"}
+# Steps the tool can never complete for you - pure operator sign-offs (amber on the
+# Checklist). `access` used to live here, but recce now auto-derives it (valid creds
+# / local admin / a foothold the operator recorded), so it auto-ticks like a phase.
+MANUAL_STEPS = {"ad", "creds", "lateral"}
 
 # What a step cell shows when the step does not apply to a host (e.g. no web
 # server -> no Web box; a non-DC host -> no AD box). Rendered instead of a
 # checkbox and never counted as done or outstanding.
 STEP_NA = "—"   # em dash
+
+
+def access_from_findings(host) -> str:
+    """A short description of a foothold recce can read from this host's findings,
+    or '' if none. Keys only off STABLE, recce-generated script_ids (credenum /
+    SSH), never title text - modules that know access at run time (mssql access
+    matrix) set host.access_gained directly, so this only needs to catch the
+    credential-based footholds that always carry a fixed id."""
+    for v in getattr(host, "vulns", []):
+        sid = (getattr(v, "script_id", "") or "").lower()
+        if sid.startswith("cred-smb-admin"):
+            return "SMB local admin (Pwn3d!)"
+        if sid == "cred-secretsdump":
+            return "SMB admin - secretsdump"
+        if sid in ("ssh-sudo", "ssh-suid"):
+            return "SSH foothold (credentialed enum ran)"
+    return ""
 
 # Ports/service hints used to decide which per-surface steps apply to a host.
 _WEB_PORTS = {80, 443, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9443, 3000, 5000}
@@ -126,6 +146,10 @@ def step_auto(host, step: str) -> bool:
         return host.db_scanned
     if step == "privesc":
         return host.privesc_checked
+    if step == "access":
+        # Auto-derived: recce confirmed a foothold (valid creds / local admin /
+        # unauth RCE) or the operator recorded one. Still operator-overridable.
+        return getattr(host, "access_gained", False)
     if step in MANUAL_STEPS:
         return False
     return False

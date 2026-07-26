@@ -623,6 +623,20 @@ python -m recce review -o engagement --host 10.0.10.25 --undo
 python -m recce report -o engagement
 ```
 
+**Initial access is tracked automatically.** The `Access` step is no longer a
+manual checkbox — recce marks a host as *access gained* whenever a credentialed
+phase confirms a foothold (valid creds / local admin via `credenum`/`credsweep`,
+an SSH session, or a working MSSQL login), and the Access step auto-ticks. Review
+the picture — or record a foothold you gained another way — with the `access`
+command:
+
+```bash
+python -m recce access -o engagement                       # who do I have a foothold on?
+python -m recce access -o engagement --host 10.0.10.25 \
+       --note "SYSTEM via PrintNightmare"                  # record a manual foothold
+python -m recce access -o engagement --host 10.0.10.25 --undo   # clear it
+```
+
 `status` output:
 
 ```
