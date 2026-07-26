@@ -17,6 +17,21 @@ from .models import Credential, Domain, Host
 class StoreError(RuntimeError):
     """The datastore file is corrupt/unreadable (e.g. a partial transfer)."""
 
+
+# Ranked weakest->strongest so a merge never downgrades a host's proof-of-life:
+# a real reply outranks the -Pn assume-up ("user-set") which outranks nothing.
+_UP_REASON_RANK = {"": 0, "unknown": 0, "no-response": 0, "unknown-response": 0,
+                   "user-set": 1}
+
+
+def _best_up_reason(old: str, new: str) -> str:
+    """Return whichever reason is the stronger proof the host is up. Any concrete
+    reply (echo-reply, syn-ack, arp-response, report-listed, ...) ranks above the
+    blanket -Pn 'user-set' and above a blank, and never gets overwritten by them."""
+    def rank(r: str) -> int:
+        return _UP_REASON_RANK.get(r, 2)   # anything not listed is a real reply
+    return new if rank(new) > rank(old) else old
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS hosts (
     ip       TEXT PRIMARY KEY,
@@ -102,6 +117,9 @@ class Store:
     def _merge(self, old: Host, new: Host) -> Host:
         """Combine two scans of the same host, preferring the richer data."""
         merged = old
+        # Capture pre-merge enumerated states: `merged is old`, so the assignments below
+        # mutate old.enumerated before the incomplete_scan logic would read it.
+        old_was_enum, new_was_enum = old.enumerated, new.enumerated
         # Ports: index by (proto, portid); newer non-empty fields win.
         port_index = {(p.protocol, p.portid): p for p in old.ports}
         for np in new.ports:
@@ -115,6 +133,15 @@ class Store:
                 op.extrainfo = np.extrainfo or op.extrainfo
                 op.tunnel = np.tunnel or op.tunnel
                 op.cpe = np.cpe or op.cpe
+                # Newer non-empty enrichment wins for the remaining fields too - else a
+                # later pass (esp. ingest/deploy setting binary/detect_source, or a
+                # probe run capturing banner/servicefp) is silently dropped on merge.
+                op.reason = np.reason or op.reason
+                op.ostype = np.ostype or op.ostype
+                op.servicefp = np.servicefp or op.servicefp
+                op.detect_source = np.detect_source or op.detect_source
+                op.banner = np.banner or op.banner
+                op.binary = np.binary or op.binary
                 op.vuln_scanned = op.vuln_scanned or np.vuln_scanned
                 if np.scripts:
                     seen = {s.id for s in op.scripts}
@@ -131,14 +158,28 @@ class Store:
             merged.os_name, merged.os_accuracy, merged.os_family = (
                 new.os_name, new.os_accuracy, new.os_family)
         merged.state = new.state or old.state
+        # Keep the strongest proof-of-life reason: a real reply (echo-reply/syn-ack/
+        # arp-response/report-listed) always outranks the -Pn "user-set" assume-up
+        # and a blank, so a later -Pn re-scan can never downgrade a confirmed host.
+        merged.up_reason = _best_up_reason(old.up_reason, new.up_reason)
         merged.distance = new.distance or old.distance
         merged.enumerated = old.enumerated or new.enumerated
         # Ports are unioned across scans, so the host is complete if ANY sweep
-        # finished; only incomplete when every scan of it was truncated.
-        merged.incomplete_scan = old.incomplete_scan and new.incomplete_scan
+        # finished; only incomplete when every scan of it was truncated. A record that
+        # was NEVER enumerated (a --targets-up seed) contributed no ports, so its
+        # default `incomplete_scan=False` must not count as "a scan completed" - that
+        # would mark a truncated enum as complete.
+        if not old_was_enum:
+            merged.incomplete_scan = new.incomplete_scan
+        elif not new_was_enum:
+            merged.incomplete_scan = old.incomplete_scan
+        else:
+            merged.incomplete_scan = old.incomplete_scan and new.incomplete_scan
         merged.db_scanned = old.db_scanned or new.db_scanned
         merged.privesc_checked = old.privesc_checked or new.privesc_checked
         merged.cred_enumerated = old.cred_enumerated or new.cred_enumerated
+        merged.access_gained = old.access_gained or new.access_gained
+        merged.access_detail = new.access_detail or old.access_detail
         merged.last_scanned = new.last_scanned or old.last_scanned
         merged.subnet = new.subnet or old.subnet
 
@@ -172,12 +213,20 @@ class Store:
             if ne.key not in eseen:
                 eseen.add(ne.key)
                 merged.exploits.append(ne)
-        aseen = {(a.source, a.kind, a.name, a.domain, a.rid) for a in old.accounts}
+        aidx = {(a.source, a.kind, a.name, a.domain, a.rid): a for a in old.accounts}
         for a in new.accounts:
             k = (a.source, a.kind, a.name, a.domain, a.rid)
-            if k not in aseen:
+            existing = aidx.get(k)
+            if existing is None:
                 merged.accounts.append(a)
-                aseen.add(k)
+                aidx[k] = a
+            else:
+                # Same account seen again: fold in any richer attrs/detail a later pass
+                # discovered (admincount, spn, delegation ...) instead of dropping them.
+                for ak, av in a.attrs.items():
+                    if av and not existing.attrs.get(ak):
+                        existing.attrs[ak] = av
+                existing.detail = existing.detail or a.detail
         return merged
 
     def upsert_host(self, host: Host, merge: bool = True) -> None:

@@ -17,8 +17,9 @@ nxc mssql, MSSQLPwner, SQLRecon) does, folded into recce's model:
     CLR / Agent).
 
 recce does the pre-auth probing itself and generates the full, credential-filled
-runbook + chain (copy-paste ready); it references EXISTING tools (nxc / impacket /
-mssqlpwner) for the authenticated actions and generates no exploit code.
+runbook + chain (copy-paste ready); it references existing tools (nxc / impacket /
+mssqlpwner) for the authenticated actions. Airgapped, stdlib only for the pre-auth
+probe. Safety posture: see SECURITY.md.
 """
 from __future__ import annotations
 
@@ -179,12 +180,17 @@ def mssql_targets(hosts: list[Host]) -> list[dict]:
     return out
 
 
-def probe_target(ip: str, port: int = _DEFAULT_PORT, active: bool = True) -> dict:
+def probe_target(ip: str, port: int = _DEFAULT_PORT, active: bool = True,
+                 instances: list | None = None) -> dict:
     """Credential-free gather for one endpoint: SQL Browser instances + a TDS
-    pre-login (version, encryption). {instances:[...], prelogin:{...}}."""
+    pre-login (version, encryption). {instances:[...], prelogin:{...}}.
+
+    `instances` may be passed pre-computed to avoid re-running the SQL Browser (UDP
+    1434) query per port when one host exposes several MSSQL ports."""
     if not active:
         return {"instances": [], "prelogin": {}}
-    return {"instances": sql_browser(ip), "prelogin": prelogin(ip, port)}
+    inst = sql_browser(ip) if instances is None else instances
+    return {"instances": inst, "prelogin": prelogin(ip, port)}
 
 
 # --- credential substitution ----------------------------------------------------
@@ -1729,23 +1735,8 @@ def proof_html(command, output: str, prompt: str = "SQL>", banner: str = "") -> 
 def findings_to_vulns(fs: list[dict]) -> dict:
     """Convert MSSQL findings into Vuln objects, keyed by target ip, so they feed
     the main severity totals / Vulnerabilities sheet / writeups. Returns {ip:[Vuln]}."""
-    from .models import Vuln
-    by_ip: dict[str, list] = {}
-    for f in fs:
-        ip = f["target"].split(":")[0]
-        port = int(f["target"].split(":")[1]) if ":" in f["target"] else 1433
-        evidence = f.get("detail", "")
-        if f.get("narrative"):
-            evidence += f"\n\nWhat this enables:\n{f['narrative']}"
-        if f.get("command"):
-            evidence += f"\n\nProve / next step:\n{f['command']}"
-        by_ip.setdefault(ip, []).append(Vuln(
-            ip=ip, port=port, protocol="tcp",
-            script_id=f"mssql:{f['title'][:40]}", state="finding", title=f["title"],
-            severity=f["severity"], source="mssql", confidence="confirmed",
-            cwes=list(f.get("cwes") or ["CWE-284"]),
-            output=evidence.strip(), remediation=f.get("remediation", "")))
-    return by_ip
+    from .svccommon import findings_to_vulns as _f2v
+    return _f2v(fs, "mssql", 1433)
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
@@ -1754,9 +1745,13 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     chain. JSON-serialisable for the datastore + report."""
     targets = mssql_targets(hosts)
     probes: dict = {}
+    browser: dict = {}          # SQL Browser (UDP 1434) result cached per IP
     for t in targets:
         key = f"{t['ip']}:{t['port']}"
-        probes[key] = probe_target(t["ip"], t["port"], active=active)
+        if active and t["ip"] not in browser:
+            browser[t["ip"]] = sql_browser(t["ip"])
+        probes[key] = probe_target(t["ip"], t["port"], active=active,
+                                   instances=browser.get(t["ip"]) if active else None)
         # Recover the version from the pre-login when nmap missed it.
         pv = probes[key]["prelogin"].get("version")
         if pv and not t.get("version"):

@@ -11,6 +11,7 @@ Subcommands (see `recce -h` for the full, authoritative list):
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -28,7 +29,7 @@ from .models import Host
 from .report_excel import read_workbook_edits, update_workbook
 from .report_markdown import build_csv, build_markdown
 from .store import Store, StoreError
-from .targets import apply_exclusions, ip_matcher, load_targets
+from .targets import apply_exclusions, expand_excludes, ip_matcher, load_targets
 
 BANNER = r"""
   ____  _____ ____ ____ _____
@@ -38,6 +39,10 @@ BANNER = r"""
  |_| \_\_____\____\____|_____|
    recon & coverage tracker for airgapped pentests
 """
+
+# Canonical severity ordering for sorting findings worst-first (shared by every
+# finding-fold path: the deep-service commands and the AD/bloodhound merge).
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
 
@@ -136,6 +141,7 @@ def _open_paths(out_dir: str) -> dict[str, str]:
         "md": os.path.join(out_dir, "enumeration.md"),
         "csv": os.path.join(out_dir, "services.csv"),
         "html": os.path.join(out_dir, "report.html"),
+        "assets": os.path.join(out_dir, "assets.html"),
         "log": os.path.join(out_dir, "recce.log"),
     }
 
@@ -266,9 +272,18 @@ def _safe_refresh(store: Store, paths: dict[str, str], title: str) -> bool:
         return False
 
 
+# When `sweep` chains several deep-module commands, each one would otherwise
+# regenerate the whole workbook on the way out (N rebuilds for N modules). This flag
+# lets sweep suppress those intermediate rebuilds and regenerate exactly once at the
+# end - the datastore is the source of truth, so nothing is lost by deferring.
+_DEFER_REPORTS = False
+
+
 def _generate_reports(store: Store, paths: dict[str, str], title: str,
                       quiet: bool = False) -> None:
     """Regenerate all reports from the datastore (the source of truth)."""
+    if _DEFER_REPORTS:
+        return
     hosts = store.all_hosts()
     tracking = store.get_tracking()
     domains = _resolve_domains(store, hosts)
@@ -309,20 +324,62 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["kubernetes"] = json.loads(k8s_blob)
         except ValueError:
             pass
+    ldap_blob = store.get_meta("ldap")
+    if ldap_blob:
+        try:
+            meta["ldap"] = json.loads(ldap_blob)
+        except ValueError:
+            pass
+    for _mk in ("snmp", "mongodb"):
+        _blob = store.get_meta(_mk)
+        if _blob:
+            try:
+                meta[_mk] = json.loads(_blob)
+            except ValueError:
+                pass
+    credentials = store.all_credentials()   # one table scan, shared by both reports
     update_workbook(paths["xlsx"], hosts, meta=meta,
                     domains=domains, tracking=tracking, scope=store.get_scope(),
                     statuses=store.get_statuses(), issues=store.get_issues(),
-                    credentials=store.all_credentials())
+                    credentials=credentials)
     build_markdown(hosts, paths["md"], title=title, domains=domains)
     build_csv(hosts, paths["csv"])
-    from .report_html import build_html
+    from .report_html import build_html, build_assets_html
+    gen = _now()
     build_html(hosts, paths["html"], title=title, domains=domains,
-               credentials=store.all_credentials(), generated=_now())
+               credentials=credentials, generated=gen, tracking=tracking,
+               ad_bloodhound=meta.get("ad_bloodhound"),
+               assets_link=os.path.basename(paths["assets"]))
+    build_assets_html(hosts, paths["assets"], title=title, domains=domains,
+                      credentials=credentials, generated=gen,
+                      ad_bloodhound=meta.get("ad_bloodhound"),
+                      report_link=os.path.basename(paths["html"]))
+    # Standalone architecture diagram sources (render with any Mermaid viewer, or
+    # `dot -Tpng architecture.dot`). Best-effort - never block a report on these.
+    try:
+        from . import netmap
+        eng_dir = os.path.dirname(paths["html"])
+        ad_blob = meta.get("ad_bloodhound")
+        with open(os.path.join(eng_dir, "architecture.mmd"), "w", encoding="utf-8") as fh:
+            fh.write(netmap.mermaid(hosts, domains, ad_blob))
+        with open(os.path.join(eng_dir, "architecture.dot"), "w", encoding="utf-8") as fh:
+            fh.write(netmap.dot(hosts, domains, ad_blob))
+        # Standalone, directly-viewable AD tier-0 diagram (open the .svg in any
+        # browser). It needs the xmlns the embedded copy omits to render as a file.
+        arch = (meta.get("ad_bloodhound") or {}).get("architecture")
+        if arch and arch.get("nodes"):
+            svg = netmap.ad_svg(arch).replace(
+                "<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+            with open(os.path.join(eng_dir, "ad-architecture.svg"), "w",
+                      encoding="utf-8") as fh:
+                fh.write(svg)
+    except OSError:
+        pass
     if not quiet:
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
               f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}"
-              f"\n    {paths['html']}")
+              f"\n    {paths['html']}\n    {paths['assets']} (architecture & assets)")
         counts = store.count_issues()
         if counts.get("total"):
             print(f"[!] {counts['total']} scan issue(s) logged "
@@ -339,6 +396,10 @@ def _apply_profile_overrides(profile, args) -> None:
     if g("top_ports"):
         profile.all_ports = False
         profile.top_ports = args.top_ports
+    # --all-ports is the explicit, profile-overriding "full 65535-port sweep" and is
+    # applied last so it wins over a quick profile or a lingering --top-ports.
+    if g("all_ports"):
+        profile.all_ports = True
     if g("no_ad"):
         profile.ad_enrich = False
     if g("no_os"):
@@ -351,10 +412,14 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.verify = False
     if g("verify_all"):
         profile.verify_all = True
+    if g("no_udp_fallback"):
+        profile.udp_fallback = False
     if g("reliable"):
         profile.reliable = True
     if g("udp_top"):
         profile.udp_top = args.udp_top
+    if g("no_udp"):
+        profile.udp_basic = False
     if g("masscan") or g("fast"):
         profile.scanner = "masscan"
     if g("offline"):
@@ -365,8 +430,15 @@ def _apply_profile_overrides(profile, args) -> None:
         profile.version_all = True
     if g("version_intensity") is not None:
         profile.version_intensity = args.version_intensity
-    profile.ping_discovery = not g("no_discovery", False)
+    # An authoritative target list implies -Pn: every provided host is treated as up
+    # (we pre-seed them), so discovery must not drop any as "down".
+    if g("targets_up", False):
+        profile.ping_discovery = False
+    else:
+        profile.ping_discovery = not g("no_discovery", False)
     profile.assume_up = not profile.ping_discovery   # -Pn: fail-fast on dead IPs
+    if g("no_reconfirm", False):
+        profile.reconfirm = False
 
 
 def _split_userdomain(username: str, domain: str | None) -> tuple[str, str]:
@@ -456,10 +528,16 @@ def _mkissue(scan_issue, phase: str) -> dict:
             "message": scan_issue.message}
 
 
-def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=True):
+def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=True,
+                 disc_reason="", provided_name=""):
     """Returns (host|None, issues)."""
     issues: list[dict] = []
     truncated = False
+    # Proof-of-life reason for this host. Seeded with the discovery reply (echo-reply
+    # /syn-ack/arp-response) when host discovery ran; a UDP fallback below can supply
+    # one for a silent -Pn host. Empty stays empty -> the host build falls back to
+    # "user-set" under -Pn, which is-NOT proof (keeps it off the confirmed-up list).
+    up_reason = disc_reason
     if port_map is not None:
         open_ports = port_map.get(ip, [])
     else:
@@ -489,6 +567,24 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
                     f"verification re-scan found {len(vports)} - the first sweep "
                     "under-reported (network likely lossy); used the re-scan"),
                     "port-sweep"))
+        # UDP fallback: still silent on TCP, no discovery reply, and we're treating
+        # this IP as up on faith (-Pn / discovery blocked). A UDP ping to common
+        # services tells up-behind-a-firewall apart from genuinely dead - so the host
+        # is confirmed up on a real reply instead of being written off as down.
+        if (not open_ports and not up_reason and not truncated
+                and profile.udp_fallback and profile.assume_up):
+            ulx = os.path.join(paths["raw"], f"{ip}_udpalive.xml")
+            _, uiss = scanner.udp_liveness_probe(ip, ulx, profile)
+            if uiss:                       # e.g. skipped (needs root) - surface it
+                issues.append(_mkissue(uiss, "udp-liveness"))
+            # np.parse_nmap_xml drops "down" hosts, so a host present here answered.
+            alive = next((h for h in np.parse_nmap_xml(ulx) if h.ip == ip), None)
+            if alive is not None:
+                up_reason = alive.up_reason or "udp-response"
+                issues.append(_mkissue(scanner.ScanIssue(
+                    "warning", "udp-liveness: host answered a UDP probe "
+                    f"({up_reason}) - confirmed UP despite 0 open TCP ports "
+                    "(firewalled, not dead)"), "udp-liveness"))
 
     enum_xml = os.path.join(paths["raw"], f"{ip}_enum.xml")
     _, iss = scanner.enum_scan(ip, open_ports, enum_xml, profile, creds=creds)
@@ -497,6 +593,27 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     host = _fold_host(ip, np.parse_nmap_xml(enum_xml), subnet_map)
     host.enumerated = True
     host.incomplete_scan = truncated
+    # Record how we know this host is up: a real reply (discovery or UDP fallback)
+    # when we have one, else "user-set" under -Pn (scanned on faith - not proof, so
+    # a silent host stays UNKNOWN, never marked down). An open port speaks for itself.
+    host.up_reason = up_reason or ("user-set" if profile.assume_up else host.up_reason)
+    # An authoritative list supplies the hostname up front; keep it (nmap-resolved
+    # names, if any, come first) so the host is labelled even when it answered nothing.
+    if provided_name:
+        host.hostnames = list(dict.fromkeys(host.hostnames + [provided_name]))
+    # Basic UDP sweep: a TCP-only scan misses DNS/SNMP/NTP/IKE/TFTP/NetBIOS/... Fold any
+    # open UDP services into the host. Runs in the per-host nmap path only (not the fast
+    # masscan sweep, where UDP stays opt-in via --udp-top).
+    if profile.udp_basic and port_map is None and not truncated:
+        udp_xml = os.path.join(paths["raw"], f"{ip}_udp_basic.xml")
+        _, uiss = scanner.udp_basic_scan(ip, udp_xml, profile)
+        if uiss:
+            issues.append(_mkissue(uiss, "udp-basic"))
+        uhost = next((h for h in np.parse_nmap_xml(udp_xml) if h.ip == ip), None)
+        if uhost is not None:
+            have = {(p.protocol, p.portid) for p in host.ports}
+            host.ports.extend(p for p in uhost.ports
+                              if (p.protocol, p.portid) not in have)
     # Recover the services nmap left as unknown/blank: mine its kept fingerprint,
     # fall back to the curated port map, then a stdlib banner grab (active) - so a
     # port like 5040 becomes 'Windows CDPSvc', not a dead 'unknown'.
@@ -520,19 +637,82 @@ def _enum_worker(ip, profile, paths, creds, port_map, subnet_map, active_probe=T
     return host, issues
 
 
+def _reconfirm_missed(missed, profile, paths):
+    """Fast -Pn top-ports re-probe of hosts that missed the ping sweep. A host that
+    answers on ANY port is definitively up, so this recovers firewalled-but-alive boxes
+    before they're written off as down. Returns ({ip: up_reason}, issue|None)."""
+    if not missed or not profile.reconfirm:
+        return {}, None
+    if len(missed) > profile.reconfirm_cap:
+        print(f"    ({len(missed)} non-responders exceed the reconfirm cap "
+              f"{profile.reconfirm_cap}; skipping the re-probe - re-run with -Pn or "
+              "--fast to sweep them all.)")
+        return {}, None
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
+        tf.write("\n".join(missed))
+        tfile = tf.name
+    rx = os.path.join(paths["raw"], "reconfirm.xml")
+    print(f"[*] Reconfirming {len(missed)} non-responder(s) with a fast -Pn top-ports "
+          "probe (catches firewalled-but-alive hosts) ...")
+    _, iss = scanner.reconfirm_hosts(tfile, rx, profile)
+    try:
+        os.unlink(tfile)
+    except OSError:
+        pass
+    recovered = {h.ip: (h.up_reason or "reconfirm: open port")
+                 for h in np.parse_nmap_xml(rx) if h.open_ports}
+    return recovered, iss
+
+
+def _seed_targets(store, live_ips, subnet_map, hostname_map):
+    """Pre-register every target as a known host BEFORE scanning, so a slow/timed-out/
+    failed scan can never make a real target vanish from the report ('false no hosts').
+    Each is stored up-front with its provided hostname and up_reason 'target-list'; the
+    enum phase then enriches it in place. Returns the count seeded."""
+    from .models import Host
+    n = 0
+    for ip in live_ips:
+        h = Host(ip=ip, subnet=subnet_map.get(ip, ""), up_reason="target-list")
+        name = hostname_map.get(ip)
+        if name:
+            h.hostnames = [name]
+        store.upsert_host(h, merge=True)     # merge: never clobber an already-scanned host
+        n += 1
+    return n
+
+
 def _discover(args, profile, store, paths):
     try:
-        hosts, subnet_map = load_targets(args.targets)
+        hosts, subnet_map, hostname_map = load_targets(args.targets)
     except (ValueError, OSError) as e:
         # Bad CIDR/range (ValueError) or a missing/unreadable @file (OSError) - the
         # literal first thing a tester types. Fail with a clear message, not a crash.
         print(f"[x] Invalid targets: {e}\n    Fix the IP / range / CIDR / @file "
               "and re-run.")
-        return None, [], None
-    hosts = apply_exclusions(hosts, args.exclude or [])
+        return None, [], None, None, {}
+    # Exclusions: expand this run's --exclude (IPs / ranges / CIDRs / @file), MERGE with
+    # any persisted from a prior run, and persist the union - so once an IP is excluded
+    # it stays out of scope on every later phase/re-run without re-typing it.
+    try:
+        run_excl = expand_excludes(args.exclude or [])
+    except (ValueError, OSError) as e:
+        print(f"[x] Invalid --exclude: {e}")
+        return None, [], None, None, {}
+    try:
+        stored_excl = set(json.loads(store.get_meta("excludes") or "[]"))
+    except (ValueError, TypeError):
+        stored_excl = set()
+    excluded = run_excl | stored_excl
+    if excluded != stored_excl:
+        store.set_meta("excludes", json.dumps(sorted(excluded)))
+    before = len(hosts)
+    hosts = [h for h in hosts if h not in excluded]
+    if before != len(hosts):
+        print(f"[+] Excluded {before - len(hosts)} host(s) from scope "
+              f"({len(excluded)} IP(s) on the exclusion list).")
     if not hosts:
         print("[x] No targets after expansion/exclusion.")
-        return None, [], None
+        return None, [], None, None, {}
     # Record the full scope so the report accounts for every subnet, even those
     # that turn out to have no live hosts.
     sizes: dict[str, int] = {}
@@ -544,13 +724,21 @@ def _discover(args, profile, store, paths):
 
     fast_mode = getattr(args, "fast", False) or profile.scanner == "masscan"
     port_map = None
+    disc_reasons: dict[str, str] = {}   # ip -> real discovery reply reason (proof of up)
     if fast_mode:
         print("[*] Fast mode: network-wide masscan sweep ...")
         sweep_xml = os.path.join(paths["raw"], "masscan_sweep.xml")
         port_map = scanner.masscan_sweep(hosts, sweep_xml, profile)
         if port_map:
-            live_ips = sorted(port_map, key=_ip_key)
-            print(f"[+] masscan found {len(live_ips)} host(s) with open ports.")
+            if getattr(args, "targets_up", False):
+                # Authoritative list: enumerate EVERY provided host, not just the ones
+                # masscan found open, so a silent host is still seeded (never "no hosts").
+                live_ips = sorted(hosts, key=_ip_key)
+                print(f"[+] masscan found {len(port_map)} host(s) with open ports; "
+                      f"enumerating all {len(live_ips)} authoritative target(s).")
+            else:
+                live_ips = sorted(port_map, key=_ip_key)
+                print(f"[+] masscan found {len(live_ips)} host(s) with open ports.")
         else:
             print("[!] masscan unavailable/empty; falling back to nmap.")
             port_map, fast_mode = None, False
@@ -565,7 +753,12 @@ def _discover(args, profile, store, paths):
             _, iss = scanner.discover_hosts(targets_file, disc_xml)
             if iss:
                 _record_issues(store, paths, "(discovery)", [_mkissue(iss, "discovery")])
-            live_ips = [h.ip for h in np.parse_nmap_xml(disc_xml)]
+            disc_hosts = np.parse_nmap_xml(disc_xml)
+            live_ips = [h.ip for h in disc_hosts]
+            # Carry each responder's real status reason (echo-reply/syn-ack/arp-...)
+            # into the enum phase so the stored host records HOW we know it's up.
+            disc_reasons = {h.ip: (h.up_reason or "discovery")
+                            for h in disc_hosts if h.up_reason not in ("", "user-set")}
             os.unlink(targets_file)
             print(f"[+] {len(live_ips)} of {len(hosts)} target(s) responded to discovery.")
             if not live_ips:
@@ -580,12 +773,33 @@ def _discover(args, profile, store, paths):
                 print(f"    Per-host cap {profile.host_timeout}m + fail-fast keep it "
                       "moving; for a large scope, --fast (masscan) sweeps in seconds.")
                 print("!" * 64)
-                profile.assume_up = True          # dead IPs get scanned -> fail fast
+                # Behave exactly like an explicit -Pn from here: assume-up + skip the
+                # per-dead-IP verify re-scan (the UDP fallback still fires, gated on
+                # assume_up). Leaving ping_discovery True would re-scan every dead IP
+                # on precisely the large, discovery-blocked scope we want to move fast.
+                profile.assume_up = True
+                profile.ping_discovery = False
                 live_ips = hosts
             elif len(live_ips) < len(hosts):
-                missed = len(hosts) - len(live_ips)
-                print(f"    ({missed} didn't answer. If you expect more live hosts, "
-                      "re-run with -Pn - firewalled hosts often block ping.)")
+                # Partial sweep: DON'T drop the non-responders on faith - a live host
+                # behind a default-drop firewall blocks ping yet still answers a port
+                # scan. Re-probe them; promote any that show an open port.
+                responded = set(live_ips)
+                missed = [ip for ip in hosts if ip not in responded]
+                recovered, riss = _reconfirm_missed(missed, profile, paths)
+                if riss:
+                    _record_issues(store, paths, "(reconfirm)",
+                                   [_mkissue(riss, "reconfirm")])
+                if recovered:
+                    live_ips = list(live_ips) + [ip for ip in missed if ip in recovered]
+                    disc_reasons.update(recovered)
+                    print(f"    [+] Reconfirm recovered {len(recovered)} host(s) that "
+                          "blocked ping but answered a port scan.")
+                still = len(hosts) - len(live_ips)
+                if still:
+                    print(f"    ({still} still didn't answer. If you expect more live "
+                          "hosts, re-run with -Pn - some firewalls drop everything "
+                          "unsolicited.)")
         else:
             live_ips = hosts
             print(f"[*] -Pn: skipping discovery, scanning all {len(hosts)} target(s) "
@@ -593,27 +807,50 @@ def _discover(args, profile, store, paths):
             print(f"    Each host is capped at {profile.host_timeout}m (--host-timeout) "
                   "and dead IPs are abandoned fast; --fast (masscan) is quickest on a "
                   "big scope.")
+            if profile.udp_fallback:
+                print("    A host still silent on TCP gets a UDP liveness ping, so a "
+                      "firewalled-but-alive box is confirmed up, not ruled dead "
+                      "(--no-udp-fallback to skip).")
 
     if getattr(args, "resume", False):
         done = store.scanned_ips()
         live_ips = [ip for ip in live_ips if ip not in done]
         print(f"[+] Resume: {len(live_ips)} host(s) remaining.")
-    return subnet_map, live_ips, port_map
+    # Authoritative list: seed each responder's up-reason so a provided host is shown
+    # up (labelled 'target-list') even before its scan finishes.
+    if getattr(args, "targets_up", False):
+        for ip in live_ips:
+            disc_reasons.setdefault(ip, "target-list")
+    return subnet_map, live_ips, port_map, disc_reasons, hostname_map
 
 
-def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map) -> None:
+def _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
+                disc_reasons=None, hostname_map=None) -> None:
     creds = _creds_of(args)
     workers = max(1, args.workers)
+    disc_reasons = disc_reasons or {}
+    hostname_map = hostname_map or {}
     # --no-probes disables our active stdlib layer (banner grabs); the free passive
     # layers (servicefp mining + curated port map) still run.
     active_probe = not getattr(args, "no_probes", False)
+    # Announce the port scope so a full sweep is verifiable - and loudly flag a PARTIAL
+    # (top-N) one so it's never mistaken for a complete scan. Recorded for the report.
+    scope_label, is_full = scanner.port_scope_label(profile)
+    store.set_meta("port_scope", scope_label)
+    if is_full:
+        print(f"[*] Port scope: {scope_label} per host (full sweep).")
+    else:
+        print(f"[!] Port scope: {scope_label} per host - PARTIAL, NOT a full scan. "
+              "Pass --all-ports (or --profile standard) for all 65535 ports.")
     print(f"[*] Enumerating {len(live_ips)} host(s) with {workers} worker(s) "
           f"(ports + services) ...")
     completed = 0
     refresher = _Refresher(args)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_enum_worker, ip, profile, paths, creds, port_map,
-                             subnet_map, active_probe): ip for ip in live_ips}
+                             subnet_map, active_probe, disc_reasons.get(ip, ""),
+                             hostname_map.get(ip, "")): ip
+                   for ip in live_ips}
         for fut in as_completed(futures):
             ip = futures[fut]
             try:
@@ -866,6 +1103,7 @@ def _privesc_worker(host, profile, paths, creds, aggressive):
         _merge_vuln_results(host, np.parse_nmap_xml(vx))
         ad.identify_roles(host)
         ad.parse_signing_and_ntlm(host)
+    host.privesc_checked = True          # the phase considered this host (mirrors _db_worker)
     return host, issues
 
 
@@ -893,7 +1131,9 @@ def _phase_privesc(store, paths, args, profile) -> None:
                                  "message": f"privesc crashed: {e}"}])
                 continue
             _record_issues(store, paths, ip, issues)
-            if not _persist_host(store, paths, ip, "privesc", host):
+            # clear_step clears any stale manual privesc override as part of the single
+            # persist (host.privesc_checked was set in the worker) - no second pass.
+            if not _persist_host(store, paths, ip, "privesc", host, clear_step="privesc"):
                 continue
             completed += 1
             refresher.tick(store, paths, args.title)
@@ -1039,7 +1279,10 @@ def _phase_credenum(store, paths, args) -> None:
 
 def _setup_scan(args, need_targets=True):
     """Shared setup: profile, env check, store. Returns (profile, paths, store)."""
-    profile = scanner.PROFILES[args.profile]
+    # deepcopy: PROFILES holds shared module-level singletons; overriding a live one
+    # would leak flags (--all-ports, --min-rate, a downgraded scanner) into later runs
+    # in the same process (tests, library reuse).
+    profile = copy.deepcopy(scanner.PROFILES[args.profile])
     _apply_profile_overrides(profile, args)
     try:
         for w in scanner.check_environment(profile):
@@ -1067,12 +1310,18 @@ def cmd_enum(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     store.set_meta("engagement", args.title)
-    subnet_map, live_ips, port_map = _discover(args, profile, store, paths)
+    subnet_map, live_ips, port_map, disc_reasons, hostname_map = _discover(
+        args, profile, store, paths)
     if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
+    if getattr(args, "targets_up", False):
+        seeded = _seed_targets(store, live_ips, subnet_map, hostname_map)
+        print(f"[+] Authoritative list: pre-seeded {seeded} host(s) - every target is "
+              "in the report even if its scan times out or fails.")
     try:
-        _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map)
+        _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
+                    disc_reasons, hostname_map)
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
     except KeyboardInterrupt:
@@ -1119,12 +1368,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     store.set_meta("engagement", args.title)
-    subnet_map, live_ips, port_map = _discover(args, profile, store, paths)
+    subnet_map, live_ips, port_map, disc_reasons, hostname_map = _discover(
+        args, profile, store, paths)
     if subnet_map is None:   # _discover already printed the specific reason
         store.close()
         return 1
+    if getattr(args, "targets_up", False):
+        seeded = _seed_targets(store, live_ips, subnet_map, hostname_map)
+        print(f"[+] Authoritative list: pre-seeded {seeded} host(s) - every target is "
+              "in the report even if its scan times out or fails.")
     try:
-        _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map)
+        _phase_enum(store, paths, args, profile, subnet_map, live_ips, port_map,
+                    disc_reasons, hostname_map)
         _phase_vulns(store, paths, args, profile)
         if args.ldap_enum or args.ldap_anon:
             _run_ldap_enum(store, args)
@@ -1135,6 +1390,144 @@ def cmd_scan(args: argparse.Namespace) -> int:
         store.close()
     print("\n[+] Done.")
     return 0
+
+
+def _sweep_defaults(args: argparse.Namespace) -> None:
+    """Fill in every attribute the deep-module handlers read that the `sweep` parser
+    doesn't define, so each runs its credential-free path without an AttributeError.
+    Anything the user *did* pass (creds, --no-probe) is left untouched."""
+    defaults = {
+        "no_probe": False, "no_run": True, "prove_write": False, "no_active": False,
+        "cookie": None, "header": None, "creds": False, "crawl": False,
+        "sqli_time": False, "username": None, "password": None, "domain": None,
+        "dc_ip": None, "local_auth": False, "lhost": "<LHOST>", "data": False,
+        "exec_cmd": None, "method": None, "link_depth": 1, "no_links": False,
+        "perms": False, "relay": None,
+    }
+    for k, v in defaults.items():
+        if not hasattr(args, k):
+            setattr(args, k, v)
+
+
+# The credential-free deep pass: recce's own stdlib probes. Order is foothold-ish -
+# web + protocol posture first, then the heavier service dives. Each no-ops cleanly
+# when the datastore has no matching host.
+_UNAUTH_SWEEP = [
+    ("web", "cmd_web"), ("smb", "cmd_smb"), ("ftp", "cmd_ftp"), ("ldap", "cmd_ldap"),
+    ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("docker", "cmd_docker"),
+    ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
+]
+# The authenticated pass: the modules that DO something new once you have creds -
+# the netexec/impacket phase plus the authenticated facets of the deep modules. The
+# unauth-only modules (web/snmp/mongodb/docker/k8s) are intentionally absent; you run
+# `sweep` for those. Each handler here keys its authenticated path off args.username.
+_AUTH_SWEEP = [
+    ("credenum", "cmd_credenum"), ("ldap", "cmd_ldap"), ("smb", "cmd_smb"),
+    ("mssql", "cmd_mssql"), ("ftp", "cmd_ftp"),
+]
+
+
+def _run_sweep(args: argparse.Namespace, *, authenticated: bool) -> int:
+    """Shared engine for `sweep` (unauth) and `credsweep` (auth). Runs each applicable
+    module with the workbook rebuild deferred to a single pass at the end; a module
+    that errors is isolated so one failure doesn't abort the rest."""
+    global _DEFER_REPORTS
+    print(BANNER)
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    _sweep_defaults(args)
+
+    if authenticated:
+        if not getattr(args, "username", None):
+            print("[x] credsweep is the authenticated pass and needs credentials: "
+                  "-u USER -p PASS [-d DOMAIN]. For the credential-free modules, "
+                  "run `recce sweep`.")
+            return 1
+        # The whole point of credsweep is to run the authenticated tooling, so the
+        # nxc/impacket matrix must actually execute (handlers gate it on `not no_run`).
+        args.no_run = False
+        table, kind, tag = _AUTH_SWEEP, "credentialed", "CREDSWEEP"
+    else:
+        # `sweep` is strictly unauthenticated: drop any creds so a stray -u can't fire
+        # a credentialed action as an invisible side-effect of this command.
+        if getattr(args, "username", None):
+            print("[!] `sweep` is the unauthenticated pass - ignoring the credentials "
+                  "you passed. Run `recce credsweep -u ... -p ...` for the "
+                  "authenticated modules.")
+            args.username = args.password = None
+            args.ldap_enum = args.ldap_anon = False
+        table, kind, tag = _UNAUTH_SWEEP, "credential-free", "SWEEP"
+
+    modules = [(n, globals()[fn]) for n, fn in table]
+    skip = {s.strip().lower() for s in (getattr(args, "skip", None) or [])}
+    only = {s.strip().lower() for s in (getattr(args, "only_modules", None) or [])}
+    if only:
+        modules = [(n, h) for n, h in modules if n in only]
+    if skip:
+        modules = [(n, h) for n, h in modules if n not in skip]
+
+    # The NSE vuln scan is an unauthenticated concept - only offered on `sweep`.
+    run_vulns = getattr(args, "vulns", False) and not authenticated
+    ran, failed = [], []
+    _DEFER_REPORTS = True
+    try:
+        if run_vulns:
+            print("\n" + "=" * 64 + "\n[SWEEP] vulns (nmap NSE)\n" + "=" * 64)
+            try:
+                cmd_vulns(args)
+                ran.append("vulns")
+            except Exception as e:  # noqa: BLE001 - one module must not abort the sweep
+                failed.append(("vulns", e))
+                print(f"[!] vulns failed: {type(e).__name__}: {e}")
+        for name, handler in modules:
+            print("\n" + "=" * 64 + f"\n[{tag}] {name}\n" + "=" * 64)
+            try:
+                handler(args)
+                ran.append(name)
+            except Exception as e:  # noqa: BLE001
+                failed.append((name, e))
+                print(f"[!] {name} failed: {type(e).__name__}: {e}")
+    finally:
+        _DEFER_REPORTS = False
+
+    # Single, authoritative report rebuild from everything the modules folded in.
+    store = _open_store(paths["db"])
+    if store is not None:
+        _import_excel_tracking(store, paths)
+        title = store.get_meta("engagement") or args.title
+        _generate_reports(store, paths, title)
+        store.close()
+
+    print("\n" + "=" * 64)
+    print(f"[+] {kind.capitalize()} sweep complete: ran {len(ran)} module(s) "
+          f"({', '.join(ran) or 'none'}).")
+    if failed:
+        print(f"[!] {len(failed)} module(s) errored: "
+              f"{', '.join(n for n, _ in failed)} - re-run individually to debug.")
+    nxt = ("`recce credsweep -u ... -p ...` (once you have creds), then `recce prove`"
+           if not authenticated else "`recce prove` then `recce attackpath`")
+    print(f"    Reports rebuilt. Next: {nxt}.")
+    return 1 if failed else 0
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """Unauthenticated deep pass: run every applicable credential-free module
+    (web/smb/ftp/ldap/snmp/mongodb/docker/kubernetes/mssql) in one shot after `enum`,
+    instead of typing each by hand. Each self-skips when there's no matching service;
+    the workbook is rebuilt once at the end. For the authenticated modules use
+    `credsweep`."""
+    return _run_sweep(args, authenticated=False)
+
+
+def cmd_credsweep(args: argparse.Namespace) -> int:
+    """Authenticated deep pass (needs -u/-p): run the credentialed modules in one shot
+    - the netexec/impacket phase (`credenum`) plus the authenticated facets of
+    `ldap` (kerberoast/AS-REP/accounts), `smb` (credentialed shares + write proof),
+    `mssql` (access/privilege matrix) and `ftp`. Assumes you already ran `sweep` for
+    the credential-free surface."""
+    return _run_sweep(args, authenticated=True)
 
 
 def cmd_db(args: argparse.Namespace) -> int:
@@ -1168,16 +1561,18 @@ def cmd_privesc(args: argparse.Namespace) -> int:
     title = store.get_meta("engagement") or args.title
     try:
         if args.scan:
+            # _phase_privesc already set privesc_checked in the worker and cleared the
+            # override via clear_step - no second full pass over every host needed.
             _phase_privesc(store, paths, args, profile)
         else:
             print("[*] Generating priv-esc playbook from existing data "
                   "(use --scan to also run remote privesc NSE checks).")
-        # Mark the priv-esc step complete for the hosts we addressed.
-        for h in _selected_hosts(store.all_hosts(), args):
-            if not h.privesc_checked:
-                h.privesc_checked = True
-                store.upsert_host(h)
-            store.delete_tracking(tr.step_key("privesc", h.ip))  # re-run clears override
+            # No worker ran, so mark the step + clear the override for selected hosts here.
+            for h in _selected_hosts(store.all_hosts(), args):
+                if not h.privesc_checked:
+                    h.privesc_checked = True
+                    store.upsert_host(h)
+                store.delete_tracking(tr.step_key("privesc", h.ip))
     except KeyboardInterrupt:
         print("\n[!] Interrupted - saving results collected so far ...")
     finally:
@@ -1382,11 +1777,14 @@ def cmd_web(args: argparse.Namespace) -> int:
     total_findings = 0
     creds = getattr(args, "creds", False)
     do_crawl = getattr(args, "crawl", False)
+    sqli_time = getattr(args, "sqli_time", False)
+    fuzz_risky = getattr(args, "fuzz_risky_forms", False)
 
     def _scan(h):
         profiles = web.scan_host(h, active, auth, creds)
         if do_crawl:
-            pages, added = web.scan_crawl(h, auth)
+            pages, added = web.scan_crawl(h, auth, time_based=sqli_time,
+                                          fuzz_risky=fuzz_risky)
             print(f"    [{h.ip}] crawled {pages} page(s), +{added} finding(s)")
         return profiles
 
@@ -1400,7 +1798,9 @@ def cmd_web(args: argparse.Namespace) -> int:
                 _record_issues(store, paths, h.ip, [{"phase": "web", "level": "warning",
                                "message": f"web scan failed: {e}"}])
                 continue
-            _persist_host(store, paths, h.ip, "web", h)
+            # clear_step so a re-run clears a stale manual "web" tick, matching
+            # enum/vuln/db/privesc (previously the web override never self-healed).
+            _persist_host(store, paths, h.ip, "web", h, clear_step="web")
             for pr in profiles:
                 tech = f"  [{', '.join(pr['tech'])}]" if pr["tech"] else ""
                 wv = sum(1 for v in h.vulns if v.port == pr["port"] and v.source == "web")
@@ -1919,6 +2319,11 @@ def _fold_host(ip, parsed_list, subnet_map):
         if h.os_accuracy >= base.os_accuracy and h.os_name:
             base.os_name, base.os_accuracy, base.os_family = h.os_name, h.os_accuracy, h.os_family
         base.distance = base.distance or h.distance
+        # Carry proof-of-life: an imported .gnmap/.nmap host with no open ports and no
+        # hostname is kept up only by its up_reason ("report-listed"); dropping it here
+        # would make is_up wrongly read False and hide the host the report enumerated.
+        base.up_reason = base.up_reason or h.up_reason
+        base.state = h.state or base.state
         base.last_scanned = h.last_scanned or base.last_scanned
         base.ports.extend(h.ports)
         base.vulns.extend(h.vulns)
@@ -2463,8 +2868,7 @@ def cmd_bloodhound(args: argparse.Namespace) -> int:
     _ad_live_kerberos(args, bh, creds, sh_paths, analysis)
 
     # Re-sort merged findings, fill in the operator's credentials, refresh stats.
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda f: order.get(f["severity"], 5))
+    analysis["findings"].sort(key=lambda f: _SEV_ORDER.get(f["severity"], 5))
     bh.fill_creds(analysis, creds)
     analysis["stats"]["findings"] = len(analysis["findings"])
 
@@ -2929,36 +3333,23 @@ def cmd_mssql(args: argparse.Namespace) -> int:
             uniq.append(f)
     analysis["findings"] = uniq
 
-    # Fold findings into the main severity totals + writeups (attach to each host).
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = mssql.findings_to_vulns(analysis["findings"])
+    # A working SQL login is a foothold on that host -> record access so the Access
+    # step auto-ticks. (nxc sets t["access"] above; mark it before the fold persists.)
     host_by_ip = {h.ip: h for h in hosts}
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "mssql"}
-        host.vulns = [v for v in host.vulns if v.source != "mssql"]   # refresh MSSQL set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
+    for t in tgts:
+        if t.get("access") and t["ip"] in host_by_ip:
+            h = host_by_ip[t["ip"]]
+            h.access_gained = True
+            h.access_detail = h.access_detail or (
+                "MSSQL sysadmin" if t.get("admin") else "MSSQL login")
 
-    store.set_meta("mssql", json.dumps(analysis))
+    # Fold findings into the main severity totals + writeups (attach to each host).
+    _fold_service_findings(store, hosts, analysis, "mssql",
+                           mssql.findings_to_vulns, "MSSQL")
     # Running mssql assessed each SQL port (and is a DB deep-enum) -> auto-tick the
     # Checklist DB / Vuln-scan boxes for those hosts.
     if active or (creds and not args.no_run):
         _mark_capability_scanned(store, tgts, db=True)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} MSSQL finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     for t in tgts:
         for line in analysis["runbooks"][next(i for i, r in enumerate(analysis["runbooks"])
                                               if r["ip"] == t["ip"])]["chain"]:
@@ -3094,21 +3485,8 @@ def cmd_smb(args: argparse.Namespace) -> int:
             uniq.append(f)
     analysis["findings"] = uniq
 
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = smb.findings_to_vulns(analysis["findings"])
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "smb"}
-        host.vulns = [v for v in host.vulns if v.source != "smb"]      # refresh SMB set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
+    by_ip = _fold_service_findings(store, hosts, analysis, "smb",
+                                   smb.findings_to_vulns, "SMB")
     # Persist the signing posture we observed (upsert any host we touched but that
     # produced no vulns, so host.smb_signing still lands).
     for t in tgts:
@@ -3116,17 +3494,8 @@ def cmd_smb(args: argparse.Namespace) -> int:
             host = host_by_ip.get(t["ip"])
             if host is not None and t.get("signing_required") is not None:
                 store.upsert_host(host, merge=False)
-
-    store.set_meta("smb", json.dumps(analysis))
-    if active:                       # assessed the SMB port(s) -> auto-tick vuln-scan
+    if active or ran_live:           # assessed the SMB port(s) -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} SMB finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -3190,7 +3559,6 @@ def cmd_ftp(args: argparse.Namespace) -> int:
             bits.append("cleartext (no AUTH TLS)")
         print(f"      {t['ip']}:{t['port']}  " + "  ".join(b for b in bits if b))
 
-    host_by_ip = {h.ip: h for h in hosts}
     rb_by_ip = {rb["ip"]: rb for rb in analysis["runbooks"]}
     ran_live = False
     if not args.no_run and args.prove_write:
@@ -3221,32 +3589,10 @@ def cmd_ftp(args: argparse.Namespace) -> int:
             uniq.append(f)
     analysis["findings"] = uniq
 
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = ftp.findings_to_vulns(analysis["findings"])
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "ftp"}
-        host.vulns = [v for v in host.vulns if v.source != "ftp"]      # refresh FTP set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
-
-    store.set_meta("ftp", json.dumps(analysis))
-    if active:                       # assessed the FTP port -> auto-tick vuln-scan
+    _fold_service_findings(store, hosts, analysis, "ftp",
+                           ftp.findings_to_vulns, "FTP")
+    if active or ran_live:           # assessed the FTP port -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} FTP finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -3304,33 +3650,10 @@ def cmd_docker(args: argparse.Namespace) -> int:
                              f"docker -H {docker._scheme(t['port'])}://{t['ip']}:"
                              f"{t['port']} info", out)
 
-    host_by_ip = {h.ip: h for h in hosts}
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = docker.findings_to_vulns(analysis["findings"])
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "docker"}
-        host.vulns = [v for v in host.vulns if v.source != "docker"]   # refresh set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
-
-    store.set_meta("docker", json.dumps(analysis))
+    _fold_service_findings(store, hosts, analysis, "docker",
+                           docker.findings_to_vulns, "Docker")
     if active:                       # read the Docker API port -> auto-tick vuln-scan
         _mark_capability_scanned(store, tgts)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} Docker finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
@@ -3386,37 +3709,204 @@ def cmd_kubernetes(args: argparse.Namespace) -> int:
             ("reachable" if t.get("reachable") else "not probed")
         print(f"      {t['ip']}:{t['port']}  {t.get('role', '')}  {state}")
 
-    host_by_ip = {h.ip: h for h in hosts}
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    analysis["findings"].sort(key=lambda x: order.get(x["severity"], 5))
-    analysis["stats"]["findings"] = len(analysis["findings"])
-    by_ip = k8s.findings_to_vulns(analysis["findings"])
-    for ip, vulns in by_ip.items():
-        host = host_by_ip.get(ip) or store.get_host(ip)
-        if host is None:
-            continue
-        have = {v.key for v in host.vulns if v.source != "kubernetes"}
-        host.vulns = [v for v in host.vulns if v.source != "kubernetes"]  # refresh set
-        for v in vulns:
-            if v.key not in have:
-                have.add(v.key)
-                host.vulns.append(v)
-        store.upsert_host(host, merge=False)
-
-    store.set_meta("kubernetes", json.dumps(analysis))
+    _fold_service_findings(store, hosts, analysis, "kubernetes",
+                           k8s.findings_to_vulns, "Kubernetes")
     if active:                       # probed the kubelet/API/etcd ports -> vuln-scan
         _mark_capability_scanned(store, tgts)
-    if analysis["findings"]:
-        by_sev: dict = {}
-        for f in analysis["findings"]:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        print("[+] {} Kubernetes finding(s): ".format(len(analysis["findings"]))
-              + ", ".join(f"{by_sev[s]} {s}" for s in
-                          ("critical", "high", "medium", "low") if by_sev.get(s)))
     title = store.get_meta("engagement") or args.title
     _generate_reports(store, paths, title)
     store.close()
     print("    -> Kubernetes sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_ldap(args: argparse.Namespace) -> int:
+    """Deep LDAP / AD directory enumeration: a stdlib BER/ASN.1 client anonymously
+    binds, reads the RootDSE (domain/forest/DC/functional level), and tests whether
+    the directory is anonymously readable. Read-only - it never writes to the
+    directory. Credentialed follow-on commands are staged, not run."""
+    from . import ldap as _ldap
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose LDAP.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    creds = None
+    if args.username:
+        user, domain = _split_userdomain(args.username, args.domain)
+        creds = {"user": user, "secret": args.password or "", "domain": domain,
+                 "hash": getattr(args, "hash", None) or ""}   # --hash -> NTLM pass-the-hash
+
+    active = not args.no_probe
+    analysis = _ldap.analyze(hosts, creds=creds, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No LDAP endpoints in the datastore (no port 389/636/3268/3269). "
+              "Run `enum` against the domain controllers first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} LDAP endpoint(s):")
+    for t in tgts:
+        flags = []
+        if t.get("anon_read"):
+            flags.append("ANON-READ")
+        elif t.get("anon_bind"):
+            flags.append("anon-bind")
+        if t.get("auth_ok"):
+            flags.append(f"AUTH: {t.get('auth_users', 0)} users / "
+                         f"{t.get('kerberoastable', 0)} kerb / {t.get('asrep', 0)} asrep")
+        elif t.get("auth_error"):
+            flags.append(f"auth failed ({t['auth_error']})")
+        dom = f"  {t.get('domain', '')}" if t.get("domain") else ""
+        dc = f" ({t.get('dc_dns')})" if t.get("dc_dns") else ""
+        state = "  ".join(flags) or "probed"
+        print(f"      {t['ip']}:{t['port']}  {state}{dom}{dc}")
+
+    if getattr(args, "screenshots", False):
+        for t in tgts:
+            pr = analysis["probes"].get(f"{t['ip']}:{t['port']}")
+            if pr and pr.get("rootdse_ok"):
+                out = "\n".join(filter(None, [
+                    f"domain: {pr.get('domain', '')}",
+                    f"forest: {pr.get('forest', '')}",
+                    f"dnsHostName: {pr.get('dc_dns', '')}",
+                    f"functional level: Server {pr.get('dc_level', '')}",
+                    f"anonymous read: {'YES' if pr.get('anon_read') else 'no'}"]))
+                _ldap_shot(args, t["ip"], f"ldapsearch -x -H ldap://{t['ip']}:{t['port']} "
+                           "-s base -b '' '(objectClass=*)'", out)
+
+    # analyze() attached authenticated-enum Account objects onto the DC hosts in place.
+    by_ip = _fold_service_findings(store, hosts, analysis, "ldap",
+                                   _ldap.findings_to_vulns, "LDAP")
+    # Persist any DC that gained LDAP accounts but produced no LDAP vuln row (e.g. an
+    # LDAPS host with authenticated enum but no anonymous/cleartext finding).
+    host_by_ip = {h.ip: h for h in hosts}
+    for t in tgts:
+        if t.get("auth_ok") and t["ip"] not in by_ip and t["ip"] in host_by_ip:
+            store.upsert_host(host_by_ip[t["ip"]], merge=False)
+    if active:                       # bound/read the LDAP port -> auto-tick vuln-scan
+        _mark_capability_scanned(store, tgts)
+    total_accts = sum(t.get("auth_users", 0) for t in tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    extra = (f" ({total_accts} account(s) enumerated -> Users & Accounts / AD Quick Wins)"
+             if total_accts else "")
+    print(f"    -> LDAP sheet written{extra}; findings folded into the main totals.")
+    return 0
+
+
+def _ldap_shot(args, ip, command, output):
+    from . import ldap as _ldap, screenshot
+    if not screenshot.available():
+        return None
+    png = screenshot.capture_html(_ldap.proof_html(command, output))
+    if not png:
+        return None
+    shot_dir = os.path.join(args.output_dir, "screenshots")
+    os.makedirs(shot_dir, exist_ok=True)
+    path = os.path.join(shot_dir, f"ldap_{ip.replace(':', '_')}.png")
+    with open(path, "wb") as fh:
+        fh.write(png)
+    print(f"      [+] {ip}: proof screenshot -> {path}")
+    return path
+
+
+def cmd_snmp(args: argparse.Namespace) -> int:
+    """Deep SNMP enumeration: brute common community strings over UDP 161, then read
+    the system group + walk Windows users / processes / software. Read-only - recce
+    never sends a SET (a read-write community is flagged by name, not exercised)."""
+    from . import snmp
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = snmp.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No SNMP-responsive hosts. (SNMP is UDP 161; recce probes it directly, "
+              "so target the hosts you expect to run it.)")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} SNMP endpoint(s):")
+    for t in tgts:
+        c = t.get("community")
+        state = (f"community '{c}'" + ("  [RW-likely]" if t.get("rw_likely") else "")
+                 if c else "no readable community")
+        name = f"  {t.get('sys_name')}" if t.get("sys_name") else ""
+        users = f"  {t.get('users')} users" if t.get("users") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{name}{users}")
+
+    by_ip = _fold_service_findings(store, hosts, analysis, "snmp",
+                                   snmp.findings_to_vulns, "SNMP")
+    # analyze() attached SNMP Account rows in place; persist hosts that gained them
+    # but produced no SNMP vuln (rare) so the accounts still land.
+    host_by_ip = {h.ip: h for h in hosts}
+    for t in tgts:
+        if t.get("users") and t["ip"] not in by_ip and t["ip"] in host_by_ip:
+            store.upsert_host(host_by_ip[t["ip"]], merge=False)
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> SNMP sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_mongodb(args: argparse.Namespace) -> int:
+    """Deep MongoDB enumeration: speak the wire protocol (stdlib OP_MSG/BSON), read the
+    version, and test whether listDatabases works WITHOUT authentication - an exposed
+    instance is a CONFIRMED critical data exposure. Read-only."""
+    from . import mongodb
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose MongoDB.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = mongodb.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No MongoDB endpoints in the datastore (no port 27017-27019). Run "
+              "`enum` against the database hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} MongoDB endpoint(s):")
+    for t in tgts:
+        if t.get("unauth"):
+            state = f"EXPOSED (unauth, {t.get('databases', 0)} db)"
+        else:
+            state = "auth required" if t.get("version") else "probed"
+        ver = f"  {t.get('version', '')}" if t.get("version") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
+
+    _fold_service_findings(store, hosts, analysis, "mongodb",
+                           mongodb.findings_to_vulns, "MongoDB")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> MongoDB sheet written; findings folded into the main totals.")
     return 0
 
 
@@ -3433,6 +3923,39 @@ def cmd_report(args: argparse.Namespace) -> int:
     _generate_reports(store, paths, title)
     store.close()
     return 0
+
+
+def _fold_service_findings(store, hosts, analysis, source, to_vulns, label):
+    """Shared tail for the deep-service commands (smb/ftp/docker/kubernetes/mssql):
+    sort findings by severity, fold them into their hosts (replacing this source's
+    prior vulns, deduped by key), persist the analysis blob under `source`, and print
+    a per-severity summary. Capability marking stays with each command (its gating
+    differs). Returns {ip: [Vuln]} so a caller can post-process the touched hosts."""
+    analysis["findings"].sort(key=lambda x: _SEV_ORDER.get(x["severity"], 5))
+    analysis["stats"]["findings"] = len(analysis["findings"])
+    by_ip = to_vulns(analysis["findings"])
+    host_by_ip = {h.ip: h for h in hosts}
+    for ip, vulns in by_ip.items():
+        host = host_by_ip.get(ip) or store.get_host(ip)
+        if host is None:
+            continue
+        have = {v.key for v in host.vulns if v.source != source}
+        host.vulns = [v for v in host.vulns if v.source != source]   # refresh this source
+        for v in vulns:
+            if v.key not in have:
+                have.add(v.key)
+                host.vulns.append(v)
+        store.upsert_host(host, merge=False)
+    store.set_meta(source, json.dumps(analysis))
+    fs = analysis["findings"]
+    if fs:
+        by_sev: dict = {}
+        for f in fs:
+            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        print(f"[+] {len(fs)} {label} finding(s): "
+              + ", ".join(f"{by_sev[s]} {s}" for s in
+                          ("critical", "high", "medium", "low") if by_sev.get(s)))
+    return by_ip
 
 
 def _mark_capability_scanned(store, targets, db: bool = False) -> None:
@@ -3466,11 +3989,15 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     an applicable open port have actually had the module run. 'Run' = the host appears
     in the module's stored analysis targets, or it carries a finding from that source.
     Ordered highest-impact first so `status` surfaces the critical exposures."""
-    from . import mssql, smb, ftp, docker, kubernetes as k8s
+    from . import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
+                   snmp as _snmp, mongodb as _mongo)
     mods = [
+        ("MongoDB", "mongodb", _mongo.is_mongodb, "recce mongodb"),
         ("Docker", "docker", docker.is_docker, "recce docker"),
         ("Kubernetes", "kubernetes", k8s.is_k8s, "recce k8s"),
         ("MSSQL", "mssql", mssql.is_mssql, "recce mssql -u USER -p PASS -d DOM"),
+        ("LDAP", "ldap", _ldap.is_ldap, "recce ldap"),
+        ("SNMP", "snmp", _snmp.is_snmp, "recce snmp"),
         ("SMB", "smb", smb.is_smb, "recce smb"),
         ("FTP", "ftp", ftp.is_ftp, "recce ftp"),
     ]
@@ -3548,6 +4075,16 @@ def cmd_status(args: argparse.Namespace) -> int:
                    if tracking.get(tr.step_key(step, h.ip), (False, ""))[0])
         return done, len(applic)
 
+    def merged_count(step):
+        # Matches the Checklist cell: operator tick if set, else the auto/derived state.
+        applic = [h for h in hosts if tr.step_applies(h, step)]
+        done = 0
+        for h in applic:
+            k = tr.step_key(step, h.ip)
+            done += 1 if (tracking[k][0] if k in tracking
+                          else tr.step_auto(h, step)) else 0
+        return done, len(applic)
+
     en_d, en_t = phase_count("enum")
     vs_d, vs_t = phase_count("vuln")
     web_d, web_t = phase_count("web")
@@ -3560,6 +4097,9 @@ def cmd_status(args: argparse.Namespace) -> int:
           + (f"   ({scanned_ports}/{len(open_ports)} open ports)" if open_ports else ""))
     print(f"    Web           {web_d}/{web_t}   (hosts serving HTTP/HTTPS)")
     print(f"    DB-scanned    {db_d}/{db_t}   (hosts with DB services)")
+    ac_d, ac_t = merged_count("access")
+    print(f"    Access gained {ac_d}/{ac_t}   (foothold: creds/admin/SSH/MSSQL "
+          "- see `recce access`)")
 
     # Deep service-module coverage (mssql / smb / ftp / docker / kubernetes): for each
     # module, how many hosts with an applicable service have actually had it run.
@@ -3573,13 +4113,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Manual sign-offs (from your ticks): AD review + the kill-chain.
     ad_d, ad_t = manual_count("ad")
-    ac_d, ac_t = manual_count("access")
     cr_d, cr_t = manual_count("creds")
     lat_d, lat_t = manual_count("lateral")
     pe_done = sum(1 for h in hosts if h.privesc_checked)
     print("\n  Manual sign-offs (from your ticks) - hosts done / applicable:")
     print(f"    AD reviewed   {ad_d}/{ad_t}   (domain controllers / directory hosts)")
-    print(f"    Access gained {ac_d}/{ac_t}")
     print(f"    Priv-esc      {pe_done}/{len(hosts)}   (post-exploitation performed)")
     print(f"    Creds got     {cr_d}/{cr_t}")
     print(f"    Lateral       {lat_d}/{lat_t}")
@@ -3601,6 +4139,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         if any(v.severity in ("critical", "high") for v in h.vulns)
         and not tracking.get(tr.host_key(h.ip), (False, ""))[0]
     ]
+    scope = store.get_meta("port_scope")
+    if scope:
+        full = "65535" in scope
+        print(f"\n  {'·' if full else '!!'} Port scope: {scope}"
+              + ("" if full else " - PARTIAL (not a full scan; re-run with --all-ports)"))
     incomplete = [h for h in hosts if getattr(h, "incomplete_scan", False)]
     if incomplete:
         print("\n  !! INCOMPLETE port sweeps (host-timeout) - these port lists are "
@@ -3624,16 +4167,88 @@ def cmd_status(args: argparse.Namespace) -> int:
     elif db_t and db_d < db_t:
         nxt = f"recce db -o {o}   # enumerate the databases"
     elif any(m["applicable"] > m["covered"] for m in svc_cov):
-        m = next(m for m in svc_cov if m["applicable"] > m["covered"])
-        gap = m["applicable"] - m["covered"]
-        nxt = (f"{m['command']} -o {o}   # deep-enum {m['name']} "
-               f"({gap} applicable host(s) not yet run)")
+        pend = [m for m in svc_cov if m["applicable"] > m["covered"]]
+        if len(pend) == 1:
+            m = pend[0]
+            gap = m["applicable"] - m["covered"]
+            nxt = (f"{m['command']} -o {o}   # deep-enum {m['name']} "
+                   f"({gap} applicable host(s) not yet run)")
+        else:
+            names = ", ".join(m["name"] for m in pend)
+            nxt = (f"recce sweep -o {o}   # run the deep modules in one shot "
+                   f"({names} pending; add creds via `recce credsweep`)")
     elif pe_done < len(hosts):
         nxt = f"recce privesc -o {o}   # build the priv-esc playbook"
     else:
         nxt = "all phases complete - review the workbook and tick Reviewed."
     print(f"\n  Next: {nxt}")
     print()
+    store.close()
+    return 0
+
+
+def cmd_access(args: argparse.Namespace) -> int:
+    """Record and review initial access (footholds) per host. recce auto-derives
+    access as the credentialed phases run (valid creds / local admin / SSH / MSSQL);
+    use this to see the picture across the engagement, or to record a foothold you
+    gained by other means so the Checklist Access step ticks."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    changed: list = []
+
+    if args.host:
+        targeted = set(args.host)
+        for h in hosts:
+            if h.ip not in targeted:
+                continue
+            if args.undo:
+                if h.access_gained:
+                    h.access_gained, h.access_detail = False, ""
+                    changed.append(h)
+            else:
+                h.access_gained = True
+                h.access_detail = (args.note or h.access_detail
+                                   or "manual: operator-recorded foothold")
+                changed.append(h)
+        for h in changed:
+            store.upsert_host(h, merge=False)
+        print(f"[+] Access {'cleared on' if args.undo else 'recorded on'} "
+              f"{len(changed)} host(s).")
+    else:
+        # Re-derive from the stable credentialed findings (credenum / SSH); never
+        # clears a flag a module already set (e.g. MSSQL access).
+        for h in hosts:
+            if h.access_gained:
+                continue
+            detail = tr.access_from_findings(h)
+            if detail:
+                h.access_gained, h.access_detail = True, detail
+                changed.append(h)
+        for h in changed:
+            store.upsert_host(h, merge=False)
+        if changed:
+            print(f"[+] Derived access on {len(changed)} host(s) from existing findings.")
+
+    applicable = [h for h in hosts if h.open_ports]
+    gained = [h for h in sorted(hosts, key=lambda x: _ip_key(x.ip)) if h.access_gained]
+    print(f"\n  Access gained: {len(gained)}/{len(applicable)} host(s) with a foothold\n")
+    for h in gained:
+        name = f" ({h.hostname})" if h.hostname else ""
+        print(f"    {h.ip}{name}  -  {h.access_detail}")
+    if not gained:
+        print("    (none yet - gain access via `credsweep` / `credenum` / `mssql`, or "
+              "record one: `recce access --host IP --note '...'`)")
+    print()
+
+    if changed:
+        _generate_reports(store, paths, store.get_meta("engagement") or args.title)
     store.close()
     return 0
 
@@ -3709,6 +4324,13 @@ def cmd_demo(args: argparse.Namespace) -> int:
         from . import vulndb
         vulndb.assess_host_inplace(h)   # offline version->CVE findings
         h.enumerated = True
+        # Confirmed footholds, so the map's access overlay has something to show.
+        if h.ip == "10.0.20.6":
+            h.access_gained = True
+            h.access_detail = "vsftpd 2.3.4 backdoor (RCE) → shell"
+        elif h.ip == "10.0.10.25":
+            h.access_gained = True
+            h.access_detail = "SMB admin via reused local Administrator hash"
         # Leave one host enumerated-only to show the Checklist's mixed states.
         if h.ip != "10.0.20.6":
             for p in h.ports:
@@ -3716,10 +4338,93 @@ def cmd_demo(args: argparse.Namespace) -> int:
             h.db_scanned = True
             h.privesc_checked = True
         store.upsert_host(h)
+    _demo_bloodhound(store)
+    _demo_credentials(store)
     _generate_reports(store, paths, "DEMO engagement")
     store.close()
     print("[+] Demo reports generated from bundled sample scan.")
     return 0
+
+
+def _demo_credentials(store: Store) -> None:
+    """Seed a few captured credentials so the demo report's Credentials section
+    renders. Secrets are masked in the shareable HTML; the workbook keeps the full
+    values. Offline and deterministic."""
+    from .models import Credential
+    for c in (
+        Credential(username="jsmith", secret="Summer2024!", kind="password",
+                   domain="corp.local", source="cracked",
+                   origin_ip="10.0.10.10",
+                   notes="Kerberoast TGS cracked offline (hashcat -m 13100)."),
+        Credential(username="Administrator", secret="aad3b435b51404eeaad3b435b51404ee",
+                   kind="nthash", domain="", source="secretsdump",
+                   origin_ip="10.0.20.6",
+                   notes="Local SAM hash dumped after the vsftpd backdoor shell."),
+        Credential(username="admin", secret="admin", kind="password",
+                   domain="", source="default", origin_ip="10.0.20.5",
+                   notes="Default web-app login accepted on 10.0.20.5:80."),
+    ):
+        try:
+            store.add_credential(c)
+        except (ValueError, OSError):
+            pass
+
+
+def _demo_bloodhound(store: Store) -> None:
+    """Seed a small synthetic SharpHound collection so the demo report showcases the
+    AD findings, attack paths and the tier-0 **AD architecture diagram**. Offline and
+    deterministic — analysed exactly like a real collection."""
+    from . import bloodhound as bh
+    B = "S-1-5-21-4242-4242-4242"
+    users = {"meta": {"type": "users"}, "data": [
+        {"ObjectIdentifier": f"{B}-1104",
+         "Properties": {"name": "JSMITH@CORP.LOCAL", "domain": "CORP.LOCAL",
+                        "enabled": True, "hasspn": True,
+                        "serviceprincipalnames": ["MSSQL/db01.corp.local"]}, "Aces": []},
+        {"ObjectIdentifier": f"{B}-500",
+         "Properties": {"name": "ADMINISTRATOR@CORP.LOCAL", "domain": "CORP.LOCAL",
+                        "enabled": True}, "Aces": []},
+    ]}
+    computers = {"meta": {"type": "computers"}, "data": [
+        {"ObjectIdentifier": f"{B}-1000",
+         "Properties": {"name": "DC01.CORP.LOCAL", "domain": "CORP.LOCAL",
+                        "enabled": True, "isdc": True}, "Aces": []},
+    ]}
+    groups = {"meta": {"type": "groups"}, "data": [
+        {"ObjectIdentifier": f"{B}-512",
+         "Properties": {"name": "DOMAIN ADMINS@CORP.LOCAL", "highvalue": True},
+         "Members": [{"ObjectIdentifier": f"{B}-500", "ObjectType": "User"}], "Aces": []},
+        {"ObjectIdentifier": f"{B}-516",
+         "Properties": {"name": "DOMAIN CONTROLLERS@CORP.LOCAL", "highvalue": True},
+         "Members": [{"ObjectIdentifier": f"{B}-1000", "ObjectType": "Computer"}], "Aces": []},
+        {"ObjectIdentifier": f"{B}-513",
+         "Properties": {"name": "DOMAIN USERS@CORP.LOCAL"},
+         "Members": [{"ObjectIdentifier": f"{B}-1104", "ObjectType": "User"}], "Aces": []},
+        {"ObjectIdentifier": f"{B}-1150",
+         "Properties": {"name": "IT SUPPORT@CORP.LOCAL"},
+         "Members": [{"ObjectIdentifier": f"{B}-1104", "ObjectType": "User"}],
+         "Aces": [{"PrincipalSID": f"{B}-513", "RightName": "GenericWrite"}]},
+    ]}
+    domains = {"meta": {"type": "domains"}, "data": [
+        {"ObjectIdentifier": B,
+         "Properties": {"name": "CORP.LOCAL", "functionallevel": "2016",
+                        "machineaccountquota": 10},
+         "Trusts": [], "Aces": [
+             {"PrincipalSID": f"{B}-1150", "RightName": "GetChanges"},
+             {"PrincipalSID": f"{B}-1150", "RightName": "GetChangesAll"}]},
+    ]}
+    import tempfile as _tf
+    try:
+        with _tf.TemporaryDirectory() as d:
+            for name, blob in (("users", users), ("computers", computers),
+                               ("groups", groups), ("domains", domains)):
+                with open(os.path.join(d, f"demo_{name}.json"), "w",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps(blob))
+            analysis = bh.analyze(d, owned={"JSMITH@CORP.LOCAL"})
+        store.set_meta("ad_bloodhound", json.dumps(analysis))
+    except (OSError, ValueError):
+        pass
 
 
 def _add_common(pp) -> None:
@@ -3781,14 +4486,28 @@ def _add_discovery(pp) -> None:
                     help="skip the ping sweep and scan every target as if up (like "
                          "nmap -Pn). Use this when hosts block ping - common on "
                          "firewalled / Windows / AD networks.")
+    pp.add_argument("--targets-up", action="store_true", dest="targets_up",
+                    help="treat the target list as AUTHORITATIVE: implies -Pn, and "
+                         "PRE-SEEDS every target (with its @file hostname) into the "
+                         "report up front - so a slow / timed-out / failed scan can "
+                         "never make a real host vanish ('no hosts'). Use with a "
+                         "complete IP[,hostname] @file you trust.")
     pp.add_argument("--fast", action="store_true",
                     help="go fast: masscan network-wide sweep instead of per-host "
                          "nmap (and, in `scan`, top-signal vuln scripts only)")
     g = pp.add_argument_group("scan tuning (optional)")
-    g.add_argument("--exclude", nargs="*", help="hosts/CIDRs to exclude")
+    g.add_argument("--exclude", nargs="*", metavar="IP|CIDR|RANGE|@file",
+                   help="hosts to keep OUT of scope: IPs / ranges / CIDRs, or @file "
+                        "(one per line). Persisted to the engagement - once excluded, an "
+                        "IP stays out of scope on every later phase/re-run.")
     g.add_argument("--masscan", action="store_true", help="use masscan for port sweep")
-    g.add_argument("--all-ports", action="store_true", help="force full 65535 TCP sweep")
-    g.add_argument("--top-ports", type=int, help="scan only top-N TCP ports")
+    g.add_argument("--all-ports", action="store_true",
+                   help="force the full 65535-port TCP sweep, overriding the profile "
+                        "and any --top-ports (the `standard`/`thorough` profiles already "
+                        "do this; use it to force a full scan under `quick`/`--fast`)")
+    g.add_argument("--top-ports", type=int,
+                   help="scan only the top-N TCP ports (PARTIAL - faster but can miss a "
+                        "service on an unusual port; recce prints a warning)")
     g.add_argument("--min-rate", type=int, help="nmap --min-rate override")
     g.add_argument("--max-retries", type=int, metavar="N",
                    help="nmap --max-retries on the port sweep (default 3; raise for "
@@ -3800,6 +4519,14 @@ def _add_discovery(pp) -> None:
                    help="also re-verify 0-port hosts under -Pn (not just discovered-"
                         "live ones) - catches every missed sweep, slower on dead-IP "
                         "scopes")
+    g.add_argument("--no-udp-fallback", action="store_true",
+                   help="skip the UDP liveness ping sent to a -Pn host that stays "
+                        "silent on TCP (the ping tells a firewalled-but-alive host "
+                        "apart from a dead one; needs root for raw UDP)")
+    g.add_argument("--no-reconfirm", action="store_true",
+                   help="after a partial ping sweep, DON'T re-probe the non-responders "
+                        "with a fast -Pn top-ports scan (that re-probe recovers "
+                        "firewalled hosts that block ping but answer a port scan)")
     g.add_argument("--reliable", action="store_true",
                    help="rate-limited / lossy network: drop the --min-rate floor, "
                         "retry dropped probes more, let nmap's congestion control "
@@ -3827,7 +4554,10 @@ def _add_vuln_opts(pp) -> None:
                    help="skip the active stdlib probes (HTTP-header / TLS "
                         "enrichment + the service-detection banner grabs); the free "
                         "passive naming (servicefp mining + curated port map) stays on")
-    g.add_argument("--udp-top", type=int, help="also scan top-N UDP ports")
+    g.add_argument("--udp-top", type=int, help="also scan top-N UDP ports (vulns phase)")
+    g.add_argument("--no-udp", action="store_true",
+                   help="skip the enum-phase basic-UDP sweep (DNS/SNMP/NTP/IKE/TFTP/"
+                        "NetBIOS/...). The sweep needs root; it auto-skips otherwise.")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -4019,8 +4749,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "HTTP Basic-auth endpoints (lockout-aware, <=5 tries/endpoint)")
     wb.add_argument("--crawl", action="store_true",
                     help="same-origin crawl each site (authenticated with --cookie/"
-                         "--header): discover pages/params/forms, test discovered "
-                         "params for reflection/SSTI, flag cleartext-login / no-CSRF forms")
+                         "--header): discover pages/params/forms, then test discovered "
+                         "GET params AND form fields for reflection/SSTI + SQL injection "
+                         "(error/boolean), and flag cleartext-login / no-CSRF forms")
+    wb.add_argument("--sqli-time", action="store_true",
+                    help="with --crawl, also run the slower TIME-based blind SQLi probe "
+                         "(sends deliberate DB sleeps; confirms by scaling the delay)")
+    wb.add_argument("--fuzz-risky-forms", action="store_true",
+                    help="with --crawl, ALSO submit forms whose action/fields signal a "
+                         "side effect (delete / pay / send / post / ...). Off by default "
+                         "- those forms are recorded, not submitted. File uploads are "
+                         "never submitted. Use only on a throwaway/dev target.")
     wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.
@@ -4089,6 +4828,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_vuln_opts(s)
     _add_creds(s)
     s.set_defaults(func=cmd_scan)
+
+    # One command instead of ~9: run every applicable credential-free deep module.
+    sw = sub.add_parser("sweep",
+                        help="run ALL applicable deep modules after enum in one shot "
+                             "(web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)")
+    sw.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    _add_common(sw)
+    _add_creds(sw)
+    _add_vuln_opts(sw)
+    sw.add_argument("--vulns", action="store_true",
+                    help="also run the nmap NSE vuln scan (heavier; off by default)")
+    sw.add_argument("--skip", nargs="*", metavar="MOD",
+                    help="deep modules to skip (e.g. --skip mssql docker)")
+    sw.add_argument("--only-modules", nargs="*", metavar="MOD",
+                    help="run only these deep modules (e.g. --only-modules web smb)")
+    sw.add_argument("--no-probe", action="store_true",
+                    help="passive: fold what enum already found, don't send probes")
+    sw.set_defaults(func=cmd_sweep)
+
+    # The authenticated counterpart of `sweep`: needs creds, runs the credentialed
+    # modules (credenum + authenticated ldap/smb/mssql/ftp) in one shot.
+    csw = sub.add_parser("credsweep",
+                         help="authenticated deep pass (needs -u/-p): run ALL "
+                              "credentialed modules in one shot (credenum + "
+                              "authenticated ldap/smb/mssql/ftp)")
+    csw.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    _add_common(csw)
+    _add_creds(csw)
+    csw.add_argument("--prove-write", action="store_true",
+                     help="include the reversible writable-share / writable-dir proofs "
+                          "(smb/ftp)")
+    csw.add_argument("--skip", nargs="*", metavar="MOD",
+                     help="credentialed modules to skip (e.g. --skip mssql)")
+    csw.add_argument("--only-modules", nargs="*", metavar="MOD",
+                     help="run only these modules (e.g. --only-modules credenum ldap)")
+    csw.add_argument("--no-probe", action="store_true",
+                     help="passive: fold what enum already found, don't send probes")
+    csw.set_defaults(func=cmd_credsweep)
 
     # Fold on-target recce-enum.sh/.ps1 output into the Priv-Esc sheet.
     ing = sub.add_parser("ingest",
@@ -4282,6 +5061,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
     kp.add_argument("--title", default="Recce Engagement")
     kp.set_defaults(func=cmd_kubernetes)
 
+    # LDAP / AD directory enumeration.
+    lp = sub.add_parser("ldap",
+                        help="LDAP: anonymously bind + read the RootDSE (domain/forest/"
+                             "DC/functional level) and test for anonymous directory read")
+    lp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "LDAP hosts in the datastore)")
+    lp.add_argument("--screenshots", action="store_true",
+                    help="save a terminal-style RootDSE proof screenshot per DC")
+    lp.add_argument("--no-probe", action="store_true",
+                    help="skip the live bind/read; just write the commands")
+    _add_creds(lp)
+    lp.add_argument("--hash", metavar="NThash",
+                    help="NTLM hash for pass-the-hash (with -u/-d): an NTLM SASL bind "
+                         "authenticates the enumeration without the plaintext password; "
+                         "on plaintext 389 it is sign+sealed so a signing-required DC "
+                         "accepts it (LDAPS 636 needs no sealing)")
+    lp.add_argument("-o", "--output-dir", default="engagement")
+    lp.add_argument("--title", default="Recce Engagement")
+    lp.set_defaults(func=cmd_ldap)
+
+    # SNMP enumeration (UDP 161).
+    sp = sub.add_parser("snmp",
+                        help="SNMP: brute common community strings (UDP 161) and walk "
+                             "the system group + Windows users / processes / software")
+    sp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "hosts in the datastore - recce probes UDP 161 directly)")
+    sp.add_argument("--no-probe", action="store_true",
+                    help="skip the live community brute/walk; just write the commands")
+    sp.add_argument("-o", "--output-dir", default="engagement")
+    sp.add_argument("--title", default="Recce Engagement")
+    sp.set_defaults(func=cmd_snmp)
+
+    # MongoDB enumeration.
+    mp = sub.add_parser("mongodb", aliases=["mongo"],
+                        help="MongoDB: unauthenticated wire-protocol probe (27017-19) -> "
+                             "CONFIRM listDatabases without auth = critical data exposure")
+    mp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "MongoDB hosts in the datastore)")
+    mp.add_argument("--no-probe", action="store_true",
+                    help="skip the live probe; just write the commands")
+    mp.add_argument("-o", "--output-dir", default="engagement")
+    mp.add_argument("--title", default="Recce Engagement")
+    mp.set_defaults(func=cmd_mongodb)
+
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
     r.add_argument("--title", default="Recce Engagement")
@@ -4290,6 +5116,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="print live review coverage")
     st.add_argument("-o", "--output-dir", default="engagement")
     st.set_defaults(func=cmd_status)
+
+    ax = sub.add_parser("access",
+                        help="record / review initial access (footholds) per host - "
+                             "auto-derived from credentialed enum, or record your own")
+    ax.add_argument("targets", nargs="*",
+                    help="restrict the listing to these IPs / ranges / CIDRs / @file")
+    ax.add_argument("-o", "--output-dir", default="engagement")
+    ax.add_argument("--title", default="Recce Engagement")
+    ax.add_argument("--host", nargs="*",
+                    help="record a foothold on this IP (or --undo to clear it)")
+    ax.add_argument("--note", help="how access was gained (shown in the report)")
+    ax.add_argument("--undo", action="store_true",
+                    help="with --host, clear the recorded foothold")
+    ax.set_defaults(func=cmd_access)
 
     rv = sub.add_parser("review", help="mark items reviewed / not reviewed")
     rv.add_argument("-o", "--output-dir", default="engagement")
@@ -4315,28 +5155,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 _QUICKSTART = r"""
-recce - phased enumeration & reporting. You mostly need three commands:
+recce - phased enumeration & reporting. New to this? Open QUICKSTART.md for a
+plain-English, step-by-step walkthrough. The core loop is short:
 
-  1.  recce doctor                         check this box can run everything
-  2.  recce enum   <targets> -o eng        find hosts, ports, services -> workbook
-  3.  recce vulns  -o eng                   vuln-scan what enum found
+  1.  recce doctor                       check this box can run everything
+  2.  recce enum  <targets> -o eng        find hosts, ports, services -> workbook
+  3.  recce vulns -o eng                   vuln-scan what enum found
+  4.  recce sweep -o eng                   ALL credential-free deep modules at once
+                                          (web/smb/ftp/ldap/snmp/mongodb/docker/k8s/mssql)
+  5.  recce credsweep -u USER -p PASS -d DOMAIN -o eng
+                                          ALL authenticated modules once you have creds
+                                          (credenum + authenticated ldap/smb/mssql/ftp)
 
-Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options)
-and, when you want more depth, run any of:
-      recce db -o eng · privesc -o eng · credenum -u USER -p PASS -d DOMAIN -o eng
-      recce writeups -o eng · recce status -o eng
+Then open eng/enumeration.xlsx (the "Runbook" tab lists every command + options),
+or check progress and the suggested next step:  recce status -o eng
+
+Want to focus one service instead of the whole sweep?  Each still has its own
+command - recce web|smb|ftp|ldap|snmp|mongodb|docker|k8s|mssql -o eng  (or add
+-u/-p/-d to smb/ldap/mssql/ftp for their authenticated depth). See the Runbook tab.
 
 Already have an nmap scan?   recce import scan.xml -o eng   (no scanning)
 SharpHound / Certipy data?   recce ad loot.zip certipy.json -u USER -p PASS -d DOMAIN
                              (AD vulns + ESC findings + paths to Domain Admin)
-MSSQL servers in scope?      recce mssql -u USER -p PASS -d DOMAIN -o eng
-                             (pre-auth probes + access/priv matrix + attack chain)
-SMB / file shares?           recce smb -o eng   (signing/SMBv1 posture + share enum;
-                             add -u/-p and --prove-write for a reversible write proof)
-FTP servers?                 recce ftp -o eng   (anonymous/AUTH-TLS + known backdoors;
-                             --prove-write for a reversible writable-dir proof)
-Docker API (2375/2376)?      recce docker -o eng   (CONFIRM unauth API = root RCE)
-Kubernetes cluster?          recce k8s -o eng   (kubelet / kube-apiserver / etcd)
+Have a complete IP/hostname list?  recce enum @scope.txt --targets-up
+                             (lines: 'IP hostname'; pre-seeds every host so a
+                             timeout never drops a real target from the report)
 
 Targets: a single IP, several IPs, a range (10.0.0.10-40), a CIDR, or @file.
 Hosts blocking ping (firewalled / Windows / AD)?  add  -Pn  to enum/scan.

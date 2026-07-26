@@ -16,8 +16,9 @@ Modelled on recce/mssql.py. Two layers:
 Everything positive becomes a finding that folds into the main severity totals,
 the Vulnerabilities sheet, the write-ups, and a dedicated **SMB** workbook tab -
 and each finding carries the exact existing-tool command to prove or abuse it.
-Airgapped-safe, stdlib only for the probe; the live layer shells out to the same
-tools `credenum` already uses and degrades cleanly when they're absent.
+Airgapped, stdlib only for the probe; the live layer shells out to the same
+tools `credenum` already uses and degrades cleanly when they're absent. Safety
+posture: see SECURITY.md.
 """
 from __future__ import annotations
 
@@ -62,7 +63,12 @@ def _smb2_header(command: int, flags: int = 0) -> bytes:
 
 
 def _build_smb2_negotiate() -> bytes:
-    dialects = [0x0202, 0x0210, 0x0300, 0x0302, 0x0311]
+    # Offer 2.0.2 .. 3.0.2. We deliberately do NOT offer 3.1.1 (0x0311): it requires
+    # negotiate contexts (preauth integrity) we don't build, so a 3.1.1-capable server
+    # offered a bare 0x0311 would select it and reply STATUS_INVALID_PARAMETER. Every
+    # such server also speaks 3.0.2, so it negotiates that instead and returns a valid
+    # response we can read signing posture from.
+    dialects = [0x0202, 0x0210, 0x0300, 0x0302]
     body = (struct.pack("<H", 36) + struct.pack("<H", len(dialects))
             + struct.pack("<H", 0x0001)          # SecurityMode: signing enabled
             + struct.pack("<H", 0) + struct.pack("<I", 0) + b"\x00" * 16
@@ -73,15 +79,25 @@ def _build_smb2_negotiate() -> bytes:
 
 
 def parse_smb2_negotiate(data: bytes) -> dict | None:
-    """dialect + signing posture from an SMB2 NEGOTIATE response."""
+    """dialect + signing posture from an SMB2 NEGOTIATE response.
+
+    Validates the SMB2 header before trusting the body: an *error* response (e.g.
+    STATUS_INVALID_PARAMETER) or a non-NEGOTIATE reply would otherwise be read as a
+    dialect-0 / signing-not-required host and emit a bogus 'signing not required'
+    finding. Requires Command==NEGOTIATE(0), Status==SUCCESS, and StructureSize==65.
+    """
     if not data or len(data) < 4 + 64 + 8:
         return None
     smb = data[4:]
     if smb[:4] != b"\xfeSMB":
         return None
+    status = struct.unpack("<I", smb[8:12])[0]
+    command = struct.unpack("<H", smb[12:14])[0]
+    if command != 0x0000 or status != 0x00000000:
+        return None                              # error / wrong command - not a NEGOTIATE OK
     body = smb[64:]
-    if len(body) < 8:
-        return None
+    if len(body) < 8 or struct.unpack("<H", body[0:2])[0] != 65:
+        return None                              # NEGOTIATE response StructureSize is 65
     sec_mode = struct.unpack("<H", body[2:4])[0]
     dialect = struct.unpack("<H", body[4:6])[0]
     return {"dialect": dialect,
@@ -529,24 +545,8 @@ def proof_html(command, output, banner: str = "") -> str:
 
 def findings_to_vulns(fs: list[dict]) -> dict:
     """SMB findings -> {ip: [Vuln]} (source='smb'), for the main totals + writeups."""
-    from .models import Vuln
-    by_ip: dict[str, list] = {}
-    for f in fs:
-        parts = f["target"].split(":")
-        ip = parts[0]
-        port = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else _DEFAULT_PORT
-        evidence = f.get("detail", "")
-        if f.get("narrative"):
-            evidence += f"\n\nWhat this enables:\n{f['narrative']}"
-        if f.get("command"):
-            evidence += f"\n\nProve / next step:\n{f['command']}"
-        by_ip.setdefault(ip, []).append(Vuln(
-            ip=ip, port=port, protocol="tcp",
-            script_id=f"smb:{f['title'][:40]}", state="finding", title=f["title"],
-            severity=f["severity"], source="smb", confidence="confirmed",
-            cwes=list(f.get("cwes") or ["CWE-284"]),
-            output=evidence.strip(), remediation=f.get("remediation", "")))
-    return by_ip
+    from .svccommon import findings_to_vulns as _f2v
+    return _f2v(fs, "smb", _DEFAULT_PORT)
 
 
 def analyze(hosts: list[Host], creds: dict | None = None,

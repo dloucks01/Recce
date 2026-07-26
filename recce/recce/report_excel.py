@@ -78,6 +78,9 @@ class SheetSpec:
     group_by: str | None = None        # row["group"] value to fold rows under collapsible bands
     # (group_value, [row dicts]) -> band label; default = "<group> · <hostname> · N <noun>".
     group_summary: Callable | None = None
+    # An optional one-line note written ABOVE the header row (e.g. a colour legend).
+    # The header then sits on row 2 and everything downstream accounts for the shift.
+    legend: str | None = None
 
 
 # Tab colours group the sheets into visual bands in Excel's tab bar, by role:
@@ -96,7 +99,8 @@ TAB_COLORS = {
     "Active Directory": _TAB_INV, "Users & Accounts": _TAB_INV,
     "AD Findings": _TAB_FIND, "AD Attack Paths": _TAB_FIND, "MSSQL": _TAB_FIND,
     "SMB": _TAB_FIND, "FTP": _TAB_FIND, "Docker": _TAB_FIND,
-    "Kubernetes": _TAB_FIND, "Raw NSE": _TAB_RAW,
+    "Kubernetes": _TAB_FIND, "LDAP": _TAB_FIND,
+    "SNMP": _TAB_FIND, "MongoDB": _TAB_FIND, "Raw NSE": _TAB_RAW,
 }
 
 
@@ -107,9 +111,33 @@ def _ip_sort_key(ip: str):
         return (999, ip)
 
 
+def _col_sqref(letter: str, rows: list[int]) -> str:
+    """Compress a row list for one column into contiguous ranges:
+    [4,5,7,8,9] -> 'A4:A5 A7:A9'. A per-cell list ('A4 A5 A7 A8 A9') is valid but at
+    900 hosts x 9 step columns (and ~9000 Services rows), emitted twice (validation +
+    conditional format), it bloats the sheet XML and risks Excel's sqref length limit;
+    one token per run keeps it tiny. Excel treats the two forms identically."""
+    rows = sorted(set(rows))
+    if not rows:
+        return ""
+    parts = []
+    start = prev = rows[0]
+    for r in rows[1:]:
+        if r == prev + 1:
+            prev = r
+            continue
+        parts.append(f"{letter}{start}" if start == prev
+                     else f"{letter}{start}:{letter}{prev}")
+        start = prev = r
+    parts.append(f"{letter}{start}" if start == prev
+                 else f"{letter}{start}:{letter}{prev}")
+    return " ".join(parts)
+
+
 # --- stylers (return {header: style_name} for special cells) ---------------------
 
 def _subnet_sort_key(subnet: str):
+    subnet = subnet or ""            # a SQL NULL subnet would AttributeError on .split
     try:
         net = subnet.split("/")[0]
         return (0,) + tuple(int(o) for o in net.split("."))
@@ -140,8 +168,9 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     become a handful of bands you expand one at a time. Within a subnet, hosts with
     critical/high findings sort to the top, and the # Vulns cell is coloured by the
     worst severity so risk pops out. Auto steps (Enumerated/Vuln-scan/Web/DB) turn
-    green when the tool finishes them; manual steps (AD review, Access/Priv-esc/
-    Creds/Lateral) are operator sign-offs you tick as you go. Steps that don't
+    green when the tool finishes them (Access ticks when credentialed enum confirms
+    a foothold, or via `recce access`); manual steps (AD review, Creds, Lateral) are
+    operator sign-offs you tick as you go. Steps that don't
     apply to a host show "—" instead of a box (no Web box without a web server,
     no AD box off a DC, no DB box without a database), so a checked box always
     means real work was done. The Reviewed checkbox is your per-host sign-off.
@@ -159,10 +188,16 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
         *step_cols,
         ("Notes", "notes", 28), ("Key", "key", 4),
     ]
+    # Show only hosts we can PROVE are up. `is_up` is deliberately one-directional:
+    # any concrete sign of life (open port, enum/finding, a real nmap discovery reply,
+    # DNS/ARP/OS evidence) keeps a host on the list, so a live host is never dropped;
+    # only IPs with zero evidence (e.g. -Pn phantoms in a 900-host sweep) fall away.
+    up_hosts = [h for h in hosts if h.is_up]
+    hidden = len(hosts) - len(up_hosts)
     rows = []
     # Sort by subnet (keeps each subnet's rows contiguous for the band), then by risk
     # so the hosts with critical/high findings float to the top of each subnet, then IP.
-    for h in sorted(hosts, key=lambda x: (_subnet_sort_key(x.subnet),
+    for h in sorted(up_hosts, key=lambda x: (_subnet_sort_key(x.subnet),
                                           _host_sev_rank(x), _ip_sort_key(x.ip))):
         checks = {header: (tr.step_key(step, h.ip), tr.step_auto(h, step),
                            tr.step_applies(h, step))
@@ -179,8 +214,17 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
             "Roles": ", ".join(h.roles), "Open ports": open_ports,
             "# Vulns": len(h.vulns), "AV / EDR": "; ".join(h.defenses),
             "_maxsev": _host_maxsev(h)}})
+    legend = (
+        "Legend:   green step headers = auto-ticked by recce as each phase finishes"
+        "  ·  amber step headers = your manual sign-off"
+        "  ·  ☑ done   ☐ to do   — = not applicable to this host.        "
+        "This tab lists only hosts confirmed UP (an open port or a real reply); "
+        "a host is never shown as down unless it is provably down.")
+    if hidden:
+        legend += (f"   {hidden} scanned IP{'s' if hidden != 1 else ''} with no sign "
+                   "of life hidden — see the Overview for the full count.")
     return SheetSpec(CHECKLIST_TITLE, cols, rows, _styler_checklist,
-                     group_by="Subnet", group_summary=_checklist_band)
+                     group_by="Subnet", group_summary=_checklist_band, legend=legend)
 
 
 def _checklist_band(subnet: str, grows: list[dict], tracking: Tracking) -> str:
@@ -339,15 +383,14 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         ("Remediation", "data", 44), ("Details", "data", 50),
         ("Notes", "notes", 26), ("Key", "key", 4),
     ]
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    worst = {h.ip: min((order.get((v.severity or "").lower(), 9) for v in h.vulns),
+    worst = {h.ip: min((_SEV_RANK.get((v.severity or "").lower(), 9) for v in h.vulns),
                        default=9) for h in hosts}
     rows = []
     ordered = [(h, v) for h in hosts for v in h.vulns]
     # host worst-severity, then IP (keeps a host's findings contiguous for the band),
     # then this finding's severity.
     ordered.sort(key=lambda hv: (worst[hv[0].ip], _ip_sort_key(hv[0].ip),
-                                 order.get((hv[1].severity or "").lower(), 9)))
+                                 _SEV_RANK.get((hv[1].severity or "").lower(), 9)))
     for h, v in ordered:
         # Full output, shown in a wrapped column so it reads down inside its cell
         # (never truncated). Rows fold under the per-host band, so verbose findings
@@ -355,7 +398,7 @@ def _spec_vulns(hosts: list[Host]) -> SheetSpec:
         out = v.output
         rows.append({"key": tr.vuln_row_key(v), "group": h.ip,
                      "data": {
-            "Severity": v.severity.upper(), "IP": h.ip,
+            "Severity": (v.severity or "info").upper(), "IP": h.ip,
             "Port": v.port if v.port else "", "Finding": v.title or v.script_id,
             "Source": v.source, "Conf.": v.confidence, "CVE / refs": ", ".join(v.ids),
             "CWE": ", ".join(v.cwes), "Exploit": _exploit_cell(h, v),
@@ -746,6 +789,13 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             step = tr.STEP_COLUMNS.get(header)
             return "header_manual" if step in tr.MANUAL_STEPS else "header_auto"
         return "header"
+    # An optional legend/note line sits ABOVE the header (row 1); the column headers
+    # then land on row 2. header_row keeps freeze-pane, auto-filter and the tall
+    # header height aligned to wherever the headers actually are.
+    if spec.legend:
+        sheet.write([(spec.legend, "sub")]
+                    + [("", "sub")] * (len(spec.cols) - 1))
+        sheet.header_row = 2
     sheet.write([(h, _hdr_style(h, role)) for h, role, _w in spec.cols])
 
     rows_by_key = {r["key"]: r for r in spec.rows}
@@ -772,7 +822,9 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
     # real checkbox rather than an N/A dash - used to scope validation/formatting.
     active_check_rows: dict[int, list[int]] = {}
     data_rows: list[int] = []            # detail (non-group-header) row numbers
-    excel_row = 1
+    # First data/band row sits just below the header, wherever the header ended up
+    # (row 1 normally, row 2 when a legend line precedes it).
+    excel_row = sheet.header_row
     for kind, key in items:
         excel_row += 1
         if kind == "hdr":
@@ -784,8 +836,10 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
                                            tracking)
             else:
                 hostname = rows_by_key[grp_rows[0]]["data"].get("Hostname", "")
-                label = f"{key}   ·   {hostname}   ·   {len(grp_rows)} {noun}".replace(
-                    "·      ·", "·")
+                # Join only the present parts, so an empty hostname doesn't leave a
+                # dangling "·" (previously patched with a fragile 6-space replace()).
+                parts = [key, hostname, f"{len(grp_rows)} {noun}"]
+                label = "   ·   ".join(p for p in parts if p)
             hdr_cells = []
             for ci, (_h, _role, _w) in enumerate(spec.cols, start=1):
                 hdr_cells.append((label if ci == ip_col else "", "group"))
@@ -861,8 +915,7 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
         # the collapsible group-header rows never sprout a stray dropdown arrow.
         if not grouped:
             return None
-        letter = xlsx.col_letter(col)
-        return " ".join(f"{letter}{r}" for r in data_rows) or None
+        return _col_sqref(xlsx.col_letter(col), data_rows) or None
 
     # Checkbox / check columns get the ☑/☐ dropdown + green-when-checked. For
     # per-step "check" columns, restrict it to the cells that actually hold a box
@@ -872,8 +925,7 @@ def _write_spec(sheet, spec: SheetSpec, tracking: Tracking,
             active = active_check_rows.get(i, [])
             if not active:
                 continue
-            letter = xlsx.col_letter(i)
-            sqref = " ".join(f"{letter}{r}" for r in active)
+            sqref = _col_sqref(xlsx.col_letter(i), active)
             sheet.dropdown(i, 2, last, sqref=sqref)
             sheet.green_when_true(i, 2, last, sqref=sqref)
         elif role == "status":
@@ -907,10 +959,11 @@ def _build_guide(wb, meta: dict) -> None:
         "high/critical findings sort to the top of each subnet.",
         "2. The step columns are colour-coded in the header so you can see which fill "
         "themselves: GREEN headers = AUTO (the tool ticks them) - Enumerated, "
-        "Vuln-scan, Web, DB, Priv-esc turn green as recce finishes each phase (running "
-        "smb/ftp/docker/k8s/mssql also auto-ticks the ports they assess). AMBER "
-        "headers = MANUAL sign-offs you tick yourself - AD, Access, Creds, Lateral - "
-        "the kill-chain steps only you can confirm.",
+        "Vuln-scan, Web, DB, Access, Priv-esc turn green as recce finishes each phase "
+        "(running smb/ftp/docker/k8s/mssql/ldap also auto-ticks the ports they assess; "
+        "Access ticks when credentialed enum confirms a foothold, or via `recce "
+        "access`). AMBER headers = MANUAL sign-offs you tick yourself - AD, Creds, "
+        "Lateral - the kill-chain steps only you can confirm.",
         "3. Steps that don't apply to a host show '—' instead of a box (e.g. no AD "
         "box off a non-DC). SMB/remote/mail/SNMP are tracked on the SERVICES tab.",
         "4. You can tick/untick any box by hand - your choice sticks (untick to "
@@ -937,7 +990,9 @@ def _build_guide(wb, meta: dict) -> None:
                       "+ host detail + Reviewed + Notes. Step headers are colour-coded - "
                       "GREEN = auto (the tool ticks it), AMBER = your manual sign-off. "
                       "# Vulns is coloured by worst severity; risky hosts sort to the "
-                      "top of each subnet."),
+                      "top of each subnet. Lists only hosts CONFIRMED up (an open port "
+                      "or a real reply); a host is never written off as down - IPs with "
+                      "no proof of life are tallied on the Overview as UNKNOWN instead."),
         ("Services", "The other working tab: every open port folded under a collapsible "
                      "per-host band, each with a Status (not started / in progress / "
                      "done) and Notes - track each port you work."),
@@ -969,6 +1024,19 @@ def _build_guide(wb, meta: dict) -> None:
         ("Kubernetes", "Kubernetes attack surface: unauthenticated reads of the kubelet "
                        "(exec-into-pods), kube-apiserver (anonymous LIST / Secrets) and "
                        "etcd (all cluster secrets). Run `recce k8s`."),
+        ("LDAP", "LDAP / AD directory (stdlib BER client): anonymous bind, RootDSE "
+                 "(domain/forest/DC/functional level), anonymous directory-read "
+                 "detection, cleartext-389 / relay surface - and, with -u/-p/-d, a "
+                 "paged authenticated enum (users/SPNs/delegation -> AD Quick Wins). "
+                 "Run `recce ldap`."),
+        ("SNMP", "SNMP over UDP (stdlib BER v2c client): community-string guessing, "
+                 "sysDescr/sysName, and a walk of the LanMgr user table, running "
+                 "processes and installed software (local accounts -> Users & "
+                 "Accounts). Read-only. Run `recce snmp`."),
+        ("MongoDB", "MongoDB wire protocol (stdlib OP_MSG/BSON client): hello + "
+                    "buildInfo fingerprint, then listDatabases to prove whether the "
+                    "instance answers privileged commands with no authentication. "
+                    "Run `recce mongodb`."),
         # --- Active Directory cluster (kept contiguous) ---
         ("Active Directory", "Domains, DCs, password policy, trusts."),
         ("AD Quick Wins", "Prioritised AD attack paths (DC, relay, roast, deleg)."),
@@ -987,8 +1055,11 @@ def _build_guide(wb, meta: dict) -> None:
         ("Exploitation", "Every CONFIRMED finding (remote service exposures AND local "
                          "priv-esc) mapped to the exact existing tool + command (your "
                          "values filled in) + how to validate. Run `recce exploitplan`."),
-        ("Attack Path", "The confirmed findings chained into a staged path (foothold -> "
-                        "priv-esc -> creds -> lateral -> domain). Run `recce attackpath`."),
+        ("Attack Path", "A PROJECTED route: confirmed findings chained into a staged "
+                        "path (foothold -> priv-esc -> creds -> lateral -> domain). "
+                        "recce grounds each step in what it observed but does NOT "
+                        "execute it - each row gives the command to run + how to "
+                        "validate. Run `recce attackpath`."),
         ("Priv-Esc", "Per-host escalation findings from the local sweep "
                      "(recce deploy/ingest) + remote signals. Un-swept hosts show a "
                      "'run recce deploy' to-do; dead IPs get no rows."),
@@ -1006,6 +1077,14 @@ def _build_guide(wb, meta: dict) -> None:
         ("doctor", "Check this box can run everything (env + tools + self-scan)."),
         ("enum <targets>", "Phase 1: discover hosts, scan ports, ID services (fast)."),
         ("vulns [targets]", "Phase 2: vuln-scan open ports (safe; --aggressive for more)."),
+        ("sweep", "ONE command for the whole UNAUTHENTICATED deep pass: runs every "
+                  "applicable credential-free module below (web/smb/ftp/ldap/snmp/"
+                  "mongodb/docker/k8s/mssql), skipping services you don't have. Add "
+                  "--vulns for the NSE scan too."),
+        ("credsweep -u U -p P -d DOM",
+         "ONE command for the whole AUTHENTICATED deep pass (once you have creds): "
+         "credenum (netexec/impacket) + authenticated ldap/smb/mssql/ftp. Run the "
+         "individual commands below only to focus or pass module-specific options."),
         ("web [targets]", "Deep, non-intrusive scan of every HTTP/HTTPS endpoint "
                           "(exposed files, PUT/JWT proofs, CORS, GraphQL). Fills Web."),
         ("db [targets]", "Database enumeration + vuln scan."),
@@ -1026,6 +1105,12 @@ def _build_guide(wb, meta: dict) -> None:
         ("kubernetes / k8s", "Kubernetes: unauthenticated reads of the kubelet, "
                              "kube-apiserver and etcd (exec-into-pods / anonymous "
                              "Secrets / all cluster secrets)."),
+        ("ldap", "LDAP: anonymous bind + RootDSE (domain/forest/DC/functional level) "
+                 "and anonymous directory-read detection; flags cleartext 389."),
+        ("snmp", "SNMP: community-string guessing over UDP + a read-only walk of "
+                 "users / processes / installed software (local accounts -> spray)."),
+        ("mongodb / mongo", "MongoDB: fingerprint + prove unauthenticated "
+                            "listDatabases (no-auth exposure)."),
         ("ad <sharphound> <certipy> -u U -p P -d DOM",
          "Import SharpHound + Certipy (ADCS): AD vulns, ESC findings, and the "
          "shortest paths from your account to Domain Admin - commands pre-filled."),
@@ -1039,6 +1124,9 @@ def _build_guide(wb, meta: dict) -> None:
          "Fills Credentials."),
         ("writeups", "Generate a Word (.docx) write-up per finding - finish each "
                      "in Word (screenshots auto-added for web when a browser is present)."),
+        ("access [--host IP --note '...']",
+         "Review footholds per host (auto-derived from credentialed enum), or record "
+         "one you gained another way - ticks the Checklist Access step."),
         ("status / report", "Show progress + deep-dive coverage / rebuild this "
                             "workbook from the datastore."),
     ]:
@@ -1118,6 +1206,17 @@ def _build_runbook(wb, meta: dict) -> None:
     cmd("web -o eng", "Scan every web endpoint (any port). Add creds with -u/-p to scan "
                       "authenticated.")
 
+    section("2c. Deep pass - one command instead of running each module by hand",
+            "After enum, rather than typing web/smb/ftp/ldap/snmp/mongodb/docker/k8s/"
+            "mssql one at a time, run the whole pass at once. Each module self-skips "
+            "when there's no matching service; the workbook rebuilds once at the end.")
+    cmd("sweep -o eng", "UNAUTHENTICATED pass: every applicable credential-free module. "
+                        "Add --vulns to also run the NSE vuln scan; --only-modules / "
+                        "--skip to narrow. Refuses creds (use credsweep for those).")
+    cmd("credsweep -u user -p pass -d corp.local -o eng",
+        "AUTHENTICATED pass (needs -u/-p): credenum (netexec/impacket) + authenticated "
+        "ldap/smb/mssql/ftp in one shot. Run once you have creds; see section 5.")
+
     section("3. Databases (optional) - deep DB enumeration")
     cmd("db -o eng", "Enumerate + vuln-scan discovered database services. Fills Databases.")
 
@@ -1130,7 +1229,9 @@ def _build_runbook(wb, meta: dict) -> None:
 
     section("5. Credentialed enum - authenticated power moves",
             "Two accounts are supported: a normal user does the enumeration; an "
-            "optional privileged account runs the admin-only checks.")
+            "optional privileged account runs the admin-only checks. Tip: "
+            "`credsweep -u ... -p ... -d ...` runs credenum AND the authenticated "
+            "ldap/smb/mssql/ftp modules in one shot.")
     cmd("credenum -u user -p pass -d corp.local -o eng",
         "Authenticated SMB/LDAP enum with the user account: shares, roasting, "
         "delegation, local-admin reach. Fills Users & Accounts, AD sheets.")
@@ -1191,7 +1292,7 @@ def _build_runbook(wb, meta: dict) -> None:
         "Capture terminal-style PROOF screenshots of executed actions (RCE output, "
         "write-proof, data mining) into engagement/screenshots/ for the walkthroughs.")
 
-    section("5d. Additional services - SMB / FTP / Docker / Kubernetes",
+    section("5d. Additional services - SMB / FTP / Docker / Kubernetes / LDAP / SNMP / MongoDB",
             "Deep, per-service offensive enumeration. Each probes with recce's own "
             "stdlib code (no creds needed to start), folds findings into the main "
             "totals, and fills its own tab. Run the ones your enum turned up.")
@@ -1209,6 +1310,22 @@ def _build_runbook(wb, meta: dict) -> None:
         "Kubernetes: unauthenticated reads of the kubelet (exec-into-pods), "
         "kube-apiserver (anonymous LIST / Secrets = cluster compromise) and etcd "
         "(all cluster secrets in the clear).")
+    cmd("ldap -o eng   [-u alice -p 'Passw0rd!' -d corp.local | --hash <NT>]",
+        "LDAP: stdlib BER client anonymously binds, reads the RootDSE (domain / forest "
+        "/ DC / functional level) and tests for anonymous directory read; flags cleartext "
+        "389 as a credential-sniff / relay surface. WITH creds (password OR --hash for "
+        "pass-the-hash via an NTLM SASL bind) it PAGES an authenticated enum (users / "
+        "computers / domain) in-house and derives kerberoastable / AS-REP / delegation / "
+        "privileged accounts straight into Users & Accounts + AD Quick Wins. Read-only.")
+    cmd("snmp -o eng   [--no-probe]",
+        "SNMP: guesses community strings over UDP 161, reads sysDescr / sysName, and "
+        "walks the LanMgr user table, running processes and installed software - local "
+        "accounts flow into Users & Accounts. Flags read-write communities by name. "
+        "Read-only (never sends a SET).")
+    cmd("mongodb -o eng   [--no-probe]",
+        "MongoDB: speaks the wire protocol (OP_MSG/BSON), fingerprints with hello + "
+        "buildInfo, then proves whether listDatabases answers with NO authentication - "
+        "a CONFIRMED no-auth instance is full read/write to every database.")
 
     section("6. Act on the findings - turn CONFIRMED findings into a plan",
             "Once findings are proven (Verification tab), stage the exploitation and "
@@ -1235,6 +1352,9 @@ def _build_runbook(wb, meta: dict) -> None:
                          "(preserves your ticks and notes).")
     cmd("status -o eng", "Print live review-coverage + per-service deep-dive coverage "
                          "and the suggested next command.")
+    cmd("access -o eng", "Review which hosts you have a foothold on (auto-derived from "
+                         "credentialed enum). Record one you got another way with "
+                         "`access --host IP --note '...'` - it ticks the Access step.")
 
     section("On-target - run these ON a compromised host (read-only)",
             "Copy the script from recce/local/ to the target, self-test, then run "
@@ -1313,6 +1433,10 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     win = sum(1 for h in hosts if "windows" in (h.os_family or h.os_name).lower())
     lin = sum(1 for h in hosts if "linux" in (h.os_family or h.os_name).lower())
     crit = sum(1 for h in hosts for v in h.vulns if v.severity in ("critical", "high"))
+    # Confirmed-up vs scanned-but-unconfirmed. The Checklist shows only the confirmed
+    # set; the unconfirmed count is surfaced here so a host is never silently dropped.
+    up_hosts = [h for h in hosts if h.is_up]
+    unconfirmed = len(hosts) - len(up_hosts)
 
     sh.write([("Engagement Overview", "title")])
     sh.write([(meta.get("subtitle", ""), "sub")])
@@ -1356,7 +1480,8 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     confirmed = sum(1 for r in proofs.verify_hosts(hosts)
                     if r["verdict"] == proofs.CONFIRMED)
     _links = {
-        "Live hosts": "Checklist", "Open service ports": "Services",
+        "Hosts confirmed up (on Checklist)": "Checklist",
+        "Open service ports": "Services",
         "Vuln findings": "Vulnerabilities", "High / Critical findings": "Vulnerabilities",
         "Confirmed by recce (prove engine)": "Verification",
         "Findings with a curated exploit": "Vulnerabilities",
@@ -1365,7 +1490,7 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
         "Kerberoastable / AS-REP": "AD Quick Wins",
     }
     for label, val in [
-        ("Live hosts", len(hosts)),
+        ("Hosts confirmed up (on Checklist)", len(up_hosts)),
         ("Windows / Linux", f"{win} / {lin}"),
         ("Open service ports", len(open_ports)),
         ("Vuln findings", sum(len(h.vulns) for h in hosts)),
@@ -1387,6 +1512,15 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
             sh.link_to(r, 1, target)
         else:
             sh.write([(label, "bold"), val])
+    if unconfirmed:
+        # Not hidden away: these IPs were scanned but returned no proof of life, so
+        # they're kept off the Checklist. Flagged here so nobody assumes they're down.
+        sh.write([("Scanned, not confirmed up (kept off Checklist)", "bold"),
+                  unconfirmed])
+        sh.write([("These IPs answered no TCP probe and no UDP liveness ping - treat "
+                   "as UNKNOWN, not down. A slower/wider re-scan (more UDP ports, a "
+                   "higher --host-timeout) may still surface a heavily firewalled "
+                   "host.", "sub")])
     sh.write([""])
 
     # --- Credentialed access matrix (only when credenum has run) ---
@@ -1439,9 +1573,13 @@ def _build_overview(wb, hosts: list[Host], meta: dict, domains: list[Domain],
     sh.write([("Subnet", "bold"), ("In range", "bold"), ("Live hosts", "bold"),
               ("Enumerated", "bold"), ("Vuln-scanned", "bold"), ("Web", "bold"),
               ("DB", "bold"), ("# Vulns", "bold")])
+    # Only confirmed-up hosts count here, so this table agrees exactly with the
+    # Checklist (which also shows only up hosts). Unconfirmed IPs are tallied
+    # separately in the Totals block, never folded into a subnet's "Live hosts".
     agg: dict[str, list] = defaultdict(list)
     for h in hosts:
-        agg[h.subnet or "unknown"].append(h)
+        if h.is_up:
+            agg[h.subnet or "unknown"].append(h)
 
     def cell(done, total):
         # Denominator counts only hosts the step applies to, so "x/y" reflects
@@ -1528,9 +1666,6 @@ def _build_active_directory(wb, hosts: list[Host], domains: list[Domain]) -> Non
     sh.set_col(2, 70)
 
 
-_SEV_STYLE = {"critical": "sev_critical", "high": "sev_high", "medium": "sev_medium",
-              "low": "sev_low", "info": "sev_info"}
-
 
 def _build_ad_findings(wb, analysis: dict) -> None:
     """AD misconfigurations / vulnerabilities from a SharpHound import - one row per
@@ -1590,6 +1725,35 @@ def _build_ad_paths(wb, analysis: dict) -> None:
     sh.set_col(2, 120)
 
 
+def _write_findings_table(sh, fs) -> None:
+    """The per-service 'Findings' table + 'Finding details' narrative block, shared by
+    all five deep-service sheets (they wrote this identical block five times)."""
+    if not fs:
+        return
+    sh.write([("Findings", "title")])
+    sh.write([(h, "bold") for h in
+              ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
+               "Remediation")])
+    for f in fs:
+        sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
+                  f["title"], f["target"], f.get("detail", ""),
+                  f.get("command", ""), f.get("remediation", "")])
+    sh.write([""])
+    if any(f.get("narrative") for f in fs):
+        sh.write([("Finding details - what each issue enables", "title")])
+        seen_narr = set()
+        for f in fs:
+            narr = f.get("narrative")
+            key = (f["title"], f["target"])
+            if not narr or key in seen_narr:
+                continue
+            seen_narr.add(key)
+            sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
+                       "bold")])
+            sh.write(["", narr])
+        sh.write([""])
+
+
 def _build_mssql(wb, analysis: dict) -> None:
     """MSSQL offensive sheet: endpoints (version/encryption/access/priv), findings,
     and the credential-free + credentialed runbook with the attack chain."""
@@ -1624,31 +1788,7 @@ def _build_mssql(wb, analysis: dict) -> None:
                   acc, (priv, style) if style else priv,
                   ", ".join(i.get("instance", "") for i in t.get("instances") or [])])
     sh.write([""])
-    # Findings.
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        # Detailed narrative per finding - what the issue actually enables.
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     # Runbook + chain, per endpoint.
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
@@ -1766,30 +1906,7 @@ def _build_smb(wb, analysis: dict) -> None:
                   t.get("dialect", ""),
                   (signing, sstyle) if sstyle else signing, v1cell])
     sh.write([""])
-    # Findings.
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     # Runbook + live results, per endpoint.
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
@@ -1851,29 +1968,7 @@ def _build_ftp(wb, analysis: dict) -> None:
         sh.write([f"{t['ip']}:{t['port']}", t.get("banner", ""),
                   anoncell, tlscell, t.get("syst", "")])
     sh.write([""])
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
         live = rb.get("live")
@@ -1922,29 +2017,7 @@ def _build_docker(wb, analysis: dict) -> None:
                   "" if t.get("containers") is None else str(t.get("containers")),
                   "" if t.get("images") is None else str(t.get("images"))])
     sh.write([""])
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']}", "boldred")])
         cur = None
@@ -1998,31 +2071,164 @@ def _build_kubernetes(wb, analysis: dict) -> None:
             detail = t.get("etcd_version", "")
         sh.write([f"{t['ip']}:{t['port']}", role, expcell, detail])
     sh.write([""])
-    if fs:
-        sh.write([("Findings", "title")])
-        sh.write([(h, "bold") for h in
-                  ("Severity", "Finding", "Target", "Detail", "Prove / abuse command",
-                   "Remediation")])
-        for f in fs:
-            sh.write([(f["severity"].upper(), _SEV_STYLE.get(f["severity"])),
-                      f["title"], f["target"], f.get("detail", ""),
-                      f.get("command", ""), f.get("remediation", "")])
-        sh.write([""])
-        if any(f.get("narrative") for f in fs):
-            sh.write([("Finding details - what each issue enables", "title")])
-            seen_narr = set()
-            for f in fs:
-                narr = f.get("narrative")
-                key = (f["title"], f["target"])
-                if not narr or key in seen_narr:
-                    continue
-                seen_narr.add(key)
-                sh.write([(f"[{f['severity'].upper()}] {f['title']}  ({f['target']})",
-                           "bold")])
-                sh.write(["", narr])
-            sh.write([""])
+    _write_findings_table(sh, fs)
     for rb in runbooks:
         sh.write([(f"Runbook - {rb['target']} ({rb.get('role', '')})", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_ldap(wb, analysis: dict) -> None:
+    """LDAP / AD directory sheet: per-DC RootDSE (domain/forest/DC/functional level),
+    anonymous bind + anonymous-read posture, findings, runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import ldap as _ldap
+    sh = wb.add_sheet("LDAP")
+    sh.write([("LDAP / Active Directory - offensive directory enumeration", "title")])
+    sh.write([("recce speaks LDAP directly (stdlib BER/ASN.1): an anonymous bind, a "
+               "RootDSE read, an anonymous naming-context read, and - with creds - a "
+               "paged authenticated enumeration (users/computers/domain -> Users & "
+               "Accounts + AD Quick Wins). Read-only - it never writes to the directory.",
+               "sub")])
+    sh.write([""])
+    sh.write([("How LDAP is tested", "title")])
+    for phase, text in _ldap.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Directory endpoints", "title")])
+    sh.write([(h, "bold") for h in
+              ("IP:Port", "Anon read", "Domain", "DC (dnsHostName)",
+               "Functional level", "Enumerated (auth)")])
+    for t in tgts:
+        if t.get("anon_read"):
+            anon = ("ANON READ", "sev_high")
+        elif t.get("anon_bind"):
+            anon = ("anon bind", "sev_medium")
+        else:
+            anon = "no"
+        lvl = f"Server {t['dc_level']}" if t.get("dc_level") else ""
+        if t.get("auth_ok"):
+            enum = (f"{t.get('auth_users', 0)} users, {t.get('kerberoastable', 0)} kerb, "
+                    f"{t.get('asrep', 0)} AS-REP, {t.get('unconstrained_deleg', 0)} uncon-deleg")
+        elif t.get("auth_error"):
+            enum = f"auth failed: {t['auth_error']}"
+        else:
+            enum = "(anonymous only - pass -u/-p to enumerate)"
+        sh.write([f"{t['ip']}:{t['port']}", anon, t.get("domain", ""),
+                  t.get("dc_dns", ""), lvl, enum])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_snmp(wb, analysis: dict) -> None:
+    """SNMP sheet: per-agent community/RW posture, exposed users, findings, runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import snmp as _snmp
+    sh = wb.add_sheet("SNMP")
+    sh.write([("SNMP - offensive UDP enumeration", "title")])
+    sh.write([("recce speaks SNMP v2c directly (stdlib BER over UDP): it guesses "
+               "community strings, reads sysDescr/sysName, and walks the LanMgr user "
+               "table, running processes and installed software. Local accounts flow "
+               "into Users & Accounts. Read-only - it never sends a SET.", "sub")])
+    sh.write([""])
+    sh.write([("How SNMP is tested", "title")])
+    for phase, text in _snmp.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Agents", "title")])
+    sh.write([(h, "bold") for h in
+              ("IP:Port", "Community", "Access", "System", "Users")])
+    for t in tgts:
+        comm = t.get("community")
+        commcell = (comm, "sev_medium") if comm else "(no answer)"
+        access = ("READ-WRITE", "sev_high") if t.get("rw_likely") else \
+            ("read-only" if comm else "")
+        sh.write([f"{t['ip']}:{t['port']}", commcell, access,
+                  t.get("sys_name", ""),
+                  "" if not t.get("users") else str(t.get("users"))])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 22)
+    sh.set_col(2, 120)
+
+
+def _build_mongodb(wb, analysis: dict) -> None:
+    """MongoDB sheet: per-instance auth posture, version, exposed databases,
+    findings, runbook."""
+    analysis = analysis or {}
+    tgts = analysis.get("targets") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not tgts and not fs:
+        return
+    from . import mongodb as _mongo
+    sh = wb.add_sheet("MongoDB")
+    sh.write([("MongoDB - offensive enumeration", "title")])
+    sh.write([("recce speaks the MongoDB wire protocol directly (stdlib OP_MSG/BSON): "
+               "hello + buildInfo to fingerprint, then listDatabases to prove whether "
+               "the instance answers privileged commands without authentication. "
+               "Read-only - it never writes or drops.", "sub")])
+    sh.write([""])
+    sh.write([("How MongoDB is tested", "title")])
+    for phase, text in _mongo.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([("Instances", "title")])
+    sh.write([(h, "bold") for h in
+              ("IP:Port", "Auth", "Version", "Databases")])
+    for t in tgts:
+        if t.get("unauth"):
+            authcell = ("NO AUTH", "sev_critical")
+        elif t.get("version"):
+            authcell = ("auth required", "sev_medium")
+        else:
+            authcell = "?"
+        sh.write([f"{t['ip']}:{t['port']}", authcell, t.get("version", ""),
+                  "" if not t.get("databases") else str(t.get("databases"))])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
         cur = None
         for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
             if step["phase"] != cur:
@@ -2076,7 +2282,8 @@ def _ordered_specs(hosts: list[Host], scope: dict | None = None,
       * Checklist <-> Services  - host <-> its open ports (the working pair).
       * Services <-> Vulnerabilities <-> Verification - port -> finding -> is-it-real.
       * Vulnerabilities -> Services by Product - "who else runs this?" pivot.
-      * Databases + MSSQL/SMB/FTP/Docker/Kubernetes - the per-service deep-dive band.
+      * Databases + MSSQL/SMB/FTP/Docker/Kubernetes/LDAP/SNMP/MongoDB - the per-service
+        deep-dive band.
       * Active Directory <-> AD Quick Wins <-> AD Findings/Paths <-> Users & Accounts.
     """
     pre = [_spec_checklist(hosts), _spec_services(hosts), _spec_web(hosts),
@@ -2124,7 +2331,9 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     nav = [s.title for s in pre if _spec_here(s)]
     # Service deep-dive band (Databases is the last of `pre`, immediately before).
     for key, title in (("mssql", "MSSQL"), ("smb", "SMB"), ("ftp", "FTP"),
-                       ("docker", "Docker"), ("kubernetes", "Kubernetes")):
+                       ("docker", "Docker"), ("kubernetes", "Kubernetes"),
+                       ("ldap", "LDAP"), ("snmp", "SNMP"),
+                       ("mongodb", "MongoDB")):
         if _mod(key):
             nav.append(title)
     # AD cluster, kept contiguous.
@@ -2140,29 +2349,38 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
         nav.append(accounts_spec.title)
     nav += [s.title for s in tail if _spec_here(s)]
 
-    # Pre-compute each host's Checklist row (header is row 1, data from row 2) so
-    # the Overview can deep-link an IP straight to it. Uses the SAME ordering the
-    # Checklist writer will use, so the links land on the right rows.
+    # Pre-compute each host's Checklist row so the Overview can deep-link an IP
+    # straight to it. Uses the SAME ordering the Checklist writer will use, so the
+    # links land on the right rows. The header sits on row 1 normally, or row 2 when
+    # a legend line precedes it - mirror that offset here.
     checklist_spec = next((s for s in pre if s.title == CHECKLIST_TITLE), None)
     host_rows: dict[str, int] = {}
     if checklist_spec:
         ck_keys = _ordered_keys(checklist_spec.rows, order_map.get(CHECKLIST_TITLE))
         by_key = {r["key"]: r for r in checklist_spec.rows}
         key_ip = {k: r["data"]["IP"] for k, r in by_key.items()}
-        # Walk the SAME emission order the writer uses. When the sheet is grouped, a
-        # collapsible band row precedes each new group, so the host rows shift down by
-        # one per group seen - account for that or the Overview links land wrong.
         grouped = bool(checklist_spec.group_by)
-        excel_row, seen = 1, set()
-        for k in ck_keys:
-            if grouped:
-                g = by_key[k].get("group", "")
-                if g not in seen:
-                    seen.add(g)
-                    excel_row += 1               # the subnet band row
-            excel_row += 1
-            if k in key_ip:
-                host_rows[key_ip[k]] = excel_row
+        header_row = 2 if checklist_spec.legend else 1
+        excel_row = header_row
+        if grouped:
+            # Bucket by group EXACTLY as _write_spec does: a host appended into an
+            # already-seen subnet is re-grouped under it, so a linear walk of ck_keys
+            # (where new keys land at the tail) would mis-count rows. Same bucketing =
+            # same rows, so the Overview links always land on the right Checklist row.
+            buckets: dict[str, list[str]] = {}
+            for k in ck_keys:
+                buckets.setdefault(by_key[k].get("group", ""), []).append(k)
+            for _gv, keys in buckets.items():
+                excel_row += 1                   # the subnet band row
+                for k in keys:
+                    excel_row += 1
+                    if k in key_ip:
+                        host_rows[key_ip[k]] = excel_row
+        else:
+            for k in ck_keys:
+                excel_row += 1
+                if k in key_ip:
+                    host_rows[key_ip[k]] = excel_row
 
     def _emit(spec):
         if spec.skip_if_empty and not spec.rows:
@@ -2183,6 +2401,9 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     _build_ftp(wb, meta.get("ftp") or {})
     _build_docker(wb, meta.get("docker") or {})
     _build_kubernetes(wb, meta.get("kubernetes") or {})
+    _build_ldap(wb, meta.get("ldap") or {})
+    _build_snmp(wb, meta.get("snmp") or {})
+    _build_mongodb(wb, meta.get("mongodb") or {})
     # AD cluster, kept contiguous: inventory -> quick wins -> import findings/paths
     # -> users & accounts.
     _build_active_directory(wb, hosts, domains)
@@ -2220,6 +2441,17 @@ def update_workbook(path: str, hosts: list[Host], meta: dict | None = None,
                           statuses, issues, credentials)
 
 
+def _header_index(rows: list[list[str]], *must_have: str) -> int:
+    """Row index of the column-header row: the first row that contains every token
+    in `must_have`. Sheets normally put headers on row 0, but a legend/note line can
+    push them down (e.g. the Checklist), so we locate them instead of assuming row 0.
+    Falls back to 0 when nothing matches, preserving the old behaviour."""
+    for i, r in enumerate(rows):
+        if all(tok in r for tok in must_have):
+            return i
+    return 0
+
+
 def read_key_order(path: str) -> dict[str, list[str]]:
     """{sheet_title: [keys in current row order]} from an existing workbook."""
     order: dict[str, list[str]] = {}
@@ -2230,11 +2462,12 @@ def read_key_order(path: str) -> dict[str, list[str]]:
     for title, rows in sheets.items():
         if not rows:
             continue
-        header = rows[0]
+        hidx = _header_index(rows, "Key")
+        header = rows[hidx]
         if "Key" not in header:
             continue
         kidx = header.index("Key")
-        order[title] = [r[kidx] for r in rows[1:] if len(r) > kidx and r[kidx]]
+        order[title] = [r[kidx] for r in rows[hidx + 1:] if len(r) > kidx and r[kidx]]
     return order
 
 
@@ -2254,32 +2487,37 @@ def read_workbook_edits(path: str) -> tuple[Tracking, dict]:
     for title, rows in sheets.items():
         if not rows:
             continue
-        header = rows[0]
         # Per-host step checkboxes live only on the Checklist (other sheets have
-        # a same-named "Vuln-scan" text column that must NOT be read as steps).
-        if title == CHECKLIST_TITLE and "IP" in header:
-            ipc = header.index("IP")
-            step_cols = [(header.index(h), s) for h, s in tr.STEP_COLUMNS.items()
-                         if h in header]
-            for r in rows[1:]:
-                if len(r) <= ipc or not r[ipc]:
-                    continue
-                ip = str(r[ipc])
-                for ci, step in step_cols:
-                    if ci >= len(r):
+        # a same-named "Vuln-scan" text column that must NOT be read as steps). The
+        # Checklist carries a legend line above its header, so find the header row.
+        if title == CHECKLIST_TITLE:
+            chidx = _header_index(rows, "IP")
+            cheader = rows[chidx]
+            if "IP" in cheader:
+                ipc = cheader.index("IP")
+                step_cols = [(cheader.index(h), s) for h, s in tr.STEP_COLUMNS.items()
+                             if h in cheader]
+                for r in rows[chidx + 1:]:
+                    if len(r) <= ipc or not r[ipc]:
                         continue
-                    cell = str(r[ci]).strip()
-                    if not cell or cell == tr.STEP_NA:
-                        continue   # N/A step - not a real checkbox, never an override
-                    result[tr.step_key(step, ip)] = (as_bool(r[ci]), "")
+                    ip = str(r[ipc])
+                    for ci, step in step_cols:
+                        if ci >= len(r):
+                            continue
+                        cell = str(r[ci]).strip()
+                        if not cell or cell == tr.STEP_NA:
+                            continue  # N/A step - not a real checkbox, never an override
+                        result[tr.step_key(step, ip)] = (as_bool(r[ci]), "")
 
+        hidx = _header_index(rows, "Key")
+        header = rows[hidx]
         if "Key" not in header:
             continue
         kidx = header.index("Key")
         cbidx = next((i for i, h in enumerate(header) if h in CHECKBOX_HEADERS), None)
         stidx = next((i for i, h in enumerate(header) if h in STATUS_HEADERS), None)
         nidx = header.index("Notes") if "Notes" in header else None
-        for r in rows[1:]:
+        for r in rows[hidx + 1:]:
             if len(r) <= kidx or not r[kidx]:
                 continue
             key = str(r[kidx])

@@ -371,6 +371,132 @@ def attack_paths(graph: dict, owned: set[str] | None = None,
     return out[:max_paths]
 
 
+# --- curated tier-0 architecture (for a graphical diagram) ----------------------
+
+# SharpHound encodes trust direction as an int (or, in older/hand-built JSON, a
+# string). Map both to a readable word.
+_TRUST_DIR = {0: "Disabled", 1: "Inbound", 2: "Outbound", 3: "Bidirectional",
+              "0": "Disabled", "1": "Inbound", "2": "Outbound", "3": "Bidirectional"}
+
+
+def _domain_names(graph: dict) -> dict[str, str]:
+    """sid -> display name for every domain object."""
+    out = {}
+    for sid, props in graph["domains"].items():
+        node = graph["nodes"].get(sid, {})
+        out[sid] = (node.get("name") or props.get("name") or sid).upper()
+    return out
+
+
+def architecture(graph: dict, max_nodes: int = 60) -> dict:
+    """A curated *tier-0* subgraph for a graphical architecture diagram — NOT the
+    whole BloodHound graph (which is unreadable). It keeps only what matters to
+    domain security: the domain object(s), the high-value groups, the Domain
+    Controllers, the privileged principals that are members of those groups, and
+    the control edges (ACL / DCSync) that reach a high-value object — plus domain
+    trust edges. Returns a JSON-serialisable dict:
+
+        {"nodes": {sid: {type, label, domain, hv, dc, tier}},
+         "edges": [[src, label, dst], ...],       # MemberOf / control / DCSync
+         "trusts": [[src_name, direction, dst_name], ...],
+         "truncated": bool}                        # True if members were capped
+
+    Tiers: 0 = domain object(s), 1 = high-value groups + Domain Controllers,
+    2 = their privileged members.
+    """
+    nodes = graph["nodes"]
+    hv = high_value_targets(graph)                 # domains + high-value groups/nodes
+    keep: dict[str, int] = {}                      # sid -> tier
+    truncated = False
+
+    # Tier 0: the domain object(s) at the top.
+    for sid in graph["domains"]:
+        keep[sid] = 0
+    # Tier 1: high-value groups / objects (Domain Admins, Administrators, ...).
+    for sid, node in hv.items():
+        if sid not in keep:
+            keep[sid] = 1
+    # Tier 1: Domain Controllers (the computers that anchor the domain).
+    for sid, node in nodes.items():
+        if node.get("type") == "Computer" and (is_dc(node) or is_highvalue(sid, node)):
+            if sid not in keep:
+                if len(keep) >= max_nodes:
+                    truncated = True
+                    break
+                keep[sid] = 1
+
+    # Reverse MemberOf adjacency: the members of each group.
+    members_of: dict[str, list[str]] = {}
+    for src, label, dst in graph["edges"]:
+        if label == "MemberOf":
+            members_of.setdefault(dst, []).append(src)
+
+    # Tier 2: the privileged members of the high-value groups (direct members —
+    # one hop keeps the picture legible; the full transitive set is in the paths).
+    for gsid in [s for s, t in keep.items() if t == 1]:
+        for msid in members_of.get(gsid, []):
+            if msid in keep:
+                continue
+            if len(keep) >= max_nodes:
+                truncated = True
+                break
+            keep[msid] = 2
+
+    # Tier 2 also: any principal holding a control edge (ACL / DCSync) INTO a kept
+    # tier-0 object — it can seize tier-0, so the diagram must show it.
+    for src, label, dst in graph["edges"]:
+        if dst not in keep or src in keep:
+            continue
+        if label == "DCSync" or label in _CONTROL_RIGHTS:
+            if len(keep) >= max_nodes:
+                truncated = True
+                break
+            keep[src] = 2
+
+    # Edges wholly inside the kept set: MemberOf (membership), DCSync, and control
+    # ACLs (GenericAll/WriteDacl/...). Deduped.
+    out_edges, seen = [], set()
+    for src, label, dst in graph["edges"]:
+        if src not in keep or dst not in keep:
+            continue
+        if label == "MemberOf" or label == "DCSync" or label in _CONTROL_RIGHTS:
+            k = (src, label, dst)
+            if k not in seen:
+                seen.add(k)
+                out_edges.append([src, label, dst])
+
+    # Domain trust edges (observed on the domain objects, never inferred).
+    dnames = _domain_names(graph)
+    trusts = []
+    for sid, props in graph["domains"].items():
+        src_name = dnames.get(sid, sid)
+        for t in props.get("_trusts") or []:
+            if not isinstance(t, dict):
+                continue
+            tgt = (t.get("TargetDomainName") or t.get("name")
+                   or t.get("TargetDomainSid") or "")
+            if not tgt:
+                continue
+            direction = t.get("TrustDirection", t.get("direction", ""))
+            trusts.append([src_name, _TRUST_DIR.get(direction, str(direction) or ""),
+                           str(tgt).upper()])
+
+    out_nodes = {}
+    for sid, tier in keep.items():
+        node = nodes.get(sid) or {"type": "Domain", "name": dnames.get(sid, sid),
+                                  "domain": "", "props": {}}
+        out_nodes[sid] = {
+            "type": node.get("type", "Base"),
+            "label": short(node) if node.get("name") else dnames.get(sid, sid),
+            "domain": (node.get("domain") or "").upper(),
+            "hv": bool(sid in hv or is_highvalue(sid, node)),
+            "dc": bool(node.get("type") == "Computer" and is_dc(node)),
+            "tier": tier,
+        }
+    return {"nodes": out_nodes, "edges": out_edges, "trusts": trusts,
+            "truncated": truncated}
+
+
 # --- misconfiguration / vulnerability findings ----------------------------------
 
 def _finding(cat, sev, title, principal, target, detail, tool, cmd, rem):
@@ -924,7 +1050,8 @@ def empty_analysis() -> dict:
     """A base analysis dict for when there is no SharpHound graph (e.g. only a
     Certipy ADCS import). Findings get merged in by the caller."""
     return {"stats": {"nodes": 0, "edges": 0, "by_type": {}, "findings": 0, "paths": 0},
-            "findings": [], "paths": [], "kerberos": [], "domains": []}
+            "findings": [], "paths": [], "kerberos": [], "domains": [],
+            "architecture": {"nodes": {}, "edges": [], "trusts": [], "truncated": False}}
 
 
 def analyze(path: str, owned: set[str] | None = None,
@@ -948,4 +1075,5 @@ def analyze(path: str, owned: set[str] | None = None,
                   "by_type": types,
                   "findings": len(fs), "paths": len(paths)},
         "findings": fs, "paths": paths, "kerberos": kerb, "domains": doms,
+        "architecture": architecture(graph),
     }

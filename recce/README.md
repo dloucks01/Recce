@@ -22,6 +22,11 @@ paths from your account to Domain Admin.
 > `python3 -m recce`, and a **Start Here** tab inside every workbook that
 > explains each sheet.
 
+> ⚖️ **Authorized use only.** recce is for security work you have written
+> permission to perform. Its safety controls, the intrusive actions that are
+> opt-in/flag-gated, and your responsibilities as an operator are all documented
+> in **[SECURITY.md](SECURITY.md)** — read it before your first engagement.
+
 ## Why this over raw nmap / AutoRecon?
 
 Existing tools scan well but leave you with per-host output files. `recce`
@@ -168,6 +173,20 @@ sudo python -m recce vulns -o acme --unscanned     # only what's left
 sudo python -m recce vulns -o acme --aggressive    # intrusive vuln NSE
 sudo python -m recce vulns -o acme --fast          # top-signal only + progress/ETA
 
+# ── Phase 3: the deep pass — one command instead of ~9 ──
+#   sweep = every applicable credential-free deep module in one shot; each
+#   self-skips when the datastore has no matching service, and the workbook is
+#   rebuilt once at the end. Run the individual commands only to focus.
+python -m recce sweep -o acme                       # web/smb/ftp/ldap/snmp/
+                                                    # mongodb/docker/k8s/mssql
+python -m recce sweep -o acme --only-modules web smb   # narrow to a couple
+python -m recce sweep -o acme --vulns               # also run the NSE vuln scan
+python -m recce sweep -o acme --skip mssql          # exclude one
+
+#   credsweep = the authenticated counterpart, once you have creds: the
+#   netexec/impacket phase (credenum) + authenticated ldap/smb/mssql/ftp.
+python -m recce credsweep -u alice -p 'Passw0rd!' -d corp.local -o acme
+
 # ── Databases (per host / subnet / range, safe by default) ──
 sudo python -m recce db -o acme                    # all DB services
 sudo python -m recce db 10.0.20.6 -o acme --aggressive  # brute/xp_cmdshell
@@ -207,16 +226,20 @@ The step columns are **two kinds**, and each **only appears where it applies**
   - **Enumerated** — universal. **Vuln-scan** — any host with an open port.
   - **Web** — hosts serving HTTP/HTTPS; green once the web ports are scanned.
   - **DB** — hosts running a database; green once `db` runs.
+  - **Access** — green once a credentialed step confirms a foothold on the host
+    (valid creds / local admin via `credenum`/`credsweep`, an SSH session, or a
+    working MSSQL login). You can also record a foothold you got another way with
+    `recce access --host IP --note '...'`, and untick to override.
+  - **Priv-esc** — appears once the `privesc` phase has run against the host.
 - **Manual sign-offs** — operator work the tool can't detect; start unchecked,
   you tick them as you go:
   - **AD** — only on **domain controllers / directory hosts** (LDAP / Kerberos /
     GC, or a discovered DC role). A plain SMB file server is *not* an AD host —
     its SMB surface is tracked per-port on the **Services** tab. Tick AD once
     you've reviewed users/shares/roasting/delegation/ADCS.
-  - **Access** (initial access / shell / valid creds on this host) → **Priv-esc**
-    (appears once the `privesc` phase runs) → **Creds** (harvested secrets) →
-    **Lateral** (tried credential reuse / pivot from here). These are the
-    kill-chain coverage markers — they answer "did we actually try?" per host.
+  - **Creds** (harvested secrets) → **Lateral** (tried credential reuse / pivot
+    from here). These are the kill-chain coverage markers — they answer "did we
+    actually try?" per host.
 - The long tail of services — **SMB, remote access (SSH/RDP/WinRM/VNC), mail,
   SNMP, DNS, …** — deliberately has **no column here**; each such port is tracked
   with its own tri-state status on the **Services** tab, so the checklist stays
@@ -282,6 +305,19 @@ curated non-destructive detection set so they run, with nothing extra to remembe
 `--aggressive` adds the full intrusive `vuln` category (XSS/SQLi/DoS probes — can
 hang printers/OT/old services). Optional top-N UDP with `--udp-top`.
 
+**`sweep` / `credsweep` (the deep pass — one command each):** after `enum`
+(+`vulns`), rather than running the deep service modules one at a time, `sweep`
+runs every applicable **credential-free** module (`web` / `smb` / `ftp` / `ldap` /
+`snmp` / `mongodb` / `docker` / `kubernetes` / `mssql`) and `credsweep` runs the
+**authenticated** ones (`credenum` plus the authenticated facets of `ldap` /
+`smb` / `mssql` / `ftp`). Each module self-skips when the datastore has no
+matching service, findings fold into the same sheets, and the workbook rebuilds
+once at the end. `sweep` refuses credentials (a credentialed action must be
+explicit — use `credsweep`); `credsweep` requires `-u/-p`. Both take
+`--only-modules` / `--skip` to narrow the set. The per-module commands (below)
+still exist for when you want to focus one service or pass module-specific
+options.
+
 ## Enumeration & vulnerability identification
 
 Both `enum` (deep enumeration) and `vulns` run a large, **service-aware** NSE set —
@@ -332,6 +368,26 @@ airgapped, none need internet):
    X-Content-Type-Options, version-disclosing `Server` banners) and **TLS
    certificate & protocol analysis** (expired/self-signed/soon-to-expire certs,
    hostname mismatch, negotiable SSLv3/TLS 1.0/1.1). Disable with `--no-probes`.
+   The web sweep (`web.py`) also carries **data-driven application signatures** —
+   fingerprint + a self-proving unauthenticated path — for high-value apps:
+   **Jenkins** (unauth script-console RCE), **Keycloak** (admin console),
+   **Grafana** (CVE-2021-43798 file read), **HashiCorp Vault**, **Elasticsearch**
+   (unauth index read), **Kibana**, plus exposed `.git`/`.env`, Spring Actuator
+   and Tomcat Manager. With `--creds` it runs a bounded, lockout-aware
+   **default-credential** probe (HTTP Basic + form/JSON logins: Grafana
+   `admin/admin`, MinIO `minioadmin`, RabbitMQ `guest/guest`). With `--crawl`
+   it same-origin crawls each site and fuzzes **discovered GET params and form
+   fields** for reflection/SSTI and **SQL injection** — error-based (MySQL/
+   PostgreSQL/MSSQL/Oracle/SQLite error signatures), boolean-based blind
+   (true≈baseline vs false-diverges, re-tested, skipped on dynamic pages), and
+   opt-in time-based blind (`--sqli-time`), plus **open redirect** and generic
+   **path traversal / local file read** on the same params/fields. Payloads are
+   non-destructive (quote-break + `AND`/sleep, traversal reads only; never
+   stacked `DROP`/`UPDATE`/`DELETE`); destructive-looking forms and
+   password/anti-CSRF fields are never touched. Every response's **cookies** are
+   graded too — missing HttpOnly/Secure/SameSite, `SameSite=None` without Secure,
+   a session cookie over cleartext HTTP, a missing `__Host-`/`__Secure-` prefix,
+   or an over-broad parent `Domain`.
 4. **`searchsploit` (Exploit-DB, offline)** maps every service's product+version
    to known public exploits on a dedicated **Exploits** sheet (EDB-ID, type,
    title, CVEs, local path).
@@ -569,6 +625,20 @@ python -m recce review -o engagement --host 10.0.10.25 --undo
 
 # Edit checkboxes in Excel, then pull them into the datastore + refresh:
 python -m recce report -o engagement
+```
+
+**Initial access is tracked automatically.** The `Access` step is no longer a
+manual checkbox — recce marks a host as *access gained* whenever a credentialed
+phase confirms a foothold (valid creds / local admin via `credenum`/`credsweep`,
+an SSH session, or a working MSSQL login), and the Access step auto-ticks. Review
+the picture — or record a foothold you gained another way — with the `access`
+command:
+
+```bash
+python -m recce access -o engagement                       # who do I have a foothold on?
+python -m recce access -o engagement --host 10.0.10.25 \
+       --note "SYSTEM via PrintNightmare"                  # record a manual foothold
+python -m recce access -o engagement --host 10.0.10.25 --undo   # clear it
 ```
 
 `status` output:
@@ -854,11 +924,57 @@ and the write-ups, and populate a dedicated **Kubernetes** tab.
 python -m recce k8s -o eng          # probe kubelet / apiserver / etcd, CONFIRM exposure
 ```
 
+## SNMP (`recce snmp`)
+
+A hand-rolled SNMP **v2c** client on a raw UDP socket (BER/ASN.1 with OID base-128
+encoding and GETNEXT walking — no pysnmp), so it runs on a stock airgapped Kali. A
+read-write community is flagged by *name* (private/write/manager/secret). Safety
+posture: see [SECURITY.md](SECURITY.md).
+
+- **Community guessing** — GET `sysDescr` with a list of common community strings
+  (public/private/community/…); the first that answers is a readable community.
+- **System group** — `sysDescr` / `sysName` identify the host pre-auth.
+- **Walks** — the Windows **LanManager user table** (local accounts → a spray list),
+  **running processes** and **installed software** (AV/EDR + unpatched builds), and
+  interface descriptions.
+
+Enumerated accounts become `Account` rows in **Users & Accounts**. Each read *is* the
+proof — findings (guessable community, exposed users, process/software inventory) feed
+the main totals, the Vulnerabilities sheet and the write-ups, populate a dedicated
+**SNMP** tab, and are adjudicated **CONFIRMED** by the prove engine. SNMP discovery is
+itself a GET, so no prior UDP scan is required — recce probes 161 directly.
+
+```bash
+python -m recce snmp -o eng          # guess the community, walk users/processes/software
+python -m recce snmp --no-probe -o eng   # just write the commands (no live probe)
+```
+
+## MongoDB (`recce mongodb` / `recce mongo`)
+
+A hand-rolled MongoDB **wire-protocol** client (OP_MSG opcode 2013 with a minimal
+BSON encoder/decoder — no pymongo). Airgapped, stdlib only.
+
+- **hello / buildInfo** — fingerprint the version and replica-set role.
+- **`listDatabases` without authentication** — the discriminator. If the instance
+  returns the database list, it is exposed unauthenticated (**full read/write to every
+  database**) → a **critical** finding. If it errors "not authorized", auth is
+  enforced and recce reports it reachable-but-locked (no finding). An end-of-life
+  build raises a medium.
+
+The successful unauthenticated `listDatabases` *is* the proof — findings feed the main
+totals, the Vulnerabilities sheet and the write-ups, populate a dedicated **MongoDB**
+tab, and are adjudicated **CONFIRMED** by the prove engine (with a `mongodump` next
+step in the exploit plan).
+
+```bash
+python -m recce mongodb -o eng       # fingerprint + CONFIRM unauthenticated listDatabases
+```
+
 ## Output (`<output-dir>/`)
 
 | File | Contents |
 |------|----------|
-| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Docker** (exposed Engine API) · **Kubernetes** (kubelet/API/etcd exposure) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
+| `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Docker** (exposed Engine API) · **Kubernetes** (kubelet/API/etcd exposure) · **LDAP** (AD directory enum) · **SNMP** (community walk + users/software) · **MongoDB** (unauthenticated exposure) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
 | `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |
@@ -882,6 +998,24 @@ Override with `--all-ports`, `--top-ports`, `--no-ad`, `--no-os`, `--min-rate`,
 `--udp-top`, `--version-all`/`--version-intensity N` (service detection), and
 `--host-timeout N` (minutes). (Vuln scanning is its own `vulns` phase, safe-by-default.)
 
+**Basic UDP is scanned in `enum` by default** (needs root): a curated high-value set —
+DNS, DHCP, TFTP, NTP, NetBIOS, SNMP, IKE/VPN, syslog, IPMI, MSSQL-browser, SIP, SSDP,
+mDNS — so a TCP-only sweep doesn't silently miss UDP services. `--no-udp` skips it;
+`--udp-top N` runs the larger UDP scan in the `vulns` phase.
+
+**Scope exclusions** — `--exclude` takes IPs / ranges / CIDRs **or `@file`**, and the
+exclusion set is **persisted to the engagement**: once an IP is excluded it stays out
+of scope on every later phase and re-run without re-typing it.
+
+**Full port scan is the default and it's stated up front.** `standard`/`thorough`
+sweep all 65535 TCP ports (`-p-`); recce prints the port scope when the enum phase
+starts and records it (echoed by `status`). A reduced scan — `quick`, `--top-ports N`,
+or `--fast` — prints a loud `PARTIAL, NOT a full scan` warning so it can't be mistaken
+for complete. `--all-ports` forces the full sweep and **overrides the profile** (applied
+last), so `recce enum --profile quick --all-ports` still scans everything. A host whose
+full sweep hits `--host-timeout` is flagged as an INCOMPLETE (partial) port list rather
+than trusted as empty.
+
 **Reliability.** Every scan has a per-host time ceiling (`--host-timeout`): nmap
 gives up on a stuck host and moves on rather than hanging the run, and a hard
 subprocess timeout backstops a truly wedged nmap. Anything that **errors or
@@ -890,6 +1024,27 @@ doesn't finish** is logged to `engagement/recce.log`, listed at the top of the
 scan never disappears silently. Service detection runs at higher intensity in
 the `enum` phase (it feeds the offline vuln DB); the `vulns` phase only does a
 light version probe since enum already has the versions.
+
+**No false "host down" / "no ports open".** The discovery sweep SYN-pings a broad
+port set including the ports firewalled Windows/AD hosts still answer (Kerberos 88,
+LDAP 389, WinRM 5985) and retries dropped probes. Live hosts that block ping are
+still caught four ways: a **partial** sweep **reconfirms** every non-responder with a
+fast `-Pn` top-ports scan (any open port = up — recovers firewalled boxes;
+`--no-reconfirm` to skip); a **zero-response** sweep auto-falls back to `-Pn` (scan
+everything as up); a host that comes back with **0 ports** is re-scanned with
+congestion-adaptive timing (no `--min-rate` floor, more retries) before "no ports" is
+trusted; and a `-Pn` host still silent on TCP gets a **UDP liveness ping**, so a
+firewalled-but-alive box is confirmed up, never ruled dead. A host is only ever shown
+as confirmed-up on a **real reply** (or an open port) — a silent host stays UNKNOWN,
+never marked down.
+
+**Authoritative target list (`--targets-up`).** When you have a complete IP/hostname
+list you trust, pass `--targets-up` with an `@file` (lines may be `IP hostname`, space/
+comma/tab-separated). recce treats the list as ground truth: it implies `-Pn` and
+**pre-seeds every target into the report up front** (named, `up_reason=target-list`), so
+a slow, timed-out, crashed, or even hard-killed scan can **never** make a real host
+vanish — the host is already recorded and scanning only enriches it (rebuild anytime
+with `recce report`).
 
 ## Command & option reference
 

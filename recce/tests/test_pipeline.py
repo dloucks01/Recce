@@ -23,9 +23,19 @@ from recce.targets import apply_exclusions, load_targets
 SAMPLE = os.path.join(os.path.dirname(parser.__file__), "sample_scan.xml")
 
 
+def header_index(rows, *must_have):
+    """Row index of the real column-header row (first row holding every token in
+    must_have). The Checklist puts a legend line above its header, so callers must
+    locate it rather than assume row 0."""
+    for i, r in enumerate(rows):
+        if all(tok in r for tok in must_have):
+            return i
+    return 0
+
+
 class TargetsTest(unittest.TestCase):
     def test_cidr_and_range(self):
-        hosts, sm = load_targets(["10.0.0.0/30", "192.168.1.5-8"])
+        hosts, sm, _ = load_targets(["10.0.0.0/30", "192.168.1.5-8"])
         self.assertEqual(hosts, ["10.0.0.1", "10.0.0.2", "192.168.1.5",
                                  "192.168.1.6", "192.168.1.7", "192.168.1.8"])
         # A CIDR token becomes the subnet label for its hosts.
@@ -34,19 +44,19 @@ class TargetsTest(unittest.TestCase):
         self.assertEqual(sm["192.168.1.5"], "192.168.1.0/24")
 
     def test_exclusions(self):
-        hosts, _ = load_targets(["192.168.1.0/29"])
+        hosts, _, _ = load_targets(["192.168.1.0/29"])
         kept = apply_exclusions(hosts, ["192.168.1.1", "192.168.1.2-3"])
         self.assertNotIn("192.168.1.1", kept)
         self.assertNotIn("192.168.1.3", kept)
         self.assertIn("192.168.1.4", kept)
 
     def test_dedup(self):
-        hosts, _ = load_targets(["10.0.0.1", "10.0.0.1", "10.0.0.0/30"])
+        hosts, _, _ = load_targets(["10.0.0.1", "10.0.0.1", "10.0.0.0/30"])
         self.assertEqual(hosts.count("10.0.0.1"), 1)
 
     def test_range_drops_network_and_broadcast(self):
         # A full-octet range means "the subnet", not "scan .0 and .255".
-        hosts, _ = load_targets(["10.200.37.0-255"])
+        hosts, _, _ = load_targets(["10.200.37.0-255"])
         self.assertNotIn("10.200.37.0", hosts)
         self.assertNotIn("10.200.37.255", hosts)
         self.assertIn("10.200.37.1", hosts)
@@ -54,8 +64,45 @@ class TargetsTest(unittest.TestCase):
 
     def test_explicit_single_dot_zero_is_respected(self):
         # An explicitly-typed single address is kept (the user asked for it).
-        hosts, _ = load_targets(["10.200.37.0"])
+        hosts, _, _ = load_targets(["10.200.37.0"])
         self.assertEqual(hosts, ["10.200.37.0"])
+
+    def test_exclude_accepts_ips_cidrs_and_file(self):
+        from recce.targets import apply_exclusions, expand_excludes
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "ex.txt")
+            with open(f, "w") as fh:
+                fh.write("10.0.0.9 badbox\n10.0.0.16/30\n# note\n")
+            ex = expand_excludes(["10.0.0.5", "@" + f, "192.168.1.1"])
+        self.assertIn("10.0.0.5", ex)
+        self.assertIn("10.0.0.9", ex)          # IP from an 'IP hostname' file line
+        self.assertIn("10.0.0.17", ex)         # from the CIDR in the file
+        self.assertIn("192.168.1.1", ex)
+        kept = apply_exclusions(["10.0.0.5", "10.0.0.6", "192.168.1.1"],
+                                ["10.0.0.5", "192.168.1.1"])
+        self.assertEqual(kept, ["10.0.0.6"])
+
+    def test_file_parses_ip_hostname_pairs(self):
+        # An authoritative @file may carry IP+hostname (space / comma / tab / hosts-
+        # file style); the name is captured and the IP is still the scan target.
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "scope.txt")
+            with open(f, "w") as fh:
+                fh.write("10.0.0.5 dc01.corp.local\n"
+                         "10.0.0.6,web01\n"
+                         "10.0.0.7\tmail01 alias.corp\n"
+                         "10.0.0.0/30\n"          # a CIDR: no bogus name attached
+                         "# a comment line\n"
+                         "\n"
+                         "203.0.113.9\n")         # bare IP, no name
+            hosts, _, names = load_targets(["@" + f])
+        self.assertIn("10.0.0.5", hosts)
+        self.assertIn("10.0.0.1", hosts)          # CIDR expanded
+        self.assertEqual(names["10.0.0.5"], "dc01.corp.local")
+        self.assertEqual(names["10.0.0.6"], "web01")
+        self.assertEqual(names["10.0.0.7"], "mail01")   # first non-IP token wins
+        self.assertNotIn("10.0.0.1", names)       # a CIDR line gets no hostname
+        self.assertNotIn("203.0.113.9", names)
 
 
 class ParserTest(unittest.TestCase):
@@ -441,10 +488,11 @@ class InPlaceUpdateTest(unittest.TestCase):
             update_workbook(out, self._hosts(["10.0.0.10", "10.0.0.20", "10.0.0.1"]),
                             tracking={tr.host_key("10.0.0.10"): (True, "done")})
             rows = xlsx.read_sheets(out)["Checklist"]
-            hdr = rows[0]
+            hidx = header_index(rows, "IP")
+            hdr = rows[hidx]
             ipc = hdr.index("IP")
             # Skip the collapsible subnet band rows (empty Reviewed checkbox cell).
-            data_rows = [r for r in rows[1:]
+            data_rows = [r for r in rows[hidx + 1:]
                          if r[0] in (xlsx.CHECK_ON, xlsx.CHECK_OFF)]
             ips = [r[ipc] for r in data_rows]
         # Existing order kept; new IP appended last (not sorted in).
@@ -1344,7 +1392,10 @@ class RobustnessTest(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 result = cli._discover(args, profile, store, paths)
             store.close()
-            self.assertEqual(result, (None, [], None))
+            # 5-tuple (…, disc_reasons, hostname_map) matching what cmd_enum/cmd_scan
+            # unpack; the error path must not return a short tuple (that crashed the
+            # caller).
+            self.assertEqual(result, (None, [], None, None, {}))
             self.assertIn("Invalid targets", buf.getvalue())
 
     def test_main_top_level_guard_returns_clean_on_crash(self):
@@ -1551,8 +1602,10 @@ class SubnetCoverageTest(unittest.TestCase):
 
     def test_checklist_grouped_by_subnet(self):
         from recce.report_excel import _spec_checklist
-        hosts = [Host(ip="10.0.20.9", subnet="10.0.20.0/24"),
-                 Host(ip="10.0.10.5", subnet="10.0.10.0/24")]
+        # up_reason set: a real discovery reply keeps a 0-port host on the list (the
+        # Checklist shows only confirmed-up hosts).
+        hosts = [Host(ip="10.0.20.9", subnet="10.0.20.0/24", up_reason="syn-ack"),
+                 Host(ip="10.0.10.5", subnet="10.0.10.0/24", up_reason="echo-reply")]
         spec = _spec_checklist(hosts)
         rows = spec.rows
         # Sorted by subnet then IP -> 10.0.10.x before 10.0.20.x.
@@ -1578,13 +1631,14 @@ class SubnetCoverageTest(unittest.TestCase):
             build_workbook([clean, crit], out,
                            tracking={_tr.host_key("10.0.10.1"): (True, "")})
             rows = xlsx.read_sheets(out)["Checklist"]
-        ipc = rows[0].index("IP")
-        band = next(r for r in rows[1:] if str(r[ipc]).startswith("10.0.10.0/24"))
+        hidx = header_index(rows, "IP")
+        ipc = rows[hidx].index("IP")
+        band = next(r for r in rows[hidx + 1:] if str(r[ipc]).startswith("10.0.10.0/24"))
         self.assertIn("2 hosts", str(band[ipc]))
         self.assertIn("1/2 reviewed", str(band[ipc]))
         self.assertIn("high/crit", str(band[ipc]))                # the critical host
         # Risk-first: the critical host sorts above the clean host within the subnet.
-        host_ips = [r[ipc] for r in rows[1:]
+        host_ips = [r[ipc] for r in rows[hidx + 1:]
                     if r[0] in (_x.CHECK_ON, _x.CHECK_OFF)]
         self.assertEqual(host_ips, ["10.0.10.9", "10.0.10.1"])
 
@@ -1594,6 +1648,336 @@ class SubnetCoverageTest(unittest.TestCase):
             store.set_scope("10.0.0.0/24", 254)
             store.set_scope("10.0.0.0/24", 100)  # keeps the larger
             self.assertEqual(store.get_scope()["10.0.0.0/24"], 254)
+            store.close()
+
+
+class AuditRegressionTest(unittest.TestCase):
+    """Regression coverage for bugs found in the full-codebase audit."""
+
+    def test_store_merge_preserves_port_enrichment_fields(self):
+        # binary/detect_source/banner (set by ingest/deploy on an existing port) must
+        # survive a later merge, not be dropped.
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "s.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.5",
+                                ports=[Port(portid=22, service="ssh", state="open")]))
+            st.upsert_host(Host(ip="10.0.0.5", ports=[Port(
+                portid=22, service="ssh", state="open", binary="/usr/sbin/sshd",
+                detect_source="local", banner="SSH-2.0-OpenSSH")]))
+            p = st.get_host("10.0.0.5").ports[0]
+            self.assertEqual(p.binary, "/usr/sbin/sshd")
+            self.assertEqual(p.detect_source, "local")
+            self.assertEqual(p.banner, "SSH-2.0-OpenSSH")
+            st.close()
+
+    def test_store_merge_folds_account_attrs(self):
+        from recce.store import Store
+        from recce.models import Account
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "s.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.5", accounts=[Account(
+                ip="10.0.0.5", source="ldap", kind="user", name="svc")]))
+            st.upsert_host(Host(ip="10.0.0.5", accounts=[Account(
+                ip="10.0.0.5", source="ldap", kind="user", name="svc",
+                attrs={"spn": "MSSQLSvc/db", "admincount": "1"})]))
+            a = st.get_host("10.0.0.5").accounts[0]
+            self.assertEqual(a.attrs.get("spn"), "MSSQLSvc/db")
+            self.assertEqual(a.attrs.get("admincount"), "1")
+            st.close()
+
+    def test_smb2_negotiate_rejects_error_response(self):
+        import struct
+        from recce import smb
+        # A valid NEGOTIATE OK (command 0, status 0, StructureSize 65) parses...
+        hdr = b"\xfeSMB" + b"\x40\x00" + b"\x00\x00" + b"\x00\x00\x00\x00" + \
+              b"\x00\x00" + b"\x01\x00" + b"\x00" * (64 - 16)
+        body_ok = struct.pack("<H", 65) + struct.pack("<H", 0x0003) + \
+            struct.pack("<H", 0x0300) + b"\x00" * 40
+        ok = smb.parse_smb2_negotiate(b"\x00\x00\x00\x00" + hdr + body_ok)
+        self.assertIsNotNone(ok)
+        # ...but an ERROR response (STATUS_INVALID_PARAMETER) is rejected, not read as
+        # a dialect-0 / signing-not-required host.
+        err_hdr = b"\xfeSMB" + b"\x40\x00" + b"\x00\x00" + b"\x0d\x00\x00\xc0" + \
+                  b"\x00\x00" + b"\x01\x00" + b"\x00" * (64 - 16)
+        self.assertIsNone(smb.parse_smb2_negotiate(
+            b"\x00\x00\x00\x00" + err_hdr + b"\x09\x00" + b"\x00" * 6))
+
+    def test_ftp_write_proof_flags_failed_cleanup(self):
+        from recce import ftp
+        ok = ftp.write_proof_finding("1.2.3.4", 21,
+                                     {"writable": True, "cleanup_ok": True,
+                                      "evidence": "x", "marker": "m.txt"}, None)
+        self.assertIn("fully reversible", ok["detail"])
+        bad = ftp.write_proof_finding("1.2.3.4", 21,
+                                      {"writable": True, "cleanup_ok": False,
+                                       "evidence": "x", "marker": "m.txt"}, None)
+        self.assertIn("CLEANUP FAILED", bad["detail"])
+        self.assertNotIn("fully reversible", bad["detail"])
+
+    def test_nullsession_verdict_needs_anonymous_marker(self):
+        from recce import proofs
+        from recce.models import Vuln, Host
+        h = Host(ip="1.1.1.1")
+        # A credentialed share listing (no anon marker) -> LIKELY, not a false CONFIRMED.
+        cred = Vuln(ip="1.1.1.1", port=445, protocol="tcp", script_id="smb-enum-shares",
+                    title="shares", output="Shares\n  account_used: corp\\alice",
+                    source="nse", state="finding")
+        self.assertEqual(proofs._v_nullsession(h, None, cred)[0], proofs.LIKELY)
+        # An anonymous session marker -> CONFIRMED.
+        anon = Vuln(ip="1.1.1.1", port=445, protocol="tcp", script_id="smb-enum-shares",
+                    title="shares", output="Shares\n  account_used: <blank>",
+                    source="nse", state="finding")
+        self.assertEqual(proofs._v_nullsession(h, None, anon)[0], proofs.CONFIRMED)
+
+    def test_checklist_sqref_is_range_compressed(self):
+        from recce.report_excel import _col_sqref, build_workbook
+        # Unit: contiguous rows collapse to one range token; gaps split runs.
+        self.assertEqual(_col_sqref("A", [4, 5, 6, 8, 9]), "A4:A6 A8:A9")
+        self.assertEqual(_col_sqref("J", [4]), "J4")
+        self.assertEqual(_col_sqref("J", []), "")
+        # End-to-end: a subnet of contiguous hosts must emit a RANGE, not a per-cell
+        # list, in the Checklist step-column validations (keeps the XML tiny at scale).
+        import zipfile
+        import re as _re
+        hosts = [Host(ip=f"10.0.0.{i}", subnet="10.0.0.0/24", state="up",
+                      enumerated=True,
+                      ports=[Port(portid=445, service="smb", state="open",
+                                  vuln_scanned=True)]) for i in range(1, 6)]
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook(hosts, out)
+            with zipfile.ZipFile(out) as z:
+                blobs = [z.read(n).decode() for n in z.namelist()
+                         if "worksheets/sheet" in n]
+        # Some sheet's validation sqref is a contiguous range spanning >1 row.
+        sqrefs = [s for x in blobs
+                  for s in _re.findall(r'<dataValidation[^>]*sqref="([^"]+)"', x)]
+        self.assertTrue(any(_re.fullmatch(r"[A-Z]+\d+:[A-Z]+\d+", s) for s in sqrefs),
+                        f"expected a compressed range sqref, got {sqrefs}")
+
+    def test_fold_service_findings_refreshes_only_its_own_source(self):
+        # The shared deep-service fold helper must replace THIS source's prior vulns
+        # (a re-run doesn't duplicate) while leaving other sources untouched.
+        from recce import cli
+        from recce.store import Store
+        from recce.models import Vuln
+
+        def mk(src, title):
+            return Vuln(ip="10.0.0.5", port=445, protocol="tcp", script_id="x",
+                        title=title, severity="high", source=src, state="finding")
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "s.sqlite"))
+            h = Host(ip="10.0.0.5", ports=[Port(portid=445, state="open")],
+                     vulns=[mk("nse", "keep-me"), mk("smb", "stale-smb")])
+            st.upsert_host(h)
+            analysis = {"findings": [{"title": "New SMB issue", "target": "10.0.0.5:445",
+                                      "severity": "critical", "detail": "d"}],
+                        "stats": {}}
+            import io as _io
+            import contextlib as _c
+            with _c.redirect_stdout(_io.StringIO()):
+                cli._fold_service_findings(st, [st.get_host("10.0.0.5")], analysis,
+                                           "smb", __import__("recce.smb", fromlist=["x"]).findings_to_vulns,
+                                           "SMB")
+            got = st.get_host("10.0.0.5")
+            titles = {v.title for v in got.vulns}
+            self.assertIn("keep-me", titles)            # other source preserved
+            self.assertNotIn("stale-smb", titles)       # prior smb vuln refreshed away
+            self.assertIn("New SMB issue", titles)      # new smb finding folded in
+            self.assertEqual(st.get_meta("smb") is not None, True)
+            st.close()
+
+    def test_shared_findings_to_vulns_keeps_source_prefix_port(self):
+        # The 5 service modules now delegate to svccommon; the source label, the
+        # script_id prefix (k8s differs from its 'kubernetes' source) and the default
+        # port must survive.
+        from recce import smb, kubernetes, docker
+        f = {"target": "1.2.3.4", "title": "X", "severity": "high",
+             "detail": "d", "cwes": ["CWE-306"]}
+        vs = smb.findings_to_vulns([dict(f)])["1.2.3.4"][0]
+        self.assertEqual((vs.source, vs.port), ("smb", 445))
+        self.assertTrue(vs.script_id.startswith("smb:"))
+        kv = kubernetes.findings_to_vulns([dict(f)])["1.2.3.4"][0]
+        self.assertEqual(kv.source, "kubernetes")
+        self.assertTrue(kv.script_id.startswith("k8s:"))    # prefix != source
+        dv = docker.findings_to_vulns([{**f, "target": "1.2.3.4:2375"}])["1.2.3.4"][0]
+        self.assertEqual((dv.source, dv.port), ("docker", 2375))
+
+    def test_eol_recipe_does_not_swallow_rce_findings(self):
+        from recce import proofs
+        from recce.models import Vuln
+
+        def mk(t):
+            return Vuln(ip="1.1.1.1", port=445, protocol="tcp", script_id="x",
+                        title=t, output=t, source="version-db", state="finding")
+        # Pure EOL -> eol-service; legacy-but-RCE -> routed to a real version-CVE verdict.
+        self.assertEqual(proofs.recipe_for(mk("Legacy MongoDB (<3.6) no-auth"))["id"],
+                         "eol-service")
+        self.assertEqual(
+            proofs.recipe_for(mk("Legacy Samba 3.x - multiple RCE (cve-2007-2447)"))["id"],
+            "version-cve-generic")
+        # SambaCry now gets a Verification row at all (previously None).
+        self.assertIsNotNone(proofs.recipe_for(
+            mk("Samba CVE-2017-7494 SambaCry remote code execution")))
+
+
+class HostUpCertaintyTest(unittest.TestCase):
+    """The Checklist shows only hosts we can PROVE are up - but is never allowed to
+    write a live host off as down. is_up is the single source of that judgement."""
+
+    def test_is_up_only_on_positive_evidence(self):
+        from recce.models import Vuln
+        # An open port is unambiguous proof.
+        self.assertTrue(Host(ip="1.1.1.1",
+                             ports=[Port(portid=22, state="open")]).is_up)
+        # A finding means a service actually responded.
+        self.assertTrue(Host(ip="1.1.1.1",
+                             vulns=[Vuln(ip="1.1.1.1", port=0, protocol="tcp",
+                                         script_id="x", title="t", severity="low",
+                                         source="nse", state="finding")]).is_up)
+        # `enumerated` alone is NOT proof: the pipeline sets it on every host it tries,
+        # including a dead -Pn IP that answered nothing.
+        self.assertFalse(Host(ip="1.1.1.1", enumerated=True).is_up)
+        # A real nmap discovery reply (not the -Pn assume-up).
+        self.assertTrue(Host(ip="1.1.1.1", up_reason="echo-reply").is_up)
+        self.assertTrue(Host(ip="1.1.1.1", up_reason="arp-response").is_up)
+        # DNS / ARP / OS evidence => it answered something.
+        self.assertTrue(Host(ip="1.1.1.1", mac="00:11:22:33:44:55").is_up)
+        self.assertTrue(Host(ip="1.1.1.1", hostnames=["dc01"]).is_up)
+        # A closed/filtered-only port is NOT an open port.
+        self.assertFalse(Host(ip="1.1.1.1",
+                              ports=[Port(portid=22, state="filtered")]).is_up)
+        # The -Pn blanket assume-up ("user-set") is NOT proof, and a bare host isn't.
+        self.assertFalse(Host(ip="1.1.1.1", state="up", up_reason="user-set").is_up)
+        self.assertFalse(Host(ip="1.1.1.1").is_up)
+
+    def test_checklist_hides_unconfirmed_keeps_confirmed(self):
+        from recce.report_excel import build_workbook
+        confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24", state="up",
+                         up_reason="syn-ack", ports=[Port(portid=445, state="open")])
+        phantom = Host(ip="10.0.0.6", subnet="10.0.0.0/24", state="up",
+                       up_reason="user-set")     # -Pn assume-up, no proof of life
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([confirmed, phantom], out)
+            rows = xlsx.read_sheets(out)["Checklist"]
+        hidx = header_index(rows, "IP")
+        ipc = rows[hidx].index("IP")
+        ips = {str(r[ipc]) for r in rows[hidx + 1:]}
+        self.assertIn("10.0.0.5", ips)            # confirmed-up host shown
+        self.assertNotIn("10.0.0.6", ips)         # unconfirmed phantom hidden
+
+    def test_checklist_carries_legend_above_header_and_round_trips(self):
+        from recce.report_excel import (build_workbook, read_workbook_tracking,
+                                         CHECKLIST_TITLE)
+        h = Host(ip="10.0.0.5", subnet="10.0.0.0/24", state="up", enumerated=True,
+                 ports=[Port(portid=445, service="smb", state="open", vuln_scanned=True)])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([h], out)
+            rows = xlsx.read_sheets(out)["Checklist"]
+            # A legend line precedes the header row (row 0 is not the header).
+            hidx = header_index(rows, "IP")
+            self.assertGreater(hidx, 0)
+            self.assertIn("Legend", str(rows[0][0]))
+            self.assertIn("confirmed UP", str(rows[0][0]))
+            # Tracking still round-trips despite the shifted header: an auto-ticked
+            # vuln step reads back True.
+            back = read_workbook_tracking(out)
+            self.assertTrue(back[tr.step_key("vuln", "10.0.0.5")][0])
+
+    def test_overview_tallies_unconfirmed_hosts(self):
+        from recce.report_excel import build_workbook
+        confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                         ports=[Port(portid=445, state="open")])
+        phantom = Host(ip="10.0.0.6", subnet="10.0.0.0/24", up_reason="user-set")
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "wb.xlsx")
+            build_workbook([confirmed, phantom], out)
+            rows = xlsx.read_sheets(out)["Overview"]
+        blob = "\n".join(" ".join(str(c) for c in r) for r in rows)
+        self.assertIn("Scanned, not confirmed up", blob)
+        self.assertIn("Hosts confirmed up", blob)
+
+    def test_udp_fallback_flips_silent_pn_host_to_up(self):
+        # A -Pn host silent on TCP gets a UDP liveness ping; a reply confirms it up.
+        from recce import cli, scanner
+        saved = (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+                 scanner.verify_port_scan, scanner.udp_liveness_probe,
+                 scanner.enum_scan, cli.np.parse_nmap_xml)
+        udp_calls = {"n": 0}
+
+        def fake_parse(path):
+            # Only the UDP-liveness XML reports a live host; TCP/enum XMLs are empty.
+            if "udpalive" in path:
+                return [Host(ip="10.0.0.9", up_reason="udp-response")]
+            return []
+
+        def fake_udp(ip, out, profile):
+            udp_calls["n"] += 1
+            return out, None
+        cli._ports_for_host = lambda path, ip: []          # silent on TCP
+        cli._fold_host = lambda ip, parsed, sm: Host(ip=ip, subnet="10.0.0.0/24")
+        scanner.full_port_scan = lambda ip, out, profile: (out, None)
+        scanner.verify_port_scan = lambda ip, out, profile: (out, None)
+        scanner.udp_liveness_probe = fake_udp
+        scanner.enum_scan = lambda ip, ports, out, profile, creds=None: (out, None)
+        cli.np.parse_nmap_xml = fake_parse
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                prof = scanner.ScanProfile(ping_discovery=False, assume_up=True,
+                                           udp_basic=False)
+                host, _ = cli._enum_worker("10.0.0.9", prof, {"raw": d}, None, None,
+                                           {"10.0.0.9": "10.0.0.0/24"})
+            self.assertEqual(udp_calls["n"], 1)            # UDP fallback fired
+            self.assertEqual(host.up_reason, "udp-response")
+            self.assertTrue(host.is_up)                    # up despite 0 open TCP ports
+        finally:
+            (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+             scanner.verify_port_scan, scanner.udp_liveness_probe,
+             scanner.enum_scan, cli.np.parse_nmap_xml) = saved
+
+    def test_discovery_reply_reason_propagates_and_skips_udp(self):
+        # A host discovered live carries its real reply reason into the stored host,
+        # and the UDP fallback is NOT wasted on a host we already proved is up.
+        from recce import cli, scanner
+        saved = (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+                 scanner.verify_port_scan, scanner.udp_liveness_probe,
+                 scanner.enum_scan, cli.np.parse_nmap_xml)
+        udp_calls = {"n": 0}
+        cli._ports_for_host = lambda path, ip: []          # silent on TCP
+        cli._fold_host = lambda ip, parsed, sm: Host(ip=ip, subnet="10.0.0.0/24")
+        scanner.full_port_scan = lambda ip, out, profile: (out, None)
+        scanner.verify_port_scan = lambda ip, out, profile: (out, None)
+        scanner.udp_liveness_probe = lambda ip, out, profile: (
+            udp_calls.__setitem__("n", udp_calls["n"] + 1), (out, None))[1]
+        scanner.enum_scan = lambda ip, ports, out, profile, creds=None: (out, None)
+        cli.np.parse_nmap_xml = lambda path: []
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                prof = scanner.ScanProfile(ping_discovery=True, udp_basic=False)
+                host, _ = cli._enum_worker("10.0.0.9", prof, {"raw": d}, None, None,
+                                           {"10.0.0.9": "10.0.0.0/24"},
+                                           disc_reason="echo-reply")
+            self.assertEqual(host.up_reason, "echo-reply")
+            self.assertTrue(host.is_up)
+            self.assertEqual(udp_calls["n"], 0)            # already proven up -> no UDP
+        finally:
+            (cli._ports_for_host, cli._fold_host, scanner.full_port_scan,
+             scanner.verify_port_scan, scanner.udp_liveness_probe,
+             scanner.enum_scan, cli.np.parse_nmap_xml) = saved
+
+    def test_merge_never_downgrades_proof_of_life(self):
+        # A real reply must survive a later -Pn re-scan that only knows "user-set".
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(os.path.join(d, "s.sqlite"))
+            store.upsert_host(Host(ip="10.0.0.5", up_reason="echo-reply"))
+            store.upsert_host(Host(ip="10.0.0.5", up_reason="user-set"))
+            got = store.get_host("10.0.0.5")
+            self.assertEqual(got.up_reason, "echo-reply")
+            self.assertTrue(got.is_up)
             store.close()
 
 
@@ -2071,9 +2455,10 @@ class StepCheckboxTest(unittest.TestCase):
             out = os.path.join(d, "wb.xlsx")
             build_workbook([h], out)
             rows = xlsx.read_sheets(out)["Checklist"]
-            header = rows[0]
-            # rows[1] is now the collapsible subnet band; take the first host row.
-            row = next(r for r in rows[1:] if r[0] in (xlsx.CHECK_ON, xlsx.CHECK_OFF))
+            hidx = header_index(rows, "IP")
+            header = rows[hidx]
+            # The row after the header is the collapsible subnet band; take the first host row.
+            row = next(r for r in rows[hidx + 1:] if r[0] in (xlsx.CHECK_ON, xlsx.CHECK_OFF))
             for col in ("DB", "Web", "AD"):
                 self.assertEqual(row[header.index(col)], tr.STEP_NA)
             back = read_workbook_tracking(out)
@@ -2431,6 +2816,11 @@ class HtmlReportTest(unittest.TestCase):
         # Attack-path graph is embedded (Mermaid), copyable and offline.
         self.assertIn('class="mermaid', html)
         self.assertIn("flowchart LR", html)
+        # The attack path is framed honestly: projected, precondition-grounded, and
+        # explicitly NOT executed by recce (nothing reads as a proven kill chain).
+        self.assertIn("projected", html)
+        self.assertIn("not</b> been walked end-to-end", html)
+        self.assertIn("recce does not exploit", html)
 
     def test_detailed_findings_section(self):
         from recce import report_html
@@ -2454,12 +2844,131 @@ class HtmlReportTest(unittest.TestCase):
         self.assertIn("Backdoor shell on 6200 confirmed", html)  # evidence excerpt
         self.assertIn("10.0.0.6:21", html)                    # affected system
 
+    def test_visual_dashboard(self):
+        """The 'At a glance' dashboard renders inline-SVG visuals for a non-technical
+        reader, and stays self-contained (no xmlns/external refs in the SVG)."""
+        from recce import report_html
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "report.html")
+            report_html.build_html(self._hosts(), p, title="Viz")
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        for section in ("At a glance", "Findings by severity", "Machines by risk"):
+            self.assertIn(section, html)
+        self.assertIn("<svg", html)                      # the severity donut
+        self.assertIn("<circle", html)                   # donut segment(s)
+        self.assertIn('class="hbar"', html)              # risk / affected bars
+        self.assertNotIn("xmlns", html)                  # inline SVG stays self-contained
+        for bad in ("src=", "<link", "<script"):         # nothing is fetched
+            self.assertNotIn(bad, html)
+
+    def test_scoring_legend_and_grounding(self):
+        """The report explains why a severity is assigned and never presents an
+        unverified finding as fact: a scoring legend (severity bands + confidence
+        meanings), a per-finding confidence badge + 'why this rating' basis line, and
+        a grounded exec assessment."""
+        from recce import report_html
+        from recce.models import Vuln
+        h = Host(ip="10.0.0.7", os_family="Linux",
+                 ports=[Port(portid=80, service="http")],
+                 vulns=[Vuln(ip="10.0.0.7", port=80, protocol="tcp",
+                             script_id="apache-cve", title="Apache < 2.4.59 vulns",
+                             severity="high", source="version-db",
+                             confidence="potential", ids=["CVE-2024-27316"],
+                             output="Apache httpd 2.4.41")])
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html([h], p, title="Grounding")
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        # Scoring legend explains severity + confidence.
+        self.assertIn("How findings are scored", html)
+        self.assertIn("CVSS", html)
+        for level in ("Critical", "High", "Medium", "Low"):
+            self.assertIn(level, html)
+        # A potential finding is labelled as such (not shown as fact) and the exec
+        # assessment flags it for verification.
+        self.assertIn("Potential", html)
+        self.assertIn("flagged for manual verification", html)
+        # Per-finding 'why this rating' basis references the CVSS/CVE source.
+        self.assertIn('class="basis"', html)
+        self.assertIn("CVE-2024-27316", html)
+
+    def test_coverage_checklist_mirrors_tracking(self):
+        """A read-only 'Assessment coverage' checklist reflects both the tool's auto
+        state (enumerated host -> Enumerated done) and an operator tick passed via
+        tracking (a reviewed host shows checked)."""
+        from recce import report_html, tracking as tr
+        h = Host(ip="10.0.0.10", subnet="10.0.0.0/24", state="up",
+                 up_reason="syn-ack", enumerated=True,
+                 ports=[Port(portid=445, state="open", service="microsoft-ds")])
+        ticks = {tr.host_key("10.0.0.10"): (True, "done here")}
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html([h], p, title="Cov", tracking=ticks)
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("Assessment coverage", html)
+        self.assertIn('table class="cov"', html)
+        self.assertIn("10.0.0.10", html)
+        self.assertIn("&#10003;", html)                  # at least one ✓ (enum/reviewed)
+        self.assertIn("1/1 reviewed", html)              # the operator tick is mirrored
+        # Still self-contained.
+        for bad in ("src=", "<link", "<script"):
+            self.assertNotIn(bad, html)
+
+    def test_users_and_credentials_inventory(self):
+        """All users and captured credentials are surfaced on the companion assets
+        page; the credential secret is masked in the shareable HTML (full values stay
+        in the workbook)."""
+        from recce import report_html
+        from recce.models import Account, Credential
+        h = Host(ip="10.0.10.10", state="up", up_reason="syn-ack",
+                 ports=[Port(portid=445, state="open", service="microsoft-ds")],
+                 accounts=[
+                     Account(ip="10.0.10.10", source="ldap", kind="user", name="jdoe",
+                             domain="corp.local", rid="1104",
+                             attrs={"admincount": "1", "description": "IT admin"}),
+                     Account(ip="10.0.10.10", source="netexec", kind="share",
+                             name="ADMIN$", detail="READ,WRITE")])
+        creds = [Credential(username="admin", secret="Passw0rd!", kind="password",
+                            domain="corp.local", source="secretsdump",
+                            origin_ip="10.0.10.10")]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "assets.html")
+            report_html.build_assets_html([h], p, credentials=creds,
+                                          report_link="report.html")
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("Users &amp; accounts", html)
+        self.assertIn("jdoe", html)
+        self.assertIn("admin", html)                    # AdminCount flag pill
+        self.assertIn("ADMIN$", html)                   # share listed
+        self.assertIn("Credentials captured", html)
+        self.assertIn("secretsdump", html)
+        self.assertNotIn("Passw0rd!", html)             # secret is MASKED
+        self.assertIn("[9 chars]", html)                # masked length shown
+        self.assertIn("Findings report", html)          # cross-link back to report
+        # The findings report itself no longer carries these sections.
+        with tempfile.TemporaryDirectory() as d:
+            rp = os.path.join(d, "report.html")
+            report_html.build_html([h], rp, credentials=creds,
+                                   assets_link="assets.html")
+            with open(rp, encoding="utf-8") as fh:
+                report = fh.read()
+        self.assertNotIn("Credentials captured", report)
+        self.assertNotIn("Users &amp; accounts", report)
+        self.assertIn("Architecture &amp; assets", report)   # link to companion page
+
     def test_empty_hosts_ok(self):
         from recce import report_html
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "r.html")
             report_html.build_html([], p, title="Empty")
             self.assertTrue(os.path.exists(p))
+            # The donut degrades gracefully to a zero-state ring with no findings.
+            with open(p, encoding="utf-8") as fh:
+                self.assertIn("<svg", fh.read())
 
 
 class PrivEscVerdictTest(unittest.TestCase):
@@ -2945,6 +3454,7 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(prod, "WordPress")
         self.assertEqual(ver, "6.4.2")
 
+
     def test_ssti_js_secret_and_wordpress_enum(self):
         from recce import web
         _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
@@ -3026,6 +3536,437 @@ class WebModuleTest(unittest.TestCase):
         self.assertEqual(r["id"], "web-exposure")
         self.assertEqual(r["fn"](Host(ip="1.1.1.1"), None, v)[0], proofs.CONFIRMED)
         self.assertEqual(poc.recipe_key_for(v.title), "web")
+
+
+class WebTier1Test(unittest.TestCase):
+    """Tier-1 niche-app signatures: fingerprints, unauth exposure paths, form/JSON
+    default-credential logins, and the prove-engine verdicts for each."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body=b"", extra=None):
+                self.send_response(code)
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+            def do_POST(self):
+                import json as _j
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(length) if length else b""
+                if self.path == "/login":                       # Grafana form login
+                    try:
+                        d = _j.loads(raw or b"{}")
+                    except ValueError:
+                        d = {}
+                    if d.get("user") == "admin" and d.get("password") == "admin":
+                        return self._send(200, b'{"message":"Logged in"}',
+                                          extra={"Set-Cookie": "grafana_session=1; Path=/"})
+                    return self._send(401, b'{"message":"Invalid username or password"}')
+                if self.path == "/api/v1/login":                # MinIO console login
+                    if b"minioadmin" in raw:
+                        return self._send(204, b"", extra={"Set-Cookie": "token=x; Path=/"})
+                    return self._send(401, b"bad creds")
+                return self._send(404, b"nope")
+
+            def do_GET(self):
+                import base64
+                p = self.path
+                if p == "/script":                              # Jenkins script console
+                    return self._send(200, b"<h1>Script Console</h1><form>"
+                                           b"<textarea name='script'></textarea></form>")
+                if p == "/admin/master/console/":               # Keycloak admin console
+                    return self._send(200, b'<html><script>var authServerUrl="/auth";'
+                                           b' kc-context</script>Keycloak Administration</html>')
+                if p.endswith("etc/passwd"):                    # Grafana CVE-2021-43798
+                    return self._send(200, b"root:x:0:0:root:/root:/bin/bash\n")
+                if p == "/v1/sys/seal-status":                  # Vault
+                    return self._send(200, b'{"type":"shamir","sealed":false,'
+                                           b'"version":"1.12.0","initialized":true}')
+                if p.startswith("/_cat/indices"):               # Elasticsearch
+                    return self._send(200, b'[{"health":"green","index":"users","docs.count":"42"}]')
+                if p == "/api/status":                          # Kibana
+                    return self._send(200, b'{"name":"kibana","version":{"number":"7.10.0"}}')
+                if p == "/api/whoami":                           # RabbitMQ mgmt (Basic)
+                    auth = self.headers.get("Authorization", "")
+                    if auth.startswith("Basic "):
+                        try:
+                            u, _, pw = base64.b64decode(auth[6:]).decode().partition(":")
+                        except Exception:
+                            u = pw = ""
+                        if (u, pw) == ("guest", "guest"):
+                            return self._send(200, b'{"name":"guest","tags":["administrator"]}')
+                    return self._send(401, b"auth", extra={"WWW-Authenticate": 'Basic realm="RabbitMQ Management"'})
+                if p == "/":
+                    return self._send(200, b"<html><head><title>Grafana</title></head>"
+                                           b"<body>grafana MinIO Console</body></html>")
+                return self._send(404, b"nope")
+
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def _port(self):
+        return Port(portid=self.port, service="http", state="open")
+
+    def test_fingerprints(self):
+        from recce import web
+        fp = web.fingerprint({}, "grafana MinIO Console")
+        self.assertIn("Grafana", fp["tech"])
+        self.assertIn("MinIO", fp["tech"])
+        es = web.fingerprint({}, '{"cluster_name":"docker-cluster"} You Know, for Search')
+        self.assertIn("Elasticsearch", es["tech"])
+        prod, ver = web.product_version({}, '{"cluster_name":"x","version":{"number":"7.10.2"}}')
+        self.assertEqual((prod, ver), ("Elasticsearch", "7.10.2"))
+
+    def test_unauth_exposure_paths(self):
+        from recce import web
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        sids = {v.script_id for v in findings}
+        self.assertIn("web-jenkins-script", sids)     # critical - unauth Groovy RCE
+        self.assertIn("web-keycloak-console", sids)   # admin console reachable
+        self.assertIn("web-grafana-lfi", sids)        # CVE-2021-43798 file read
+        self.assertIn("web-vault-status", sids)       # Vault reachable
+        self.assertIn("web-elastic-open", sids)       # unauth ES data read
+        self.assertIn("web-kibana", sids)             # Kibana version
+        jenk = next(v for v in findings if v.script_id == "web-jenkins-script")
+        self.assertEqual(jenk.severity, "critical")
+
+    def test_form_and_basic_default_creds(self):
+        from recce import web
+        base = web.url_for("127.0.0.1", self._port())
+        # Form/JSON logins (opt-in): Grafana admin/admin + MinIO minioadmin.
+        forms = web._form_login_defaults("127.0.0.1", self._port(), base, ["Grafana", "MinIO"])
+        titles = " ".join(v.title for v in forms)
+        self.assertIn("Grafana", titles)
+        self.assertIn("MinIO", titles)
+        self.assertTrue(all(v.severity == "critical" for v in forms))
+        # HTTP Basic default guest/guest against the RabbitMQ mgmt path.
+        basic = web._basic_auth_defaults("127.0.0.1", self._port(), base, ["/api/whoami"])
+        self.assertTrue(any("guest:guest" in v.output for v in basic))
+
+    def test_creds_flag_gates_form_login(self):
+        from recce import web
+        # Without creds=True the form-login probe never runs.
+        _, f0 = web.scan_endpoint("127.0.0.1", self._port(), active=True, creds=False)
+        self.assertNotIn("web-default-creds", {v.script_id for v in f0})
+        _, f1 = web.scan_endpoint("127.0.0.1", self._port(), active=True, creds=True)
+        self.assertIn("web-default-creds", {v.script_id for v in f1})
+
+    def test_prove_confirms_tier1(self):
+        from recce import web, proofs
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        h.vulns = findings
+        recs = proofs.verify_host(h)
+        vuln_ids = {r["vuln"] for r in recs}
+        self.assertIn("Exposed application (unauthenticated access / default credentials)", vuln_ids)
+        # The Tier-1 app findings adjudicate CONFIRMED.
+        app = [r for r in recs if "unauthenticated access" in r["vuln"]]
+        self.assertTrue(app and all(r["verdict"] == proofs.CONFIRMED for r in app))
+
+
+class WebSqliTest(unittest.TestCase):
+    """SQL injection (error / boolean / FP-safety) and form-field fuzzing over a mock
+    app: an error-based GET param, a boolean-based GET param, a dynamic page that must
+    NOT false-positive, a POST search form (error-based) and a reflected form field."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        from urllib.parse import urlparse, parse_qs
+
+        cls.hit_delete = False
+
+        class H(http.server.BaseHTTPRequestHandler):
+            counter = 0
+
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, body):
+                self.send_response(code)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+            def do_GET(self):
+                u = urlparse(self.path)
+                idv = parse_qs(u.query, keep_blank_values=True).get("id", [""])[0]
+                if u.path == "/prod":                       # error-based (MySQL)
+                    if any(c in idv for c in ("'", '"', "\\")):
+                        return self._send(200, b"You have an error in your SQL syntax; "
+                                          b"check the manual that corresponds to your MySQL "
+                                          b"server version for the right syntax near '''")
+                    return self._send(200, b"<html>Product page for a valid id.</html>")
+                if u.path == "/boolsqli":                   # boolean-based blind
+                    s = idv.replace(" ", "")
+                    false = ("1=2" in s) or ("'1'='2" in s)
+                    if false:
+                        return self._send(200, b"<html>No matching record found.</html>")
+                    return self._send(200, b"<html>Record: ACME Widget, in stock.</html>")
+                if u.path == "/dyn":                        # highly dynamic -> no FP
+                    H.counter += 1
+                    blob = (b"A" if H.counter % 2 else b"B") * 400
+                    return self._send(200, b"<html>" + blob + b"</html>")
+                if u.path == "/":
+                    return self._send(200,
+                        b"<html><body><a href='/prod?id=1'>p</a>"
+                        b"<form method=post action=/search><input name=q></form>"
+                        b"<form method=post action=/reflectform><input name=name></form>"
+                        b"<form method=post action=/account/delete><input name=x></form>"
+                        b"</body></html>")
+                return self._send(404, b"no")
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                raw = self.rfile.read(length).decode() if length else ""
+                d = parse_qs(raw, keep_blank_values=True)
+                if self.path == "/search":                  # error-based (MSSQL)
+                    q = d.get("q", [""])[0]
+                    if any(c in q for c in ("'", '"', "\\")):
+                        return self._send(200, b"Microsoft SQL Server error: Unclosed "
+                                          b"quotation mark after the character string")
+                    return self._send(200, b"<html>search results</html>")
+                if self.path == "/reflectform":             # reflects + evaluates {{7*7}}
+                    name = d.get("name", [""])[0].replace("{{7*7}}", "49")
+                    return self._send(200, ("<html>hello " + name + "</html>").encode())
+                if self.path == "/account/delete":          # destructive - must be skipped
+                    cls.hit_delete = True
+                    return self._send(200, b"DELETED")
+                return self._send(404, b"no")
+
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def _port(self):
+        return Port(portid=self.port, service="http", state="open")
+
+    def test_error_based_get(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/prod", "id", None)
+        fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /prod", send)
+        self.assertTrue(fs and fs[0].script_id == "web-sqli")
+        self.assertIn("error-based", fs[0].title)
+        self.assertIn("MySQL", fs[0].title)
+
+    def test_boolean_based_get(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/boolsqli", "id", None)
+        fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /boolsqli", send)
+        self.assertTrue(fs and fs[0].script_id == "web-sqli")
+        self.assertIn("boolean-based", fs[0].title)
+
+    def test_dynamic_page_no_false_positive(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/dyn", "id", None)
+        fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /dyn", send)
+        self.assertEqual(fs, [])            # a page that changes every request must not FP
+
+    def test_form_risk_classifier_skips_side_effecting_forms(self):
+        from recce import web
+
+        def form(action, fields):
+            return {"action": action, "method": "post", "inputs": [f[0] for f in fields],
+                    "fields": fields}
+        # State-changing / transactional / content / upload -> not submitted.
+        self.assertTrue(web._form_risk(form("/account/delete", [("id", "text")])))
+        self.assertTrue(web._form_risk(form("/checkout", [("card", "text")])))
+        self.assertTrue(web._form_risk(form("/contact", [("email", "text"),
+                                                         ("message", "textarea")])))
+        upload = form("/profile", [("avatar", "file")])
+        self.assertTrue(web._form_risk(upload))
+        self.assertTrue(web._form_risk(upload, allow_risky=True))   # uploads NEVER submitted
+        # --fuzz-risky-forms relaxes the state-change/transaction guards.
+        self.assertFalse(web._form_risk(form("/account/delete", [("id", "text")]),
+                                        allow_risky=True))
+        # Login / search forms (where injection lives) stay fuzzable by default.
+        self.assertFalse(web._form_risk(form("/login", [("user", "text"), ("pw", "password")])))
+        self.assertFalse(web._form_risk(form("/search", [("q", "text")])))
+
+    def test_risky_form_is_recorded_not_submitted(self):
+        from recce import web
+        # scan_crawl over the mock root, whose forms include /account/delete.
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        web.scan_crawl(h)
+        sids = {v.script_id for v in h.vulns}
+        self.assertIn("web-form-unfuzzed", sids)         # the delete form was recorded
+        note = next(v for v in h.vulns if v.script_id == "web-form-unfuzzed")
+        self.assertIn("/account/delete", note.output)
+        self.assertFalse(WebSqliTest.hit_delete)         # and never actually submitted
+
+    def test_form_field_fuzzing_via_scan_crawl(self):
+        from recce import web
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        pages, added = web.scan_crawl(h)
+        sids = {v.script_id for v in h.vulns}
+        self.assertIn("web-sqli", sids)     # /prod GET param + /search POST field
+        self.assertIn("web-ssti", sids)     # /reflectform field evaluated {{7*7}}
+        # A form field injection came from the POST search form.
+        self.assertTrue(any(v.script_id == "web-sqli" and "field 'q'" in v.title
+                            for v in h.vulns))
+        # The destructive form (action=/account/delete) is never submitted.
+        self.assertFalse(WebSqliTest.hit_delete)
+
+    def test_prove_confirms_sqli(self):
+        from recce import web, proofs
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/prod", "id", None)
+        fs = web._sqli_via("127.0.0.1", self._port(), "param 'id' on /prod", send)
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        h.vulns = fs
+        recs = proofs.verify_host(h)
+        self.assertTrue(recs and recs[0]["verdict"] == proofs.CONFIRMED)
+        self.assertEqual(proofs.recipe_for(fs[0])["id"], "web-sqli")
+
+
+class WebCookieRedirectLfiTest(unittest.TestCase):
+    """Cookie hardening (SameSite / prefix / cleartext / broad Domain), open redirect,
+    and generic path traversal - detection, FP-safety, and prove verdicts."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+        from urllib.parse import urlparse, parse_qs
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                u = urlparse(self.path)
+                qs = parse_qs(u.query, keep_blank_values=True)
+                if u.path == "/download":                   # path traversal
+                    f = qs.get("file", [""])[0]
+                    if "etc/passwd" in f:
+                        return self._send(200, b"root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1")
+                    if "win.ini" in f:
+                        return self._send(200, b"[fonts]\n[extensions]\n")
+                    return self._send(200, b"<html>file: readme contents</html>")
+                if u.path == "/go":                          # open redirect (reflects target)
+                    nxt = qs.get("next", [""])[0]
+                    if nxt.startswith(("http://", "https://", "//", "/\\")):
+                        return self._send(302, b"", {"Location": nxt})
+                    return self._send(200, b"<html>home</html>")
+                if u.path == "/safe":                        # redirects, but to a FIXED path
+                    return self._send(302, b"", {"Location": "/dashboard"})
+                if u.path == "/":
+                    return self._send(200,
+                        b"<html><body><a href='/download?file=readme'>d</a>"
+                        b"<a href='/go?next=/home'>g</a></body></html>",
+                        {"Set-Cookie": "sessionid=abc123; Path=/"})   # weak session cookie
+                return self._send(404, b"no")
+
+            def _send(self, code, body=b"", extra=None):
+                self.send_response(code)
+                self.send_header("Content-Type", "text/html")
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+        cls.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def _port(self):
+        return Port(portid=self.port, service="http", state="open")
+
+    # --- cookies (unit) ---------------------------------------------------------
+    def test_cookie_hardening_checks(self):
+        from recce import web
+        tls = Port(portid=443, service="https", state="open")
+        titles = {v.title.split(":")[0] for v in
+                  web._cookie_findings("1.1.1.1", tls, "sessionid=x; Path=/")}
+        self.assertIn("Cookie without HttpOnly", titles)
+        self.assertIn("Cookie without Secure (served over HTTPS)", titles)
+        self.assertIn("Cookie without SameSite (CSRF / cross-site surface)", titles)
+        # SameSite=None without Secure -> medium.
+        none = web._cookie_findings("1.1.1.1", tls, "sid=x; HttpOnly; SameSite=None")
+        self.assertTrue(any(v.title.startswith("Cookie SameSite=None without Secure")
+                            and v.severity == "medium" for v in none))
+        # A session cookie over cleartext HTTP is called out as wire-exposed.
+        http = Port(portid=80, service="http", state="open")
+        clear = web._cookie_findings("1.1.1.1", http, "authtoken=x; Path=/")
+        self.assertTrue(any("cleartext HTTP" in v.title for v in clear))
+        # Broad parent-domain scope.
+        dom = web._cookie_findings("1.1.1.1", tls, "id=x; Domain=.example.com; Secure; "
+                                                   "HttpOnly; SameSite=Lax")
+        self.assertTrue(any("broad parent Domain" in v.title for v in dom))
+
+    def test_cookie_findings_surface_in_scan_endpoint(self):
+        from recce import web
+        _, findings = web.scan_endpoint("127.0.0.1", self._port(), active=True)
+        self.assertIn("web-cookie", {v.script_id for v in findings})
+
+    # --- open redirect ----------------------------------------------------------
+    def test_open_redirect_detected(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/go", "next", None)
+        fs = web._open_redirect_via("127.0.0.1", self._port(), "param 'next' on /go", send)
+        self.assertTrue(fs and fs[0].script_id == "web-openredirect")
+
+    def test_open_redirect_no_fp_on_fixed_target(self):
+        from recce import web
+        # /safe always redirects to /dashboard regardless of input -> not open.
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/safe", "next", None)
+        self.assertEqual(web._open_redirect_via("127.0.0.1", self._port(),
+                                                "param 'next' on /safe", send), [])
+
+    # --- path traversal ---------------------------------------------------------
+    def test_traversal_detected_on_fileish_param(self):
+        from recce import web
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/download", "file", None)
+        fs = web._traversal_via("127.0.0.1", self._port(), "param 'file' on /download",
+                                "file", send)
+        self.assertTrue(fs and fs[0].script_id == "web-lfi")
+        self.assertEqual(fs[0].severity, "high")
+
+    def test_traversal_skips_non_fileish_param(self):
+        from recce import web
+        # A param that doesn't look like a file/path is not traversal-tested (budget/FP).
+        send = web._make_sender("127.0.0.1", self._port(), "get", "/download", "q", None)
+        self.assertEqual(web._traversal_via("127.0.0.1", self._port(),
+                                            "param 'q' on /download", "q", send), [])
+
+    # --- integration + prove ----------------------------------------------------
+    def test_scan_crawl_finds_redirect_and_lfi(self):
+        from recce import web, proofs
+        h = Host(ip="127.0.0.1", ports=[self._port()])
+        web.scan_crawl(h)
+        sids = {v.script_id for v in h.vulns}
+        self.assertIn("web-openredirect", sids)
+        self.assertIn("web-lfi", sids)
+        recs = {r["vuln"]: r["verdict"] for r in proofs.verify_host(h)}
+        self.assertEqual(recs.get("Path traversal / local file read"), proofs.CONFIRMED)
+        self.assertEqual(recs.get("Open redirect"), proofs.CONFIRMED)
 
 
 class PocRecipeTest(unittest.TestCase):
@@ -3659,6 +4600,505 @@ class DockerTest(unittest.TestCase):
             st.upsert_host(Host(ip="10.0.0.7", ports=[Port(portid=22, service="ssh")]))
             st.close()
             self.assertEqual(cli.main(["docker", "-o", out, "--no-probe"]), 0)
+
+
+class NtlmTest(unittest.TestCase):
+    """NTLMSSP / NTLMv2 crypto, validated against the MS-NLMP 4.2.4 worked example."""
+
+    def test_md4_and_nt_hash_vectors(self):
+        from recce import ntlm as N
+        self.assertEqual(N.md4(b"").hex(), "31d6cfe0d16ae931b73c59d7e0c089c0")
+        # NT hash of "password" (MD4 of the UTF-16LE password).
+        self.assertEqual(N.nt_hash("password").hex(),
+                         "8846f7eaee8fb117ad06bdd830b7586c")
+
+    def test_ntlmv2_matches_ms_nlmp_vector(self):
+        from recce import ntlm as N
+        nthash = N.nt_hash("Password")               # MS-NLMP example password
+        # ResponseKeyNT = HMAC-MD5(NT hash, UPPER(user)+domain).
+        self.assertEqual(N._ntv2_key("User", "Domain", nthash).hex(),
+                         "0c868a403bfd7a93a3001ef22ef02e3f")
+        target_info = bytes.fromhex(
+            "02000c0044006f006d00610069006e0001000c00530065007200760065007200"
+            "00000000")
+        resp = N.ntlmv2_response("User", "Domain", nthash,
+                                 bytes.fromhex("0123456789abcdef"), target_info,
+                                 timestamp=0,
+                                 client_challenge=bytes.fromhex("aaaaaaaaaaaaaaaa"))
+        # NTProofStr is the first 16 bytes of the NtChallengeResponse.
+        self.assertEqual(resp[:16].hex(), "68cd0ab851e51c96aabc927bebef6a1c")
+
+    def test_rc4_known_answer_vectors(self):
+        from recce import ntlm as N
+        self.assertEqual(N.rc4k(b"Key", b"Plaintext").hex(), "bbf316e8d940af0ad3")
+        self.assertEqual(N.rc4k(b"Wiki", b"pedia").hex(), "1021bf0420")
+        self.assertEqual(N.rc4k(b"Secret", b"Attack at dawn").hex(),
+                         "45a01f645fc35b383552544b9bf5")
+
+    def test_seal_wrap_signature_format_and_roundtrip(self):
+        import hmac
+        import hashlib
+        import struct
+        from recce import ntlm as N
+        exported = bytes(range(16))
+        ctx = N.SecurityContext(exported)
+        token = ctx.wrap(b"hello ldap")
+        # NTLMSSP_MESSAGE_SIGNATURE: version 0x00000001 + sealed checksum(8) + seq(4).
+        self.assertEqual(token[:4], b"\x01\x00\x00\x00")
+        self.assertEqual(token[12:16], b"\x00\x00\x00\x00")     # first message: seq 0
+        # A peer with the same key decrypts (message first, then its checksum).
+        seal = N.RC4(N._derive_key(exported, N._C2S_SEAL))
+        msg = seal.update(token[16:])
+        chk = seal.update(token[4:12])
+        want = hmac.new(N._derive_key(exported, N._C2S_SIGN),
+                        struct.pack("<I", 0) + msg, hashlib.md5).digest()[:8]
+        self.assertEqual(msg, b"hello ldap")
+        self.assertEqual(chk, want)
+        # unwrap reverses a server-sealed token and verifies the signature.
+        s_seal = N.RC4(N._derive_key(exported, N._S2C_SEAL))
+        pt = b"server reply"
+        sealed = s_seal.update(pt)
+        schk = s_seal.update(hmac.new(N._derive_key(exported, N._S2C_SIGN),
+                                      struct.pack("<I", 0) + pt, hashlib.md5).digest()[:8])
+        stoken = b"\x01\x00\x00\x00" + schk + struct.pack("<I", 0) + sealed
+        self.assertEqual(ctx.unwrap(stoken), pt)
+        # A tampered signature is rejected.
+        with self.assertRaises(ValueError):
+            ctx2 = N.SecurityContext(exported)
+            ctx2.unwrap(b"\x01\x00\x00\x00" + b"\x00" * 8 + struct.pack("<I", 0) + sealed)
+
+    def test_message_structure_and_hash_normalize(self):
+        from recce import ntlm as N
+        self.assertEqual(N.type1()[:8], N._SIG)
+        ch = {"challenge": b"\x01" * 8, "target_info": b"", "flags": N._TYPE1_FLAGS}
+        t3 = N.type3("u", "d", b"\x00" * 16, ch)
+        self.assertEqual(t3[:8], N._SIG)
+        self.assertEqual(t3[8:12], b"\x03\x00\x00\x00")   # MessageType 3
+        # LM:NT and a bare NT hash both normalize to the 16-byte NT hash.
+        nt = "8846f7eaee8fb117ad06bdd830b7586c"
+        self.assertEqual(N.normalize_nt_hash(nt), bytes.fromhex(nt))
+        self.assertEqual(N.normalize_nt_hash("aad3b435b51404eeaad3b435b51404ee:" + nt),
+                         bytes.fromhex(nt))
+
+
+class LdapTest(unittest.TestCase):
+    """Deep LDAP module: the stdlib BER client, the probe against a mock DC, findings,
+    prove verdicts, and the full `recce ldap` command."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import threading
+        from recce import ldap as L
+
+        def tlv(tag, val):
+            return bytes([tag]) + L._ber_len(len(val)) + val
+
+        def attr(n, vals):
+            return tlv(0x30, L._octet(n)
+                       + tlv(0x31, b"".join(L._octet(v) for v in vals)))
+
+        def msg(mid, op):
+            return tlv(0x30, L._int(mid) + op)
+
+        bind_ok = msg(1, tlv(0x61, L._enum(0) + L._octet("") + L._octet("")))
+        rootdse = msg(2, tlv(0x64, L._octet("") + tlv(0x30,
+            attr("defaultNamingContext", ["DC=corp,DC=local"])
+            + attr("dnsHostName", ["dc01.corp.local"])
+            + attr("domainControllerFunctionality", ["7"])
+            + attr("forestFunctionality", ["7"])
+            + attr("domainFunctionality", ["7"])
+            + attr("isGlobalCatalogReady", ["TRUE"])
+            + attr("supportedSASLMechanisms", ["GSSAPI", "GSS-SPNEGO"]))))
+        done2 = msg(2, tlv(0x65, L._enum(0) + L._octet("") + L._octet("")))
+        ncobj = msg(3, tlv(0x64, L._octet("DC=corp,DC=local") + tlv(0x30,
+            attr("objectClass", ["top", "domain"])
+            + attr("ms-DS-MachineAccountQuota", ["10"]))))
+        done3 = msg(3, tlv(0x65, L._enum(0) + L._octet("") + L._octet("")))
+        # Per-connection reply script: one response per request the client sends.
+        cls._script = [bind_ok, rootdse + done2, ncobj + done3]
+
+        script = cls._script
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                for resp in script:
+                    req = L._read_message(self.request, 5.0)
+                    if req is None:
+                        return
+                    self.request.sendall(resp)
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_ber_encode_decode_roundtrip(self):
+        from recce import ldap as L
+        self.assertEqual(L.build_bind_request(1, "", "")[0], 0x30)
+        self.assertEqual(L.build_search_request(2, "", 0, ["dnsHostName"])[0], 0x30)
+        # A synthetic searchResEntry parses into {attr: [values]}.
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+        entry = tlv(0x30, L._int(2) + tlv(0x64, L._octet("") + tlv(0x30,
+            tlv(0x30, L._octet("dnsHostName") + tlv(0x31, L._octet("dc01.corp.local"))))))
+        _obj, attrs = L.parse_search_entry(entry)
+        self.assertEqual(attrs["dnsHostName"], ["dc01.corp.local"])
+        self.assertEqual(L._dn_to_domain("DC=corp,DC=local"), "corp.local")
+
+    def test_probe_reads_rootdse_and_detects_anon(self):
+        from recce import ldap as L
+        pr = L.probe("127.0.0.1", self.port)
+        self.assertIsNotNone(pr)
+        self.assertTrue(pr["anon_bind"])
+        self.assertTrue(pr["anon_read"])
+        self.assertEqual(pr["domain"], "corp.local")
+        self.assertEqual(pr["dc_dns"], "dc01.corp.local")
+        self.assertEqual(pr["dc_level"], "2016")       # functional level 7 -> Server 2016
+        self.assertTrue(pr["is_gc"])
+
+    def test_findings_and_prove_confirm(self):
+        from recce import ldap as L, proofs
+        pr = L.probe("127.0.0.1", self.port)
+        h = Host(ip="10.0.10.10", ports=[Port(portid=389, service="ldap", state="open")])
+        fs = L.findings([h], {("10.0.10.10", 389): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("Anonymous LDAP directory read", titles)
+        self.assertIn("Anonymous LDAP bind allowed", titles)
+        self.assertIn("cleartext", titles.lower())
+        h.vulns = L.findings_to_vulns(fs)["10.0.10.10"]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)
+
+    @staticmethod
+    def _serve_scripts(scripts):
+        """A TCP server that replays scripts[i] (a list of response byte-strings) on the
+        i-th connection - so a probe connection and an enum connection get different
+        replies. Returns (server, port); caller shuts it down."""
+        import socketserver
+        import threading
+        from recce import ldap as L
+        state = {"n": 0}
+        lock = threading.Lock()
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                with lock:
+                    idx = state["n"]
+                    state["n"] += 1
+                script = scripts[idx] if idx < len(scripts) else []
+                for r in script:
+                    if L._read_message(self.request, 5.0) is None:
+                        return
+                    self.request.sendall(r)
+
+        srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, srv.server_address[1]
+
+    def test_authenticated_enum_pages_and_derives_accounts(self):
+        from recce import ldap as L
+        from recce.models import Host
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+
+        def attr(n, vals):
+            return tlv(0x30, L._octet(n) + tlv(0x31, b"".join(L._octet(v) for v in vals)))
+
+        def entry(mid, dn, pairs):
+            return tlv(0x30, L._int(mid) + tlv(0x64, L._octet(dn)
+                       + tlv(0x30, b"".join(attr(n, v) for n, v in pairs))))
+
+        def done(mid, cookie=b""):
+            if cookie is None:
+                ctl = b""
+            else:
+                pv = tlv(0x30, L._int(0) + L._octet(cookie))
+                ctl = tlv(0xA0, tlv(0x30, L._octet(L._PAGED_OID) + L._octet(pv)))
+            return tlv(0x30, L._int(mid) + tlv(0x65, L._enum(0) + L._octet("")
+                       + L._octet("")) + ctl)
+
+        def bind_ok(mid=1):
+            return tlv(0x30, L._int(mid) + tlv(0x61, L._enum(0) + L._octet("")
+                       + L._octet("")))
+        # bind, users page1 (cookie 'c1'), users page2 (empty), computers, domain
+        enum_script = [
+            bind_ok(1),
+            entry(10, "CN=alice", [("sAMAccountName", ["alice"]),
+                                   ("servicePrincipalName", ["HTTP/web"]),
+                                   ("userAccountControl", ["512"])]) + done(10, b"c1"),
+            entry(11, "CN=bob", [("sAMAccountName", ["bob"]),
+                                 ("userAccountControl", ["4194816"]),
+                                 ("description", ["svc pw=Summer2025"])]) + done(11, b""),
+            done(1000, b""),
+            entry(9000, "DC=corp,DC=local", [("ms-DS-MachineAccountQuota", ["10"]),
+                                             ("lockoutThreshold", ["0"])]) + done(9000, None),
+        ]
+        srv, port = self._serve_scripts([enum_script])
+        try:
+            en = L.enum_authenticated("127.0.0.1", port, "DC=corp,DC=local",
+                                      {"user": "alice", "secret": "x", "domain": "corp.local"})
+            self.assertIsNone(en["error"])
+            self.assertEqual(len(en["users"]), 2)          # paging walked both pages
+            h = Host(ip="127.0.0.1")
+            summary, fs = L.apply_enum(h, "corp.local", "127.0.0.1", 389, en)
+            self.assertEqual(summary["kerberoastable"], 1)
+            self.assertEqual(summary["asrep"], 1)
+            # Accounts carry the exact attrs ad.quick_wins consumes.
+            alice = next(a for a in h.accounts if a.name == "alice")
+            self.assertEqual(alice.attrs["spn"], "HTTP/web")
+            bob = next(a for a in h.accounts if a.name == "bob")
+            self.assertEqual(bob.attrs["asrep_roastable"], "yes")
+            titles = " ".join(f["title"] for f in fs)
+            self.assertIn("Machine account quota", titles)
+            self.assertIn("lockout", titles.lower())
+            self.assertIn("Passwords in LDAP description", titles)
+        finally:
+            srv.shutdown()
+
+    @staticmethod
+    def _serve_sealed_dc(user, domain, nthash, responses):
+        """A mock DC that runs the sealed NTLM bind, derives the session key from the
+        client's Type 3, then unseals the client's LDAP requests and seals its own
+        responses - so the whole sign+seal channel is exercised end to end. `responses`
+        is one plaintext LDAP response blob per client search request (in order)."""
+        import socketserver
+        import struct as _s
+        import threading
+        import hmac as _h
+        import hashlib as _hl
+        from recce import ldap as L, ntlm as N
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+
+        def type2():
+            ti = b""
+            return (N._SIG + _s.pack("<I", 2) + _s.pack("<HHI", 0, 0, 48)
+                    + _s.pack("<I", N._SEAL_FLAGS) + bytes.fromhex("0123456789abcdef")
+                    + b"\x00" * 8 + _s.pack("<HHI", len(ti), len(ti), 48) + ti)
+
+        def bind_resp(mid, rc, creds=b""):
+            op = L._enum(rc) + L._octet("") + L._octet("")
+            if creds:
+                op += tlv(0x87, creds)
+            return tlv(0x30, L._int(mid) + tlv(0x61, op))
+
+        def field(msg, i):
+            ln = _s.unpack("<H", msg[12 + i * 8:14 + i * 8])[0]
+            off = _s.unpack("<I", msg[16 + i * 8:20 + i * 8])[0]
+            return msg[off:off + ln]
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                L._read_message(sock, 5.0)                         # bind1 (Type 1)
+                sock.sendall(bind_resp(1, 14, type2()))           # saslBindInProgress
+                bind2 = L._read_message(sock, 5.0)                # bind2 (Type 3)
+                t3 = bind2[bind2.find(N._SIG):]
+                nt_proof = field(t3, 1)[:16]
+                enc_sk = field(t3, 5)
+                kek = N._session_base_key(user, domain, nthash, nt_proof)
+                exported = N.rc4k(kek, enc_sk)                    # recover ExportedSessionKey
+                sock.sendall(bind_resp(2, 0))                     # bind success
+                c_seal = N.RC4(N._derive_key(exported, N._C2S_SEAL))
+                s_seal = N.RC4(N._derive_key(exported, N._S2C_SEAL))
+                s_sign = N._derive_key(exported, N._S2C_SIGN)
+                seq = 0
+                for plain in responses:
+                    hdr = L._recvn(sock, 4)
+                    if len(hdr) < 4:
+                        return
+                    frame = L._recvn(sock, _s.unpack(">I", hdr)[0])
+                    sig, sealed = frame[:16], frame[16:]
+                    c_seal.update(sealed)                         # unseal request (stream sync)
+                    c_seal.update(sig[4:12])                      # + its checksum
+                    ct = s_seal.update(plain)                     # seal the response
+                    chk = _h.new(s_sign, _s.pack("<I", seq) + plain, _hl.md5).digest()[:8]
+                    sct = s_seal.update(chk)
+                    token = b"\x01\x00\x00\x00" + sct + _s.pack("<I", seq) + ct
+                    seq += 1
+                    sock.sendall(_s.pack(">I", len(token)) + token)
+
+        srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, srv.server_address[1]
+
+    def test_ntlm_sealed_pth_end_to_end(self):
+        from recce import ldap as L, ntlm as N
+        from recce.models import Host
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+
+        def attr(n, vals):
+            return tlv(0x30, L._octet(n) + tlv(0x31, b"".join(L._octet(v) for v in vals)))
+
+        def entry(mid, dn, pairs):
+            return tlv(0x30, L._int(mid) + tlv(0x64, L._octet(dn)
+                       + tlv(0x30, b"".join(attr(n, v) for n, v in pairs))))
+
+        def sdone(mid):
+            return tlv(0x30, L._int(mid) + tlv(0x65, L._enum(0) + L._octet("")
+                       + L._octet("")))
+        # One sealed response blob per client search request: users, computers, domain.
+        responses = [
+            entry(10, "CN=svc", [("sAMAccountName", ["svc_web"]),
+                                 ("servicePrincipalName", ["HTTP/web"]),
+                                 ("userAccountControl", ["512"])]) + sdone(10),
+            sdone(1000),
+            entry(9000, "DC=corp,DC=local", [("lockoutThreshold", ["5"])]) + sdone(9000),
+        ]
+        nthash = N.nt_hash("Password")
+        srv, port = self._serve_sealed_dc("alice", "corp.local", nthash, responses)
+        try:
+            en = L.enum_authenticated("127.0.0.1", port, "DC=corp,DC=local",
+                                      {"user": "alice", "domain": "corp.local",
+                                       "secret": "", "hash": nthash.hex()})
+            self.assertIsNone(en["error"])
+            # Plaintext 389 + a hash -> the bind is sign+sealed, and the sealed search
+            # traffic round-trips (the DC could read our requests, we read its replies).
+            self.assertEqual(en["bind_method"], "NTLM sealed (pass-the-hash)")
+            self.assertEqual([u.get("sAMAccountName") for u in en["users"]], [["svc_web"]])
+            h = Host(ip="10.0.10.10")
+            L.apply_enum(h, "corp.local", "10.0.10.10", 389, en)
+            self.assertIn("svc_web", [a.name for a in h.accounts])
+        finally:
+            srv.shutdown()
+
+    def test_authenticated_accounts_feed_ad_quick_wins(self):
+        from recce import ldap as L, ad
+        from recce.models import Host
+        h = Host(ip="10.0.10.10", hostnames=["dc01"])
+        en = {"users": [
+            {"sAMAccountName": ["svc_sql"], "servicePrincipalName": ["MSSQL/db"],
+             "userAccountControl": ["512"]},
+            {"sAMAccountName": ["noPreAuth"], "userAccountControl": ["4194816"]}],
+            "computers": [], "domain": {}, "error": None, "bind_dn": "a@b"}
+        L.apply_enum(h, "corp.local", "10.0.10.10", 389, en)
+        # ad.py's existing derived lists must light up from the LDAP-produced accounts.
+        self.assertIn("svc_sql", [a.name for a in ad.kerberoastable([h])])
+        self.assertIn("noPreAuth", [a.name for a in ad.asrep_roastable([h])])
+
+    def test_cmd_ldap_authenticated_e2e_persists_accounts(self):
+        from recce import cli, xlsx, ldap as L
+        from recce.store import Store
+
+        def tlv(t, v):
+            return bytes([t]) + L._ber_len(len(v)) + v
+
+        def attr(n, vals):
+            return tlv(0x30, L._octet(n) + tlv(0x31, b"".join(L._octet(v) for v in vals)))
+
+        def entry(mid, dn, pairs):
+            return tlv(0x30, L._int(mid) + tlv(0x64, L._octet(dn)
+                       + tlv(0x30, b"".join(attr(n, v) for n, v in pairs))))
+
+        def sdone(mid, cookie=None):
+            ctl = b""
+            if cookie is not None:
+                pv = tlv(0x30, L._int(0) + L._octet(cookie))
+                ctl = tlv(0xA0, tlv(0x30, L._octet(L._PAGED_OID) + L._octet(pv)))
+            return tlv(0x30, L._int(mid) + tlv(0x65, L._enum(0) + L._octet("")
+                       + L._octet("")) + ctl)
+
+        def bind_ok(mid=1):
+            return tlv(0x30, L._int(mid) + tlv(0x61, L._enum(0) + L._octet("")
+                       + L._octet("")))
+        # Connection 1 = the anonymous probe; connection 2 = the authenticated enum.
+        probe_script = [
+            bind_ok(1),
+            entry(2, "", [("defaultNamingContext", ["DC=corp,DC=local"]),
+                          ("dnsHostName", ["dc01.corp.local"]),
+                          ("domainControllerFunctionality", ["7"])]) + sdone(2),
+            entry(3, "DC=corp,DC=local", [("objectClass", ["domain"])]) + sdone(3),
+        ]
+        enum_script = [
+            bind_ok(1),
+            entry(10, "CN=svc", [("sAMAccountName", ["svc_web"]),
+                                 ("servicePrincipalName", ["HTTP/web"]),
+                                 ("userAccountControl", ["512"])]) + sdone(10, b""),
+            sdone(1000, b""),
+            entry(9000, "DC=corp,DC=local", [("lockoutThreshold", ["5"])]) + sdone(9000),
+        ]
+        srv, port = self._serve_scripts([probe_script, enum_script])
+        orig = L.is_ldap
+        L.is_ldap = lambda p: p.state == "open" and (p.portid == port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=port, state="open",
+                                                service="ldap")]))
+                st.close()
+                rc = cli.main(["ldap", "-u", "alice", "-p", "x", "-d", "corp.local",
+                               "-o", out])
+                self.assertEqual(rc, 0)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                # The authenticated account persisted with its kerberoast SPN.
+                ldap_accts = [a for a in h.accounts if a.source == "ldap"]
+                self.assertIn("svc_web", [a.name for a in ldap_accts])
+                self.assertEqual(next(a for a in ldap_accts
+                                      if a.name == "svc_web").attrs["spn"], "HTTP/web")
+                # ...and it reached the AD Quick Wins sheet as a Kerberoastable row.
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                qw = "\n".join(" ".join(map(str, r)) for r in sheets["AD Quick Wins"])
+                self.assertIn("svc_web", qw)
+        finally:
+            L.is_ldap = orig
+            srv.shutdown()
+
+    def test_cmd_ldap_end_to_end(self):
+        from recce import cli, xlsx, ldap as L
+        from recce.store import Store
+        orig = L.is_ldap
+        L.is_ldap = lambda p: p.state == "open" and (p.portid == self.port or orig(p))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="ldap")]))
+                st.close()
+                self.assertEqual(cli.main(["ldap", "-o", out]), 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("LDAP", sheets)
+                vtxt = "\n".join(" ".join(map(str, r))
+                                 for r in sheets["Vulnerabilities"])
+                self.assertIn("Anonymous LDAP", vtxt)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                self.assertTrue([v for v in h.vulns if v.source == "ldap"])
+                # The port recce assessed is auto-ticked vuln-scanned on the Checklist.
+                self.assertTrue(h.ports[0].vuln_scanned)
+        finally:
+            L.is_ldap = orig
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.7", ports=[Port(portid=22, service="ssh")]))
+            st.close()
+            self.assertEqual(cli.main(["ldap", "-o", out, "--no-probe"]), 0)
 
 
 class FtpTest(unittest.TestCase):
@@ -4725,6 +6165,71 @@ class BloodHoundTest(unittest.TestCase):
         # The domain object is reachable in one DCSync hop.
         self.assertTrue(any(p["length"] == 1 and s["label"] == "DCSync"
                             for p in paths for s in p["steps"]))
+
+    def test_architecture_is_curated_tier0(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            arch = bh.architecture(bh.load_graph(d))
+        by_rid = {s.split("-")[-1]: v for s, v in arch["nodes"].items()}
+        # Domain object on top (tier 0); Domain Admins is a high-value group (tier 1).
+        self.assertEqual(by_rid[self.BASE.split("-")[-1]]["tier"], 0)
+        self.assertEqual(by_rid["512"]["tier"], 1)
+        self.assertTrue(by_rid["512"]["hv"])
+        # BOB is pulled in: it can DCSync the domain and controls HELPDESK (tier 2).
+        self.assertIn("1001", by_rid)
+        self.assertEqual(by_rid["1001"]["tier"], 2)
+        # Only tier-0-relevant objects are kept — SVC/ALICE (no tier-0 edge) are out.
+        self.assertNotIn("1002", by_rid)               # ALICE
+        self.assertNotIn("1003", by_rid)               # SVC
+        # The membership + control + DCSync edges are present.
+        rid_edges = {(s.split("-")[-1], l, dd.split("-")[-1]) for s, l, dd in arch["edges"]}
+        self.assertIn(("1105", "MemberOf", "512"), rid_edges)
+        self.assertIn(("1001", "GenericAll", "1105"), rid_edges)
+        self.assertTrue(any(l == "DCSync" for _s, l, _d in arch["edges"]))
+        self.assertFalse(arch["truncated"])
+
+    def test_architecture_truncates_large_graph(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            g = bh.load_graph(d)
+            arch = bh.architecture(g, max_nodes=2)
+        self.assertTrue(arch["truncated"])
+        self.assertLessEqual(len(arch["nodes"]), 2)
+
+    def test_architecture_persisted_in_analysis(self):
+        from recce import bloodhound as bh
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            analysis = bh.analyze(d)
+        self.assertIn("architecture", analysis)
+        self.assertTrue(analysis["architecture"]["nodes"])
+        # Must round-trip through JSON (it lives in the ad_bloodhound meta blob).
+        import json as _json
+        _json.loads(_json.dumps(analysis))
+
+    def test_architecture_embedded_in_assets_page(self):
+        from recce import bloodhound as bh
+        from recce import report_html
+        from recce.models import Host
+        with tempfile.TemporaryDirectory() as d:
+            self._collection(d)
+            analysis = bh.analyze(d)
+            host = Host(ip="10.0.0.10", subnet="10.0.0.0/24", state="up",
+                        up_reason="syn-ack", roles=["Domain Controller"])
+            p = os.path.join(d, "assets.html")
+            report_html.build_assets_html([host], p, title="AD",
+                                          ad_bloodhound=analysis)
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("AD architecture", html)
+        self.assertIn("from BloodHound", html)
+        self.assertIn("<svg", html)
+        self.assertIn("DOMAIN ADMINS", html)
+        self.assertNotIn("xmlns", html)                # inline SVG stays self-contained
+        for bad in ("src=", "<link", "<script"):
+            self.assertNotIn(bad, html)
 
     def test_kerberos_actions_with_hash(self):
         from recce import bloodhound as bh
@@ -6105,6 +7610,586 @@ class DeployTest(unittest.TestCase):
                 self.assertTrue(os.path.exists(os.path.join(d, "10.0.0.5.txt")))  # loot saved
         finally:
             deploy.deploy_one = orig
+
+
+class SnmpTest(unittest.TestCase):
+    """Deep SNMP module: BER/OID round-trip, a mock UDP agent (community brute +
+    GETNEXT walk), findings, account harvesting, prove verdicts, `recce snmp`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import threading
+        from recce import snmp as S
+
+        # MIB: exact-match GETs + a couple of walkable subtrees. Values are the
+        # already-BER-encoded value bytes (what sits after the OID in a varbind).
+        cls.mib = {
+            "1.3.6.1.2.1.1.1.0": S._octet("Windows Server 2019 x64"),   # sysDescr
+            "1.3.6.1.2.1.1.5.0": S._octet("DC01"),                       # sysName
+            "1.3.6.1.4.1.77.1.2.25.1": S._octet("Administrator"),        # LanMgr users
+            "1.3.6.1.4.1.77.1.2.25.2": S._octet("Guest"),
+            "1.3.6.1.4.1.77.1.2.25.3": S._octet("svc_backup"),
+            "1.3.6.1.2.1.25.4.2.1.2.1": S._octet("services.exe"),        # a process
+        }
+        cls._sorted = sorted(cls.mib, key=lambda o: [int(x) for x in o.split(".")])
+
+        def _tuple(o):
+            return [int(x) for x in o.split(".")]
+
+        def _get_response(community, rid, oid, value_bytes):
+            varbind = S._tlv(0x30, S.encode_oid(oid) + value_bytes)
+            pdu = S._tlv(0xA2, S._int(rid) + S._int(0) + S._int(0)
+                         + S._tlv(0x30, varbind))
+            return S._tlv(0x30, S._int(1) + S._octet(community) + pdu)
+
+        def _parse_request(data):
+            _, msg, _ = S._parse_tlv(data, 0)
+            _, _ver, i = S._parse_tlv(msg, 0)
+            _, comm, i = S._parse_tlv(msg, i)
+            pdu_tag, pdu, _ = S._parse_tlv(msg, i)
+            _, rid_b, j = S._parse_tlv(pdu, 0)
+            rid = int.from_bytes(rid_b, "big")
+            _, _err, j = S._parse_tlv(pdu, j)
+            _, _eidx, j = S._parse_tlv(pdu, j)
+            _, vbs, _ = S._parse_tlv(pdu, j)
+            _, vb, _ = S._parse_tlv(vbs, 0)
+            _, oid_b, _ = S._parse_tlv(vb, 0)
+            return comm.decode(), rid, pdu_tag, S.decode_oid(oid_b)
+
+        END_OF_MIB = b"\x82\x00"                   # endOfMibView -> walk stops
+
+        def _answer(community, rid, pdu_tag, oid):
+            if community != "public":               # only this community answers
+                return None
+            if pdu_tag == 0xA0:                      # GetRequest (exact)
+                val = cls.mib.get(oid)
+                return _get_response(community, rid, oid,
+                                     val if val is not None else END_OF_MIB)
+            # GetNextRequest: the numerically-next OID in the MIB.
+            want = _tuple(oid)
+            for cand in cls._sorted:
+                if _tuple(cand) > want:
+                    return _get_response(community, rid, cand, cls.mib[cand])
+            return _get_response(community, rid, oid, END_OF_MIB)
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        cls.port = sock.getsockname()[1]
+        cls.sock = sock
+        cls._stop = False
+
+        def serve():
+            while not cls._stop:
+                try:
+                    sock.settimeout(0.3)
+                    data, addr = sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    comm, rid, tag, oid = _parse_request(data)
+                    resp = _answer(comm, rid, tag, oid)
+                    if resp is not None:
+                        sock.sendto(resp, addr)
+                except (IndexError, ValueError):
+                    pass
+
+        cls._thread = threading.Thread(target=serve, daemon=True)
+        cls._thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop = True
+        cls._thread.join(timeout=2)
+        cls.sock.close()
+
+    def test_ber_and_oid_roundtrip(self):
+        from recce import snmp as S
+        for oid in ("1.3.6.1.2.1.1.1.0", "1.3.6.1.4.1.77.1.2.25.3",
+                    "1.3.6.1.2.1.25.4.2.1.2.1"):
+            _tag, body, _ = S._parse_tlv(S.encode_oid(oid), 0)
+            self.assertEqual(S.decode_oid(body), oid)
+        # A well-formed GetResponse parses back to (error_status, [(oid, value)]).
+        err, vbs = S.parse_response(_self_response())
+        self.assertEqual(err, 0)
+        self.assertEqual(vbs, [("1.3.6.1.2.1.1.1.0", "x")])
+
+    def test_probe_brutes_community_and_walks(self):
+        from recce import snmp as S
+        pr = S.probe("127.0.0.1", self.port, timeout=1.0, known_open=True)
+        self.assertIsNotNone(pr)
+        self.assertEqual(pr["community"], "public")
+        self.assertEqual(pr["sys_descr"], "Windows Server 2019 x64")
+        self.assertEqual(pr["sys_name"], "DC01")
+        self.assertEqual(pr["users"], ["Administrator", "Guest", "svc_backup"])
+        self.assertEqual(pr["processes"], ["services.exe"])
+
+    def test_findings_accounts_and_prove(self):
+        from recce import snmp as S, proofs
+        pr = S.probe("127.0.0.1", self.port, timeout=1.0, known_open=True)
+        h = Host(ip="127.0.0.1", ports=[Port(portid=161, service="snmp", state="open")])
+        fs = S.findings([h], {("127.0.0.1", 161): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("guessable community string", titles)
+        self.assertIn("local user accounts", titles)
+        self.assertIn("process / software inventory", titles)
+        # Enumerated users become Account rows.
+        accts = S.accounts_from_probe("127.0.0.1", pr)
+        names = {a.name for a in accts}
+        self.assertEqual(names, {"Administrator", "Guest", "svc_backup"})
+        self.assertTrue(all(a.source == "snmp" for a in accts))
+        # Prove engine CONFIRMs the community exposure (directly observed).
+        h.vulns = S.findings_to_vulns(fs)["127.0.0.1"]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)
+
+    def test_cmd_snmp_end_to_end(self):
+        from recce import cli, xlsx, snmp as S
+        from recce.store import Store
+        orig_targets, orig_is = S.snmp_targets, S.is_snmp
+        # Point the single target at the mock agent's ephemeral port, and teach is_snmp
+        # to recognise that port so findings() matches the probe.
+        S.snmp_targets = lambda hosts: [{"ip": "127.0.0.1", "hostname": "",
+                                         "port": self.port, "known_open": True}]
+        S.is_snmp = lambda p: p.portid == self.port or orig_is(p)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="snmp")]))
+                st.close()
+                rc = cli.main(["snmp", "-o", out])
+                self.assertEqual(rc, 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("SNMP", sheets)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                self.assertTrue([v for v in h.vulns if v.source == "snmp"])
+                # Enumerated accounts persisted onto the host.
+                self.assertTrue([a for a in h.accounts if a.source == "snmp"])
+        finally:
+            S.snmp_targets, S.is_snmp = orig_targets, orig_is
+
+    def test_no_answer_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.8", ports=[Port(portid=22, service="ssh")]))
+            st.close()
+            self.assertEqual(cli.main(["snmp", "-o", out, "--no-probe"]), 0)
+
+
+def _self_response():
+    """Tiny well-formed GetResponse so a bare parse_response smoke-check has input."""
+    from recce import snmp as S
+    varbind = S._tlv(0x30, S.encode_oid("1.3.6.1.2.1.1.1.0") + S._octet("x"))
+    pdu = S._tlv(0xA2, S._int(1) + S._int(0) + S._int(0) + S._tlv(0x30, varbind))
+    return S._tlv(0x30, S._int(1) + S._octet("public") + pdu)
+
+
+class MongodbTest(unittest.TestCase):
+    """Deep MongoDB module: BSON round-trip, a mock wire-protocol server (hello /
+    buildInfo / listDatabases), unauth detection, findings, prove, `recce mongodb`."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socketserver
+        import threading
+        import struct
+        from recce import mongodb as M
+
+        def e_double(name, v):
+            return b"\x01" + M._cstr(name) + struct.pack("<d", v)
+
+        def e_bool(name, v):
+            return b"\x08" + M._cstr(name) + bytes([1 if v else 0])
+
+        def e_doc(name, doc):
+            return b"\x03" + M._cstr(name) + doc
+
+        def e_array(name, docs):
+            inner = M.bson_doc(*[e_doc(str(i), d) for i, d in enumerate(docs)])
+            return b"\x04" + M._cstr(name) + inner
+
+        hello = M.bson_doc(e_bool("isWritablePrimary", True),
+                           M._e_int32("maxWireVersion", 17),
+                           e_double("ok", 1.0))
+        build = M.bson_doc(M._e_str("version", "6.0.1"), e_double("ok", 1.0))
+        dbs = e_array("databases", [
+            M.bson_doc(M._e_str("name", "admin"), e_double("sizeOnDisk", 4096.0)),
+            M.bson_doc(M._e_str("name", "config"), e_double("sizeOnDisk", 8192.0)),
+            M.bson_doc(M._e_str("name", "loot"), e_double("sizeOnDisk", 999.0)),
+        ])
+        listdbs = M.bson_doc(dbs, e_double("totalSize", 12288.0), e_double("ok", 1.0))
+        cls._replies = {"hello": hello, "buildInfo": build, "listDatabases": listdbs}
+
+        replies = cls._replies
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                sock = self.request
+                while True:
+                    hdr = M._recvn(sock, 16)
+                    if len(hdr) < 16:
+                        return
+                    length, rid = struct.unpack("<i", hdr[:4])[0], \
+                        struct.unpack("<i", hdr[4:8])[0]
+                    body = M._recvn(sock, length - 16)
+                    msg = hdr + body
+                    try:
+                        doc, _ = M.bson_parse(msg, 16 + 4 + 1)
+                    except (IndexError, ValueError, struct.error):
+                        return
+                    cmd = next(iter(doc), "")
+                    reply = replies.get(cmd)
+                    if reply is None:
+                        reply = M.bson_doc(M._e_str("errmsg", "no such command"),
+                                           e_double("ok", 0.0))
+                    sock.sendall(M.op_msg(rid, reply))
+
+        cls.srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        cls.srv.daemon_threads = True
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_bson_roundtrip(self):
+        from recce import mongodb as M
+        doc = M.bson_doc(M._e_int32("a", 7), M._e_str("b", "hi"))
+        parsed, _ = M.bson_parse(doc, 0)
+        self.assertEqual(parsed, {"a": 7, "b": "hi"})
+
+    def test_probe_detects_unauth(self):
+        from recce import mongodb as M
+        pr = M.probe("127.0.0.1", self.port, timeout=3.0)
+        self.assertIsNotNone(pr)
+        self.assertEqual(pr["version"], "6.0.1")
+        self.assertTrue(pr["unauth"])
+        self.assertEqual([d["name"] for d in pr["databases"]],
+                         ["admin", "config", "loot"])
+
+    def test_findings_and_prove(self):
+        from recce import mongodb as M, proofs
+        pr = M.probe("127.0.0.1", self.port, timeout=3.0)
+        h = Host(ip="10.0.7.7",
+                 ports=[Port(portid=27017, service="mongodb", state="open")])
+        fs = M.findings([h], {("10.0.7.7", 27017): pr})
+        titles = " ".join(f["title"] for f in fs)
+        self.assertIn("MongoDB exposed without authentication", titles)
+        crit = [f for f in fs if f["severity"] == "critical"]
+        self.assertTrue(crit)
+        h.vulns = M.findings_to_vulns(fs)["10.0.7.7"]
+        verdicts = [r["verdict"] for r in proofs.verify_host(h)]
+        self.assertIn(proofs.CONFIRMED, verdicts)
+
+    def test_cmd_mongodb_end_to_end(self):
+        from recce import cli, xlsx, mongodb as M
+        from recce.store import Store
+        orig = M.is_mongodb
+        M.is_mongodb = lambda p: (p.state == "open"
+                                  and (p.portid == self.port or orig(p)))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                out = os.path.join(d, "eng")
+                os.makedirs(out)
+                st = Store(os.path.join(out, "results.sqlite"))
+                st.upsert_host(Host(ip="127.0.0.1",
+                                    ports=[Port(portid=self.port, state="open",
+                                                service="mongodb")]))
+                st.close()
+                rc = cli.main(["mongodb", "-o", out])
+                self.assertEqual(rc, 0)
+                sheets = xlsx.read_sheets(os.path.join(out, "enumeration.xlsx"))
+                self.assertIn("MongoDB", sheets)
+                vtxt = "\n".join(" ".join(map(str, r))
+                                 for r in sheets["Vulnerabilities"])
+                self.assertIn("MongoDB", vtxt)
+                st = Store(os.path.join(out, "results.sqlite"))
+                h = st.get_host("127.0.0.1")
+                st.close()
+                self.assertTrue([v for v in h.vulns if v.source == "mongodb"])
+        finally:
+            M.is_mongodb = orig
+
+    def test_no_endpoints_is_graceful(self):
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "eng")
+            os.makedirs(out)
+            st = Store(os.path.join(out, "results.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.9", ports=[Port(portid=22, service="ssh")]))
+            st.close()
+            self.assertEqual(cli.main(["mongodb", "-o", out, "--no-probe"]), 0)
+
+
+class DiscoveryReconfirmTest(unittest.TestCase):
+    """False-negative hardening: the discovery probe set, and the reconfirm re-probe
+    that recovers firewalled hosts which block ping but answer a port scan."""
+
+    def test_discovery_command_probes_ad_ports_and_retries(self):
+        from recce import scanner
+        seen = {}
+        orig = scanner._run
+        scanner._run = lambda cmd, timeout=None: (seen.__setitem__("cmd", cmd),
+                                                  scanner.RunOutcome(returncode=0))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                tf = os.path.join(d, "t.txt")
+                with open(tf, "w") as _f:
+                    _f.write("10.0.0.1\n10.0.0.2\n")
+                scanner.discover_hosts(tf, os.path.join(d, "disc.xml"))
+        finally:
+            scanner._run = orig
+        cmd = " ".join(seen["cmd"])
+        self.assertIn("-sn", seen["cmd"])
+        for p in ("88", "389", "5985"):                 # AD/Windows ports firewalls allow
+            self.assertIn(p, cmd)
+        # A single dropped probe shouldn't lose a host -> at least 2 retries.
+        self.assertIn("--max-retries", seen["cmd"])
+        self.assertEqual(seen["cmd"][seen["cmd"].index("--max-retries") + 1], "2")
+
+    def test_udp_basic_scan_command(self):
+        from recce import scanner
+        seen = {}
+        orig_run, orig_root = scanner._run, scanner._is_root
+        scanner._is_root = lambda: True          # pretend root so it builds the command
+        scanner._run = lambda cmd, timeout=None: (seen.__setitem__("cmd", cmd),
+                                                 scanner.RunOutcome(returncode=0))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                scanner.udp_basic_scan("10.0.0.5", os.path.join(d, "u.xml"),
+                                       scanner.PROFILES["standard"])
+        finally:
+            scanner._run, scanner._is_root = orig_run, orig_root
+        cmd = " ".join(seen["cmd"])
+        self.assertIn("-sU", seen["cmd"])                     # UDP scan
+        for p in ("53", "161", "123", "500"):                 # DNS/SNMP/NTP/IKE covered
+            self.assertIn(p, scanner._UDP_BASIC_PORTS.split(","))
+        self.assertIn("161", cmd)
+        # Default profile enables the basic UDP sweep.
+        self.assertTrue(scanner.PROFILES["standard"].udp_basic)
+
+    def test_reconfirm_command_is_bounded_pn_topports(self):
+        from recce import scanner
+        seen = {}
+        orig = scanner._run
+        scanner._run = lambda cmd, timeout=None: (seen.__setitem__("cmd", cmd),
+                                                  scanner.RunOutcome(returncode=0))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                tf = os.path.join(d, "m.txt")
+                with open(tf, "w") as _f:
+                    _f.write("10.0.0.5\n")
+                scanner.reconfirm_hosts(tf, os.path.join(d, "rc.xml"),
+                                        scanner.PROFILES["standard"])
+        finally:
+            scanner._run = orig
+        cmd = seen["cmd"]
+        self.assertIn("-Pn", cmd)                       # scan even if ping said down
+        self.assertIn("--open", cmd)                    # only report hosts with open ports
+        self.assertIn("--top-ports", cmd)
+        self.assertEqual(cmd[cmd.index("--top-ports") + 1], "100")
+
+    def test_reconfirm_promotes_firewalled_host(self):
+        from recce import cli, scanner
+        orig_rc, orig_parse = scanner.reconfirm_hosts, cli.np.parse_nmap_xml
+        # 10.0.0.50 blocked ping but answers on 445; 10.0.0.51 is genuinely dead.
+        cli.np.parse_nmap_xml = lambda path: [
+            Host(ip="10.0.0.50", ports=[Port(portid=445, state="open")],
+                 up_reason="syn-ack")]
+        scanner.reconfirm_hosts = lambda tf, out, profile: (out, None)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                prof = scanner.ScanProfile()
+                recovered, _ = cli._reconfirm_missed(["10.0.0.50", "10.0.0.51"],
+                                                     prof, {"raw": d})
+        finally:
+            scanner.reconfirm_hosts, cli.np.parse_nmap_xml = orig_rc, orig_parse
+        self.assertIn("10.0.0.50", recovered)           # recovered (open port = up)
+        self.assertNotIn("10.0.0.51", recovered)        # stays down (no open port)
+
+    def test_reconfirm_respects_cap_and_optout(self):
+        from recce import cli, scanner
+        calls = {"n": 0}
+        orig = scanner.reconfirm_hosts
+        scanner.reconfirm_hosts = lambda tf, out, profile: (
+            calls.__setitem__("n", calls["n"] + 1), (out, None))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                # Over the cap -> skipped, nmap never invoked.
+                prof = scanner.ScanProfile(reconfirm_cap=1)
+                rec, _ = cli._reconfirm_missed(["a", "b", "c"], prof, {"raw": d})
+                self.assertEqual((rec, calls["n"]), ({}, 0))
+                # Opted out -> skipped.
+                prof2 = scanner.ScanProfile(reconfirm=False)
+                rec2, _ = cli._reconfirm_missed(["a"], prof2, {"raw": d})
+                self.assertEqual((rec2, calls["n"]), ({}, 0))
+        finally:
+            scanner.reconfirm_hosts = orig
+
+    def test_seed_targets_preseeds_named_up_hosts(self):
+        # An authoritative list pre-registers every target BEFORE scanning, so a
+        # timeout/failure can't drop it. Each is present, named, and shown up.
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "r.sqlite"))
+            n = cli._seed_targets(st, ["10.0.0.5", "10.0.0.6"],
+                                  {"10.0.0.5": "10.0.0.0/24", "10.0.0.6": "10.0.0.0/24"},
+                                  {"10.0.0.5": "dc01.corp.local"})
+            self.assertEqual(n, 2)
+            h5 = st.get_host("10.0.0.5")
+            h6 = st.get_host("10.0.0.6")
+            st.close()
+        self.assertIsNotNone(h5)                         # present before any scan
+        self.assertEqual(h5.hostnames, ["dc01.corp.local"])
+        self.assertEqual(h5.up_reason, "target-list")
+        self.assertTrue(h5.is_up)                         # provided list vouches -> up
+        self.assertIsNotNone(h6)                          # a nameless target is seeded too
+
+    def test_seed_targets_never_clobbers_a_scanned_host(self):
+        # Re-seeding merges - it must not wipe ports/findings already collected.
+        from recce import cli
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "r.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                                ports=[Port(portid=445, state="open")],
+                                up_reason="syn-ack", enumerated=True))
+            cli._seed_targets(st, ["10.0.0.5"], {"10.0.0.5": "10.0.0.0/24"},
+                              {"10.0.0.5": "dc01"})
+            h = st.get_host("10.0.0.5")
+            st.close()
+        self.assertTrue(h.open_ports)                    # scan result preserved
+        self.assertEqual(h.up_reason, "syn-ack")         # real reply reason kept
+
+    def test_port_scope_label_and_all_ports_override(self):
+        from recce import cli, scanner
+        # standard = full sweep; quick = partial (top-N).
+        self.assertEqual(scanner.port_scope_label(scanner.PROFILES["standard"]),
+                         ("all 65535 TCP ports", True))
+        label, is_full = scanner.port_scope_label(scanner.PROFILES["quick"])
+        self.assertFalse(is_full)
+        self.assertIn("top 200", label)
+        # --all-ports forces a full sweep even on the quick profile.
+        prof = scanner.ScanProfile(all_ports=False, top_ports=200)
+        cli._apply_profile_overrides(prof, SimpleNamespace(all_ports=True))
+        self.assertTrue(prof.all_ports)
+        # A stray --top-ports followed by --all-ports still ends up full (order wins).
+        prof2 = scanner.ScanProfile()
+        cli._apply_profile_overrides(prof2, SimpleNamespace(top_ports=100, all_ports=True))
+        self.assertTrue(prof2.all_ports)
+
+    def test_targets_up_implies_pn(self):
+        # --targets-up forces -Pn semantics so discovery can never drop a provided host.
+        from recce import cli, scanner
+        prof = scanner.ScanProfile()
+        args = SimpleNamespace(targets_up=True, no_discovery=False)
+        cli._apply_profile_overrides(prof, args)
+        self.assertFalse(prof.ping_discovery)            # discovery skipped
+        self.assertTrue(prof.assume_up)                  # every target scanned as up
+        # Without the flag (and without -Pn) discovery still runs normally.
+        prof2 = scanner.ScanProfile()
+        cli._apply_profile_overrides(prof2, SimpleNamespace(targets_up=False,
+                                                            no_discovery=False))
+        self.assertTrue(prof2.ping_discovery)
+
+
+class AuditRegressionTest(unittest.TestCase):
+    """Regressions for bugs found in the full code audit + end-to-end run."""
+
+    def test_plain_http_product_not_flipped_to_tls(self):
+        # BUG: _is_tls substring-matched the PRODUCT, so "SimpleHTTPServer" (contains
+        # "https") got scanned as HTTPS and every web finding was missed on 8080.
+        from recce import probes
+        from recce.models import Port
+        self.assertFalse(probes._is_tls(
+            Port(portid=8080, service="http", product="SimpleHTTPServer")))
+        self.assertFalse(probes._is_tls(Port(portid=80, service="http", product="nginx")))
+        # Real TLS still detected via service/tunnel (not the port-only heuristic).
+        self.assertTrue(probes._is_tls(Port(portid=8443, service="http", tunnel="ssl")))
+        self.assertTrue(probes._is_tls(Port(portid=9999, service="ssl/http")))
+
+    def test_targets_dashed_hostname_and_huge_cidr(self):
+        from recce.targets import _expand_token
+        # A hyphenated FQDN / typo must not crash the scope (was ValueError).
+        self.assertEqual(_expand_token("mail-1.corp.example"), ["mail-1.corp.example"])
+        self.assertEqual(_expand_token("10.0.0.10-"), ["10.0.0.10-"])
+        # A genuine range still expands.
+        self.assertEqual(_expand_token("10.0.0.10-12"),
+                         ["10.0.0.10", "10.0.0.11", "10.0.0.12"])
+        # A too-large network is refused, not materialised (OOM guard).
+        with self.assertRaises(ValueError):
+            _expand_token("10.0.0.0/8")
+
+    def test_parser_tolerates_bad_numeric_attr(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "x.xml")
+            with open(f, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun><host><status state="up" '
+                         'reason="syn-ack"/><address addr="1.2.3.4" addrtype="ipv4"/>'
+                         '<ports><port protocol="tcp" portid=""><state state="open"/>'
+                         '</port></ports></host></nmaprun>')
+            hosts = parser.parse_nmap_xml(f)          # must not raise
+        self.assertEqual(len(hosts), 1)
+
+    def test_bson_parse_negative_length_terminates(self):
+        from recce import mongodb
+        import struct
+        body = b"\x02\x00" + struct.pack("<i", -6)    # string, empty name, negative len
+        doc = struct.pack("<i", len(body) + 5) + body + b"\x00"
+        out, idx = mongodb.bson_parse(doc, 0)          # must return, not hang
+        self.assertEqual(out, {})
+
+    def test_from_json_ignores_unknown_keys(self):
+        from recce.models import Host
+        data = {"ip": "1.2.3.4", "subnet": "1.2.3.0/24",
+                "some_removed_field": "legacy",       # schema drift on a carried DB
+                "ports": [{"portid": 80, "state": "open", "gone_field": 1}]}
+        h = Host.from_json(data)                        # must not raise TypeError
+        self.assertEqual(h.ip, "1.2.3.4")
+        self.assertEqual([p.portid for p in h.ports], [80])
+
+    def test_coverage_excludes_unconfirmed_phantom_hosts(self):
+        from recce import tracking as tr
+        confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                         ports=[Port(portid=445, state="open")])
+        phantom = Host(ip="10.0.0.250", subnet="10.0.0.0/24", up_reason="user-set")
+        keys = tr.item_keys([confirmed, phantom])
+        self.assertIn(tr.host_key("10.0.0.5"), keys["hosts"])
+        self.assertNotIn(tr.host_key("10.0.0.250"), keys["hosts"])  # not on any sheet
+        # A fully-reviewed confirmed host => 100%, not stuck below by a phantom.
+        cov = tr.compute_coverage([confirmed, phantom],
+                                  {tr.host_key("10.0.0.5"): (True, "")})
+        self.assertEqual(cov["hosts"], {"total": 1, "done": 1, "pct": 100})
+
+    def test_incomplete_scan_survives_merge_over_seed(self):
+        # A --targets-up seed (never enumerated) must not mark a truncated enum complete.
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "r.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.9", subnet="10.0.0.0/24",
+                                up_reason="target-list"))          # seed, enumerated=False
+            st.upsert_host(Host(ip="10.0.0.9", subnet="10.0.0.0/24", enumerated=True,
+                                incomplete_scan=True,
+                                ports=[Port(portid=80, state="open")]))  # truncated enum
+            h = st.get_host("10.0.0.9")
+            st.close()
+        self.assertTrue(h.incomplete_scan)             # truncation preserved
 
 
 if __name__ == "__main__":

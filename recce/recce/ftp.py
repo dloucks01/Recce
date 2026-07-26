@@ -13,7 +13,7 @@ Modelled on recce/smb.py. Two layers:
 
 Everything positive becomes a finding that folds into the main severity totals,
 the Vulnerabilities sheet, the write-ups, and a dedicated **FTP** workbook tab.
-Airgapped-safe; the write proof uses stdlib `ftplib` and degrades cleanly.
+Airgapped, stdlib only (the write proof uses `ftplib`). Safety posture: see SECURITY.md.
 """
 from __future__ import annotations
 
@@ -300,14 +300,25 @@ def prove_writable(ip: str, port: int = _DEFAULT_PORT, creds: dict | None = None
         stor = ftp.storbinary(f"STOR {marker}", io.BytesIO(b"recce-ftp-write-proof\n"))
         log.append(f"STOR {marker}: {stor}")
         wrote = str(stor).startswith("226") or str(stor).startswith("250")
+        cleanup_ok = True
         if wrote:
-            try:
-                log.append(f"DELE {marker}: {ftp.delete(marker)}")
-            except ftplib.all_errors as e:                 # best-effort cleanup
-                log.append(f"DELE {marker}: {e}")
-        return {"writable": bool(wrote), "evidence": "\n".join(log), "error": None}
+            cleanup_ok = False
+            for _ in range(2):                             # retry the reverting delete
+                try:
+                    resp = ftp.delete(marker)
+                    log.append(f"DELE {marker}: {resp}")
+                    cleanup_ok = str(resp).startswith("250")
+                    break
+                except ftplib.all_errors as e:
+                    log.append(f"DELE {marker}: {e}")
+            if not cleanup_ok:
+                log.append(f"[!] cleanup: could not delete {marker} - REMOVE IT "
+                           "MANUALLY (the write proof left the marker on the server).")
+        return {"writable": bool(wrote), "evidence": "\n".join(log),
+                "cleanup_ok": cleanup_ok, "marker": marker, "error": None}
     except Exception as e:  # noqa: BLE001 - ftplib.all_errors + socket errors
-        return {"writable": False, "evidence": "\n".join(log), "error": str(e)}
+        return {"writable": False, "evidence": "\n".join(log),
+                "cleanup_ok": True, "error": str(e)}
     finally:
         if ftp is not None:
             try:
@@ -324,10 +335,15 @@ def write_proof_finding(ip: str, port: int, proof: dict,
     if not proof.get("writable"):
         return None
     who = "anonymous" if not (creds and creds.get("user")) else creds["user"]
+    reversible = ("then DELEting it (fully reversible)"
+                  if proof.get("cleanup_ok", True) else
+                  f"then attempting to DELE it - CLEANUP FAILED, the marker "
+                  f"'{proof.get('marker', _PROBE_MARK)}' is still on the server; "
+                  "remove it manually")
     return _finding(
         "high", "Writable FTP directory (proven)", f"{ip}:{port}",
-        f"recce PROVED write access as {who} by STORing a marker file then DELEting it "
-        "(fully reversible):\n\n" + (proof.get("evidence") or ""),
+        f"recce PROVED write access as {who} by STORing a marker file {reversible}:"
+        "\n\n" + (proof.get("evidence") or ""),
         "ftp / web shell",
         "put shell.php   # if the FTP root backs a web root this is direct RCE",
         "Remove write access for anonymous/low-priv principals; separate the FTP root "
@@ -344,24 +360,9 @@ def proof_html(command, output, banner: str = "") -> str:
 # --- top-level analyze ----------------------------------------------------------
 
 def findings_to_vulns(fs: list[dict]) -> dict:
-    from .models import Vuln
-    by_ip: dict[str, list] = {}
-    for f in fs:
-        parts = f["target"].split(":")
-        ip = parts[0]
-        port = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else _DEFAULT_PORT
-        evidence = f.get("detail", "")
-        if f.get("narrative"):
-            evidence += f"\n\nWhat this enables:\n{f['narrative']}"
-        if f.get("command"):
-            evidence += f"\n\nProve / next step:\n{f['command']}"
-        by_ip.setdefault(ip, []).append(Vuln(
-            ip=ip, port=port, protocol="tcp",
-            script_id=f"ftp:{f['title'][:40]}", state="finding", title=f["title"],
-            severity=f["severity"], source="ftp", confidence="confirmed",
-            cwes=list(f.get("cwes") or ["CWE-284"]),
-            output=evidence.strip(), remediation=f.get("remediation", "")))
-    return by_ip
+    """FTP findings -> {ip: [Vuln]} (source='ftp')."""
+    from .svccommon import findings_to_vulns as _f2v
+    return _f2v(fs, "ftp", _DEFAULT_PORT)
 
 
 def analyze(hosts: list[Host], creds: dict | None = None,
