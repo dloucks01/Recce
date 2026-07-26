@@ -3854,7 +3854,7 @@ def cmd_snmp(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = snmp.analyze(hosts, active=active)
+    analysis = snmp.analyze(hosts, active=active, **_probe_kwargs(args, "snmp"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No SNMP-responsive hosts. (SNMP is UDP 161; recce probes it directly, "
@@ -3904,7 +3904,7 @@ def cmd_mongodb(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = mongodb.analyze(hosts, active=active)
+    analysis = mongodb.analyze(hosts, active=active, **_probe_kwargs(args, "mongodb"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No MongoDB endpoints in the datastore (no port 27017-27019). Run "
@@ -3948,7 +3948,7 @@ def cmd_redis(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = _redis.analyze(hosts, active=active)
+    analysis = _redis.analyze(hosts, active=active, **_probe_kwargs(args, "redis"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No Redis endpoints in the datastore (no port 6379/6380). Run `enum` "
@@ -3994,7 +3994,7 @@ def cmd_elasticsearch(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = _es.analyze(hosts, active=active)
+    analysis = _es.analyze(hosts, active=active, **_probe_kwargs(args, "elasticsearch"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No Elasticsearch endpoints in the datastore (no port 9200/9201). "
@@ -4040,7 +4040,7 @@ def cmd_rsync(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = _rsync.analyze(hosts, active=active)
+    analysis = _rsync.analyze(hosts, active=active, **_probe_kwargs(args, "rsync"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No rsync endpoints in the datastore (no port 873). Run `enum` "
@@ -4082,7 +4082,7 @@ def cmd_nfs(args: argparse.Namespace) -> int:
     hosts = _selected_hosts(store.all_hosts(), args)
 
     active = not args.no_probe
-    analysis = _nfs.analyze(hosts, active=active)
+    analysis = _nfs.analyze(hosts, active=active, **_probe_kwargs(args, "nfs"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No NFS endpoints in the datastore (no port 2049/111). Run `enum` "
@@ -4157,7 +4157,8 @@ def cmd_kerberos(args: argparse.Namespace) -> int:
               "while and is network-noisy; narrow with --userlist / --user if needed.")
     analysis = _krb.analyze(hosts, users=users, realm=realm,
                             dc_ip=getattr(args, "dc_ip", "") or "",
-                            privileged=privileged, active=active)
+                            privileged=privileged, active=active,
+                            **_probe_kwargs(args, "kerberos"))
     if not analysis["dc_ip"]:
         print("[!] No Kerberos DC found (no host with port 88). Pass --dc-ip, or run "
               "`enum` against the domain controller first.")
@@ -4214,6 +4215,47 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_budget(parser) -> None:
+    """A wall-clock cap for a deep module's sequential probe loop."""
+    parser.add_argument("--budget", type=float, metavar="SECONDS",
+                        help="stop probing after this many seconds and keep partial "
+                             "results (default: no cap)")
+
+
+def _probe_progress(label: str):
+    """A throttled per-target progress printer for the sequential deep-module loops,
+    so a long run reads as 'working' rather than 'hung'. Quiet on tiny runs."""
+    import time
+    last = [0.0]
+
+    def cb(i, n, t):
+        if n < 8:
+            return                                     # small runs: the summary suffices
+        now = time.monotonic()
+        if now - last[0] >= 2.0 or i == n:
+            last[0] = now
+            who = t.get("ip", "") if isinstance(t, dict) else str(t)
+            print(f"    [{i}/{n}] {label} {who} ...", flush=True)
+    return cb
+
+
+def _probe_kwargs(args, label: str) -> dict:
+    """budget + progress kwargs for a deep module's analyze()."""
+    return {"budget": getattr(args, "budget", None),
+            "progress": _probe_progress(label)}
+
+
+def _report_partial(stats) -> None:
+    """Tell the operator when a probe loop stopped early (budget / Ctrl-C) so partial
+    results are never mistaken for a complete, clean assessment."""
+    stopped = (stats or {}).get("stopped")
+    if stopped == "budget":
+        print("    [!] Time budget (--budget) reached - stopped early; partial results "
+              "saved. Raise --budget or narrow the targets to finish the rest.")
+    elif stopped == "interrupt":
+        print("    [!] Interrupted - stopped early; results probed so far were saved.")
+
+
 def _fold_service_findings(store, hosts, analysis, source, to_vulns, label):
     """Shared tail for the deep-service commands (smb/ftp/docker/kubernetes/mssql):
     sort findings by severity, fold them into their hosts (replacing this source's
@@ -4244,6 +4286,7 @@ def _fold_service_findings(store, hosts, analysis, source, to_vulns, label):
         print(f"[+] {len(fs)} {label} finding(s): "
               + ", ".join(f"{by_sev[s]} {s}" for s in
                           ("critical", "high", "medium", "low") if by_sev.get(s)))
+    _report_partial(analysis.get("stats"))
     return by_ip
 
 
@@ -5402,6 +5445,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live community brute/walk; just write the commands")
     sp.add_argument("-o", "--output-dir", default="engagement")
     sp.add_argument("--title", default="Recce Engagement")
+    _add_budget(sp)
     sp.set_defaults(func=cmd_snmp)
 
     # MongoDB enumeration.
@@ -5415,6 +5459,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live probe; just write the commands")
     mp.add_argument("-o", "--output-dir", default="engagement")
     mp.add_argument("--title", default="Recce Engagement")
+    _add_budget(mp)
     mp.set_defaults(func=cmd_mongodb)
 
     # Redis enumeration.
@@ -5428,6 +5473,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live probe; just write the commands")
     rp.add_argument("-o", "--output-dir", default="engagement")
     rp.add_argument("--title", default="Recce Engagement")
+    _add_budget(rp)
     rp.set_defaults(func=cmd_redis)
 
     # Elasticsearch enumeration.
@@ -5441,6 +5487,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live probe; just write the commands")
     ep.add_argument("-o", "--output-dir", default="engagement")
     ep.add_argument("--title", default="Recce Engagement")
+    _add_budget(ep)
     ep.set_defaults(func=cmd_elasticsearch)
 
     # rsync-daemon enumeration.
@@ -5454,6 +5501,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="skip the live probe; just write the commands")
     syp.add_argument("-o", "--output-dir", default="engagement")
     syp.add_argument("--title", default="Recce Engagement")
+    _add_budget(syp)
     syp.set_defaults(func=cmd_rsync)
 
     # NFS / mountd enumeration.
@@ -5467,6 +5515,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="skip the live probe; just write the commands")
     nfp.add_argument("-o", "--output-dir", default="engagement")
     nfp.add_argument("--title", default="Recce Engagement")
+    _add_budget(nfp)
     nfp.set_defaults(func=cmd_nfs)
 
     # Credential-less Kerberos AS-REP roasting + user enumeration.
@@ -5488,6 +5537,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live probe; just write the commands")
     kp.add_argument("-o", "--output-dir", default="engagement")
     kp.add_argument("--title", default="Recce Engagement")
+    _add_budget(kp)
     kp.set_defaults(func=cmd_kerberos)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")

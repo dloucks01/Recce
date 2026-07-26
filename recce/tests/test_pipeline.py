@@ -8510,6 +8510,56 @@ class KerberosTest(unittest.TestCase):
             K.is_kerberos = orig
 
 
+class SvcProbeTest(unittest.TestCase):
+    """The shared sequential-probe driver: wall-clock budget, per-target progress,
+    and clean partial results on Ctrl-C."""
+
+    def test_budget_stops_early_with_partial(self):
+        import time
+        from recce import svcprobe as S
+        targets = [{"ip": f"10.0.0.{i}"} for i in range(20)]
+        st = {}
+        got = [r for _, r in S.iter_probe(
+            targets, lambda t: (time.sleep(0.03) or t["ip"]),
+            budget=0.1, state=st)]
+        self.assertEqual(st["stopped"], "budget")
+        self.assertLess(len(got), 20)                    # stopped early
+        self.assertEqual(st["done"], len(got))           # bookkeeping matches
+
+    def test_keyboardinterrupt_yields_partial(self):
+        from recce import svcprobe as S
+        targets = [{"ip": f"10.0.0.{i}"} for i in range(10)]
+
+        def probe(t):
+            if t["ip"] == "10.0.0.4":
+                raise KeyboardInterrupt
+            return t["ip"]
+        st = {}
+        got = [r for _, r in S.iter_probe(targets, probe, state=st)]
+        self.assertEqual(st["stopped"], "interrupt")
+        self.assertEqual(got, [f"10.0.0.{i}" for i in range(4)])   # 4 completed
+
+    def test_progress_fires_and_completes(self):
+        from recce import svcprobe as S
+        targets = [{"ip": f"10.0.0.{i}"} for i in range(5)]
+        seen = []
+        st = {}
+        out = [r for _, r in S.iter_probe(
+            targets, lambda t: t["ip"],
+            progress=lambda i, n, t: seen.append((i, n)), state=st)]
+        self.assertEqual(out, [f"10.0.0.{i}" for i in range(5)])
+        self.assertEqual(seen, [(i, 5) for i in range(1, 6)])
+        self.assertIsNone(st["stopped"])                 # ran to completion
+
+    def test_progress_exception_never_breaks_the_loop(self):
+        from recce import svcprobe as S
+        def boom(i, n, t):
+            raise ValueError("progress must never break a scan")
+        out = [r for _, r in S.iter_probe(
+            [{"ip": "1.1.1.1"}], lambda t: "ok", progress=boom)]
+        self.assertEqual(out, ["ok"])
+
+
 class DiscoveryReconfirmTest(unittest.TestCase):
     """False-negative hardening: the discovery probe set, and the reconfirm re-probe
     that recovers firewalled hosts which block ping but answer a port scan."""

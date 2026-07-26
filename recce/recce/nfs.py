@@ -441,14 +441,17 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return _f2v(fs, "nfs", _DEFAULT_PORT)
 
 
-def analyze(hosts: list[Host], creds: dict | None = None,
-            active: bool = True) -> dict:
-    """Full NFS analysis. Returns {targets, findings, runbooks, probes, stats}."""
+def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
+            budget: float | None = None, progress=None) -> dict:
+    """Full NFS analysis. Returns {targets, findings, runbooks, probes, stats}.
+    `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
+    from . import svcprobe
     targets = nfs_targets(hosts)
     probes: dict = {}
+    state: dict = {}
     if active:
-        for t in targets:
-            pr = probe(t["ip"])
+        for t, pr in svcprobe.iter_probe(targets, lambda t: probe(t["ip"]),
+                                         budget=budget, progress=progress, state=state):
             if pr and pr.get("reachable"):
                 probes[t["ip"]] = pr
                 t["exports"] = len(pr.get("exports") or [])
@@ -461,4 +464,5 @@ def analyze(hosts: list[Host], creds: dict | None = None,
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
             "probes": probes,
-            "stats": {"targets": len(targets), "findings": len(fs)}}
+            "stats": {"targets": len(targets), "findings": len(fs),
+                      "stopped": state.get("stopped")}}

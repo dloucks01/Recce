@@ -280,17 +280,27 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return _f2v(fs, "rsync", _DEFAULT_PORT)
 
 
-def analyze(hosts: list[Host], creds: dict | None = None,
-            active: bool = True) -> dict:
-    """Full rsync analysis. Returns {targets, findings, runbooks, probes, stats}."""
+def _probe_one(t: dict) -> dict:
+    """List a daemon's modules and, for each, its anonymous-access verdict."""
+    pr = list_modules(t["ip"], t["port"])
+    if pr and pr.get("reachable"):
+        for m in pr.get("modules") or []:
+            m["access"] = probe_module(t["ip"], t["port"], m["name"])
+    return pr
+
+
+def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
+            budget: float | None = None, progress=None) -> dict:
+    """Full rsync analysis. Returns {targets, findings, runbooks, probes, stats}.
+    `budget` caps wall-clock seconds; `progress(i, n, target)` fires per probe."""
+    from . import svcprobe
     targets = rsync_targets(hosts)
     probes: dict = {}
+    state: dict = {}
     if active:
-        for t in targets:
-            pr = list_modules(t["ip"], t["port"])
+        for t, pr in svcprobe.iter_probe(targets, _probe_one, budget=budget,
+                                         progress=progress, state=state):
             if pr and pr.get("reachable"):
-                for m in pr.get("modules") or []:
-                    m["access"] = probe_module(t["ip"], t["port"], m["name"])
                 probes[(t["ip"], t["port"])] = pr
                 t["version"] = pr.get("version", "") or t.get("version", "")
                 t["modules"] = len(pr.get("modules") or [])
@@ -302,4 +312,5 @@ def analyze(hosts: list[Host], creds: dict | None = None,
                 for t in targets]
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
-            "stats": {"targets": len(targets), "findings": len(fs)}}
+            "stats": {"targets": len(targets), "findings": len(fs),
+                      "stopped": state.get("stopped")}}

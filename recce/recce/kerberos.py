@@ -418,11 +418,13 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 def analyze(hosts: list[Host], users: list[str] | None = None,
             realm: str = "", dc_ip: str = "", privileged: set | None = None,
-            active: bool = True, max_users: int = 1500) -> dict:
+            active: bool = True, max_users: int = 1500,
+            budget: float | None = None, progress=None) -> dict:
     """Full credential-less roast/enum. `users` defaults to enumerated account names;
-    `realm`/`dc_ip` fall back to derived domains / a host with 88 open. Returns
+    `realm`/`dc_ip` fall back to derived domains / a host with 88 open. `budget` caps
+    wall-clock seconds; `progress(i, n, user)` fires per AS-REQ. Returns
     {dc_ip, realm, results, findings, runbooks, stats}."""
-    from . import ad
+    from . import ad, svcprobe
     dc_ip = dc_ip or dc_ip_for(hosts)
     if not realm:
         doms = ad.derive_domains([h for h in hosts if h.is_up])
@@ -430,9 +432,12 @@ def analyze(hosts: list[Host], users: list[str] | None = None,
     users = users or candidate_users(hosts)
     users = users[:max_users]
     results: list[dict] = []
+    state: dict = {}
     if active and dc_ip and realm and users:
-        for u in users:
-            results.append(roast_user(dc_ip, realm, u))
+        for _u, r in svcprobe.iter_probe(
+                users, lambda u: roast_user(dc_ip, realm, u),
+                budget=budget, progress=progress, state=state):
+            results.append(r)
     fs = findings(dc_ip, realm, results, privileged) if results else []
     return {"dc_ip": dc_ip, "realm": realm, "results": results, "findings": fs,
             # `targets` lets _service_module_coverage credit the DC as scanned even
@@ -445,4 +450,4 @@ def analyze(hosts: list[Host], users: list[str] | None = None,
                       "roastable": sum(1 for r in results if r["state"] == "roastable"),
                       "valid": sum(1 for r in results
                                    if r["state"] in ("valid", "locked", "roastable")),
-                      "findings": len(fs)}}
+                      "findings": len(fs), "stopped": state.get("stopped")}}
