@@ -2917,6 +2917,36 @@ class HtmlReportTest(unittest.TestCase):
         for bad in ("src=", "<link", "<script"):
             self.assertNotIn(bad, html)
 
+    def test_users_and_credentials_inventory(self):
+        """All users and captured credentials are surfaced; the credential secret is
+        masked in the shareable HTML (full values stay in the workbook)."""
+        from recce import report_html
+        from recce.models import Account, Credential
+        h = Host(ip="10.0.10.10", state="up", up_reason="syn-ack",
+                 ports=[Port(portid=445, state="open", service="microsoft-ds")],
+                 accounts=[
+                     Account(ip="10.0.10.10", source="ldap", kind="user", name="jdoe",
+                             domain="corp.local", rid="1104",
+                             attrs={"admincount": "1", "description": "IT admin"}),
+                     Account(ip="10.0.10.10", source="netexec", kind="share",
+                             name="ADMIN$", detail="READ,WRITE")])
+        creds = [Credential(username="admin", secret="Passw0rd!", kind="password",
+                            domain="corp.local", source="secretsdump",
+                            origin_ip="10.0.10.10")]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html([h], p, credentials=creds)
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("Users &amp; accounts", html)
+        self.assertIn("jdoe", html)
+        self.assertIn("admin", html)                    # AdminCount flag pill
+        self.assertIn("ADMIN$", html)                   # share listed
+        self.assertIn("Credentials captured", html)
+        self.assertIn("secretsdump", html)
+        self.assertNotIn("Passw0rd!", html)             # secret is MASKED
+        self.assertIn("[9 chars]", html)                # masked length shown
+
     def test_empty_hosts_ok(self):
         from recce import report_html
         with tempfile.TemporaryDirectory() as d:

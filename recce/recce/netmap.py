@@ -155,6 +155,136 @@ def mermaid(hosts: list[Host], domains=None) -> str:
     return "\n".join(out) + "\n"
 
 
+# Role palette shared by the SVG renderer (fill, stroke).
+_ROLE_COLOR = {
+    "DC": ("#fbe3e3", "#C00000"), "DB": ("#e7eefb", "#1f4e9c"),
+    "Web": ("#e8f4ec", "#2E7D32"), "Mail": ("#fbf3e0", "#9C7A00"),
+    "File/SMB": ("#eef1f1", "#5f6f6e"), "Workstation": ("#f3eefb", "#6b4fa0"),
+    "Host": ("#ffffff", "#8a9997"),
+}
+_DOMAIN_COLOR = ("#fff6e6", "#C15A11")
+
+
+def _x(s, n=30):
+    from html import escape as _e
+    s = re.sub(r"\s+", " ", (s or "").strip())
+    if len(s) > n:
+        s = s[: n - 1] + "…"
+    return _e(s)
+
+
+def svg(hosts: list[Host], domains=None) -> str:
+    """A directly-viewable inline SVG of the network map — renders in any browser
+    with no tools or JavaScript (and prints to PDF). Subnet columns of role-coloured
+    host cards, AD domain nodes below with edges to their DCs, and a legend. For a
+    large estate (>50 live hosts) it aggregates each subnet to role counts instead of
+    drawing every host, so it stays readable."""
+    from html import escape as _e
+    up = [h for h in hosts if h.is_up]
+    if not up:
+        return ('<svg viewBox="0 0 320 60" width="320" height="60" role="img" '
+                'aria-label="Network map"><text x="12" y="34" font-size="14" '
+                'fill="#5f6f6e">No hosts enumerated yet.</text></svg>')
+    by_subnet: dict[str, list[Host]] = {}
+    for h in up:
+        by_subnet.setdefault(h.subnet or "unknown", []).append(h)
+    subnets = sorted(by_subnet, key=_ipkey)
+    doms = domains or ad.derive_domains(up)
+    aggregate = len(up) > 50
+
+    colW, cardW, cardH, cardGap, colGap = 210, 196, 50, 10, 26
+    m, headerH = 18, 30
+    x0 = m
+    els, dc_anchor = [], {}          # dc_anchor[ip] = (x, y_bottom) of its card
+
+    def card(x, y, fill, stroke, lines, w=cardW, h=cardH):
+        out = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="7" '
+               f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>']
+        ty = y + 16
+        for i, (txt, bold) in enumerate(lines):
+            weight = "700" if bold else "400"
+            col = "#1a2422" if i == 0 else "#3a4644"
+            out.append(f'<text x="{x + 10}" y="{ty}" font-size="11.5" '
+                       f'font-weight="{weight}" fill="{col}">{txt}</text>')
+            ty += 14
+        return "".join(out)
+
+    max_rows = 0
+    for ci, sub in enumerate(subnets):
+        rows = sorted(by_subnet[sub], key=lambda z: _ipkey(z.ip))
+        x = x0 + ci * (colW + colGap)
+        els.append(f'<text x="{x}" y="{m + 18}" font-size="13" font-weight="700" '
+                   f'fill="#115e59">{_x(sub, 24)} '
+                   f'<tspan fill="#5f6f6e" font-weight="400">'
+                   f'({len(rows)})</tspan></text>')
+        y = m + headerH
+        if aggregate:
+            counts: dict[str, int] = {}
+            for h in rows:
+                counts[primary_role(h)] = counts.get(primary_role(h), 0) + 1
+            for role in _ROLE_ORDER:
+                if role not in counts:
+                    continue
+                fill, stroke = _ROLE_COLOR[role]
+                els.append(card(x, y, fill, stroke,
+                                [(f"{counts[role]}× {_e(role)}", True)], h=32))
+                y += 32 + cardGap
+            max_rows = max(max_rows, len(counts))
+        else:
+            for h in rows:
+                role = primary_role(h)
+                fill, stroke = _ROLE_COLOR[role]
+                l1 = _x(h.ip, 22)
+                l2 = _x((h.hostname + "  ") if h.hostname else "") + _e(role)
+                l3 = _x(h.os_name, 30) if h.os_name else ""
+                lines = [(l1, True), (l2, False)] + ([(l3, False)] if l3 else [])
+                els.append(card(x, y, fill, stroke, lines))
+                if "Domain Controller" in (h.roles or []):
+                    dc_anchor[h.ip] = (x + cardW / 2, y + cardH)
+                y += cardH + cardGap
+            max_rows = max(max_rows, len(rows))
+
+    row_h = (32 + cardGap) if aggregate else (cardH + cardGap)
+    dom_y = m + headerH + max_rows * row_h + 24
+    dom_anchor = {}
+    for di, d in enumerate(doms or []):
+        dx = x0 + di * (colW + colGap)
+        fill, stroke = _DOMAIN_COLOR
+        els.append(f'<rect x="{dx}" y="{dom_y}" width="{cardW}" height="34" rx="17" '
+                   f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>')
+        els.append(f'<text x="{dx + cardW / 2}" y="{dom_y + 21}" text-anchor="middle" '
+                   f'font-size="12" font-weight="700" fill="#7a3a0a">AD: '
+                   f'{_x(d.name, 22)}</text>')
+        dom_anchor[(d.name or "").lower()] = (dx + cardW / 2, dom_y)
+        for ip in getattr(d, "dc_ips", []) or []:
+            if ip in dc_anchor:
+                x1, y1 = dc_anchor[ip]
+                els.insert(0, f'<path d="M{x1:.0f},{y1:.0f} L{dx + cardW / 2:.0f},'
+                              f'{dom_y:.0f}" stroke="#C15A11" stroke-width="1.4" '
+                              f'stroke-dasharray="4 3" fill="none"/>')
+
+    # legend
+    leg_y = dom_y + 52
+    lx = x0
+    els.append(f'<text x="{lx}" y="{leg_y}" font-size="11" fill="#5f6f6e">Role:</text>')
+    lx += 42
+    for role in _ROLE_ORDER:
+        fill, stroke = _ROLE_COLOR[role]
+        els.append(f'<rect x="{lx}" y="{leg_y - 10}" width="12" height="12" rx="2" '
+                   f'fill="{fill}" stroke="{stroke}"/>')
+        els.append(f'<text x="{lx + 17}" y="{leg_y}" font-size="11" '
+                   f'fill="#3a4644">{_e(role)}</text>')
+        lx += 30 + len(role) * 7
+
+    width = max(x0 + len(subnets) * (colW + colGap), lx + 20,
+                x0 + max(1, len(doms or [])) * (colW + colGap))
+    height = leg_y + 20
+    return (f'<svg viewBox="0 0 {int(width)} {int(height)}" width="{int(width)}" '
+            f'height="{int(height)}" role="img" aria-label="Network architecture map" '
+            f'font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'
+            + "".join(els) + "</svg>")
+
+
 def dot(hosts: list[Host], domains=None) -> str:
     """Graphviz DOT of the same map (render: dot -Tpng architecture.dot -o arch.png)."""
     up = [h for h in hosts if h.is_up]

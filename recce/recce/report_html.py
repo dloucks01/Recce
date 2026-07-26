@@ -96,6 +96,9 @@ table.cov th:first-child,table.cov td:first-child{text-align:left}
 .cov .todo{color:#b7c0be}
 .cov .na{color:#cdd5d3}
 .legendkey{font-size:12px;color:var(--mut);margin:2px 0 12px}
+.netmap{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px;
+  margin:10px 0;overflow-x:auto}
+.netmap svg{max-width:none;height:auto}
 .stage{margin:14px 0}
 .stage .sh{font-weight:700;color:var(--tl2);margin-bottom:4px}
 .step{border-left:3px solid var(--line);padding:4px 0 4px 12px;margin:6px 0}
@@ -409,7 +412,6 @@ def _network_map(hosts, domains):
     if not any(h.is_up for h in hosts):
         return ""
     lines = nm.summary(hosts, domains)
-    diagram = nm.mermaid(hosts, domains)
     return (
         '<section><h2>Network map</h2>'
         '<div class="narr">' + "".join(f"<p>{escape(l)}</p>" for l in lines) + '</div>'
@@ -417,9 +419,10 @@ def _network_map(hosts, domains):
         "each host's role, and the AD domains / trusts recce observed. It is not a "
         'physical or routing topology: recce does not trace links or firewall rules '
         'between hosts, so only relationships it actually saw are drawn.</p>'
-        '<details class="graph"><summary>Network diagram (Mermaid — paste into '
-        'mermaid.live or GitHub, or render the <b>architecture.mmd</b> file)</summary>'
-        f'<pre class="mermaid mono">{escape(diagram)}</pre></details>'
+        f'<div class="netmap">{nm.svg(hosts, domains)}</div>'
+        '<p class="basis">This diagram renders here directly (and prints to PDF). The '
+        'same map is also written as <b>architecture.mmd</b> (Mermaid) and '
+        '<b>architecture.dot</b> (Graphviz) next to this report, for those tools.</p>'
         '</section>')
 
 
@@ -514,6 +517,131 @@ def _progress_checklist(hosts, tracking):
     return "".join(out)
 
 
+def _key_info(hosts, domains):
+    """Environment facts worth having at hand: AD domains, DCs, functional level,
+    machine-account quota, and the password policy — all as observed."""
+    doms = domains or ad.derive_domains([h for h in hosts if h.is_up])
+    if not doms:
+        return ""
+    rows = []
+    for d in doms:
+        facts = []
+        if d.netbios:
+            facts.append(f"NetBIOS {escape(d.netbios)}")
+        if d.functional_level:
+            facts.append(f"level {escape(d.functional_level)}")
+        if str(d.machine_account_quota) not in ("", "None"):
+            facts.append(f"MachineAcctQuota={escape(str(d.machine_account_quota))}")
+        if d.anonymous_bind:
+            facts.append("anonymous LDAP bind")
+        pol = d.password_policy or {}
+        polstr = "; ".join(f"{escape(str(k))}={escape(str(v))}"
+                           for k, v in pol.items()) if pol else "not observed"
+        rows.append(f'<tr><td>{escape(d.name)}</td>'
+                    f'<td class="mono">{escape(", ".join(d.dc_ips) or "—")}</td>'
+                    f'<td>{", ".join(facts) or "—"}</td>'
+                    f'<td class="muted">{polstr}</td></tr>')
+    return ('<section><h2>Key information</h2>'
+            '<table><thead><tr><th>AD domain</th><th>Domain controller(s)</th>'
+            '<th>Facts</th><th>Password policy</th></tr></thead><tbody>'
+            + "".join(rows) + '</tbody></table></section>')
+
+
+def _accounts_section(hosts):
+    """All users and accounts discovered, with the notable AD flags. The workbook's
+    Users & Accounts tab carries every kind and attribute in full."""
+    accts = [a for h in hosts for a in h.accounts]
+    if not accts:
+        return ""
+    by_kind: dict[str, list] = {}
+    for a in accts:
+        by_kind.setdefault(a.kind, []).append(a)
+    order = ["user", "group", "computer", "spn", "share", "domain", "trust"]
+    parts = []
+    for k in order:
+        if k in by_kind:
+            n = len({(a.domain.lower(), a.name.lower()) for a in by_kind[k]})
+            parts.append(f"{n} {k}{'s' if n != 1 else ''}")
+    out = ['<section><h2>Users &amp; accounts</h2>',
+           f'<p class="basis">Discovered during enumeration: {escape(", ".join(parts))}. '
+           "Full detail (every kind and attribute) is on the workbook's "
+           "<b>Users &amp; Accounts</b> tab.</p>"]
+
+    users = {}
+    for a in by_kind.get("user", []):
+        users.setdefault((a.domain.lower(), a.name.lower()), a)
+    if users:
+        rows = []
+        for a in sorted(users.values(), key=lambda x: (x.domain, x.name.lower())):
+            at = a.attrs
+            flags = []
+            if str(at.get("admincount", "")) in ("1", "yes", "True", "true"):
+                flags.append("admin")
+            if at.get("spn"):
+                flags.append("kerberoastable")
+            if at.get("asrep_roastable") == "yes":
+                flags.append("AS-REP")
+            if at.get("delegation"):
+                flags.append(escape(str(at["delegation"])))
+            if str(at.get("enabled", "")).lower() in ("false", "no", "0"):
+                flags.append("disabled")
+            fh = " ".join(f'<span class="pill">{f}</span>' for f in flags)
+            rows.append(f'<tr><td>{escape(a.name)}</td><td>{escape(a.domain)}</td>'
+                        f'<td class="mono">{escape(a.rid)}</td><td>{fh}</td>'
+                        f'<td class="muted">{escape(at.get("description", ""))}</td></tr>')
+        out.append('<table><thead><tr><th>User</th><th>Domain</th><th>RID</th>'
+                   '<th>Flags</th><th>Description</th></tr></thead><tbody>'
+                   + "".join(rows) + '</tbody></table>')
+
+    shares = {}
+    for a in by_kind.get("share", []):
+        shares.setdefault((a.ip, a.name.lower()), a)
+    if shares:
+        srows = [f'<tr><td class="mono">{escape(a.ip)}</td><td>{escape(a.name)}</td>'
+                 f'<td class="muted">{escape(a.detail)}</td></tr>'
+                 for a in sorted(shares.values(), key=lambda x: (x.ip, x.name))]
+        out.append('<h3>Shares</h3><table><thead><tr><th>Host</th><th>Share</th>'
+                   '<th>Access / note</th></tr></thead><tbody>'
+                   + "".join(srows) + '</tbody></table>')
+    out.append('</section>')
+    return "".join(out)
+
+
+def _mask_secret(secret, kind):
+    if not secret:
+        return "(blank)"
+    if kind == "nthash":
+        return f'NT hash …{escape(secret[-4:])}'
+    if kind == "ssh-key":
+        return f'SSH key: {escape(secret)}'
+    if len(secret) <= 3:
+        return "•" * len(secret)
+    return (escape(secret[0]) + "•" * (len(secret) - 2) + escape(secret[-1])
+            + f' <span class="muted">[{len(secret)} chars]</span>')
+
+
+def _credentials_section(creds):
+    """Every credential recce recovered/stacked. Secrets are masked in this shareable
+    file; full values (for spraying) live on the workbook's Credentials tab."""
+    if not creds:
+        return ""
+    rows = []
+    for c in creds:
+        acct = (c.domain + "\\" if c.domain else "") + c.username
+        rows.append(f'<tr><td class="mono">{escape(acct)}</td><td>{escape(c.kind)}</td>'
+                    f'<td class="mono">{_mask_secret(c.secret, c.kind)}</td>'
+                    f'<td>{escape(c.source)}</td>'
+                    f'<td class="mono">{escape(c.origin_ip)}</td></tr>')
+    return ('<section><h2>Credentials captured</h2>'
+            '<p class="basis">Secrets are <b>masked</b> here because this file is '
+            "shareable; the full values for spraying are on the workbook's "
+            '<b>Credentials</b> tab (<code>recce creds --plan</code> builds the spray '
+            'plan).</p>'
+            '<table><thead><tr><th>Account</th><th>Type</th><th>Secret</th>'
+            '<th>Source</th><th>Captured on</th></tr></thead><tbody>'
+            + "".join(rows) + '</tbody></table></section>')
+
+
 def _hosts_table(hosts):
     rows = []
     for h in sorted(hosts, key=lambda x: x.ip):
@@ -545,10 +673,13 @@ def build_html(hosts: list[Host], out_path: str, *, title: str = "",
         _exec_summary(hosts, domains, creds),
         _dashboard(hosts),
         _network_map(hosts, domains),
+        _key_info(hosts, domains),
         _scoring_legend(),
         _findings_table(hosts),
         _attack_path(hosts),
         _findings_detail(hosts),
+        _accounts_section(hosts),
+        _credentials_section(creds),
         _progress_checklist(hosts, tracking),
         _hosts_table(hosts),
         '<footer>Generated by recce · references existing published tooling · '
