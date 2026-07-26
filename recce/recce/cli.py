@@ -345,7 +345,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     build_csv(hosts, paths["csv"])
     from .report_html import build_html
     build_html(hosts, paths["html"], title=title, domains=domains,
-               credentials=credentials, generated=_now())
+               credentials=credentials, generated=_now(), tracking=tracking)
     if not quiet:
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "

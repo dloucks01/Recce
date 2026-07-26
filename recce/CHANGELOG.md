@@ -5,6 +5,14 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Read-only "Assessment coverage" checklist in the HTML report.** A per-host,
+  per-subnet progress grid mirroring the workbook Checklist (✓ done · ☐ to-do · —
+  not-applicable), so a non-technical stakeholder can see how far the assessment got
+  in a browser without opening Excel. It reflects both the tool's auto/derived state
+  and the operator's ticks (passed through from the datastore). It is deliberately
+  **read-only**: editing still happens in `enumeration.xlsx`, the one place ticks
+  persist back into recce's datastore and survive re-scans (a static HTML file can't
+  do that offline without a server or a non-authoritative browser-local store).
 - **Expanded, grounded executive summary + "How findings are scored" in the HTML
   report.** The exec summary now adds a **Confirmed** tile (and a **Footholds** tile
   when access was gained) and a plain-language **assessment** that separates what recce
