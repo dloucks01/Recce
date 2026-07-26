@@ -177,8 +177,9 @@ sudo python -m recce vulns -o acme --fast          # top-signal only + progress/
 #   sweep = every applicable credential-free deep module in one shot; each
 #   self-skips when the datastore has no matching service, and the workbook is
 #   rebuilt once at the end. Run the individual commands only to focus.
-python -m recce sweep -o acme                       # web/smb/ftp/ldap/snmp/
-                                                    # mongodb/docker/k8s/mssql
+python -m recce sweep -o acme                       # web/smb/ftp/ldap/snmp/mongodb/
+                                                    # redis/elasticsearch/rsync/nfs/
+                                                    # kerberos/docker/k8s/mssql
 python -m recce sweep -o acme --only-modules web smb   # narrow to a couple
 python -m recce sweep -o acme --vulns               # also run the NSE vuln scan
 python -m recce sweep -o acme --skip mssql          # exclude one
@@ -308,7 +309,8 @@ hang printers/OT/old services). Optional top-N UDP with `--udp-top`.
 **`sweep` / `credsweep` (the deep pass — one command each):** after `enum`
 (+`vulns`), rather than running the deep service modules one at a time, `sweep`
 runs every applicable **credential-free** module (`web` / `smb` / `ftp` / `ldap` /
-`snmp` / `mongodb` / `docker` / `kubernetes` / `mssql`) and `credsweep` runs the
+`snmp` / `mongodb` / `redis` / `elasticsearch` / `rsync` / `nfs` / `kerberos` /
+`docker` / `kubernetes` / `mssql`) and `credsweep` runs the
 **authenticated** ones (`credenum` plus the authenticated facets of `ldap` /
 `smb` / `mssql` / `ftp`). Each module self-skips when the datastore has no
 matching service, findings fold into the same sheets, and the workbook rebuilds
