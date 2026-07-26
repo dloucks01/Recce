@@ -330,7 +330,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["ldap"] = json.loads(ldap_blob)
         except ValueError:
             pass
-    for _mk in ("snmp", "mongodb"):
+    for _mk in ("snmp", "mongodb", "redis", "elasticsearch"):
         _blob = store.get_meta(_mk)
         if _blob:
             try:
@@ -1413,7 +1413,8 @@ def _sweep_defaults(args: argparse.Namespace) -> None:
 # when the datastore has no matching host.
 _UNAUTH_SWEEP = [
     ("web", "cmd_web"), ("smb", "cmd_smb"), ("ftp", "cmd_ftp"), ("ldap", "cmd_ldap"),
-    ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("docker", "cmd_docker"),
+    ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("redis", "cmd_redis"),
+    ("elasticsearch", "cmd_elasticsearch"), ("docker", "cmd_docker"),
     ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
@@ -3909,6 +3910,98 @@ def cmd_mongodb(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_redis(args: argparse.Namespace) -> int:
+    """Deep Redis enumeration: speak RESP (stdlib), read the version, and test whether
+    INFO works WITHOUT authentication - an exposed instance is a CONFIRMED critical
+    exposure (full read/write + a file-write -> RCE primitive). Read-only."""
+    from . import redis as _redis
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose Redis.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = _redis.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No Redis endpoints in the datastore (no port 6379/6380). Run `enum` "
+              "against the cache/database hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} Redis endpoint(s):")
+    for t in tgts:
+        if t.get("unauth"):
+            state = f"EXPOSED (unauth, {t.get('keys', 0)} keys)"
+        elif t.get("auth_required"):
+            state = "auth required"
+        else:
+            state = "probed" if t.get("version") else "reachable"
+        ver = f"  {t.get('version', '')}" if t.get("version") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
+
+    _fold_service_findings(store, hosts, analysis, "redis",
+                           _redis.findings_to_vulns, "Redis")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> Redis sheet written; findings folded into the main totals.")
+    return 0
+
+
+def cmd_elasticsearch(args: argparse.Namespace) -> int:
+    """Deep Elasticsearch enumeration: GET the HTTP API (stdlib), read the version, and
+    test whether /_cat/indices works WITHOUT authentication - an exposed cluster is a
+    CONFIRMED critical data exposure. Read-only (GETs only)."""
+    from . import elasticsearch as _es
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first so recce "
+              "knows which hosts expose Elasticsearch.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    active = not args.no_probe
+    analysis = _es.analyze(hosts, active=active)
+    tgts = analysis["targets"]
+    if not tgts:
+        print("[!] No Elasticsearch endpoints in the datastore (no port 9200/9201). "
+              "Run `enum` against the search/log hosts first.")
+        store.close()
+        return 0
+    print(f"[+] {len(tgts)} Elasticsearch endpoint(s):")
+    for t in tgts:
+        if t.get("unauth"):
+            state = f"EXPOSED (unauth, {t.get('indices', 0)} indices)"
+        elif t.get("secured"):
+            state = "security enforced"
+        else:
+            state = "probed" if t.get("version") else "reachable"
+        ver = f"  {t.get('version', '')}" if t.get("version") else ""
+        print(f"      {t['ip']}:{t['port']}  {state}{ver}")
+
+    _fold_service_findings(store, hosts, analysis, "elasticsearch",
+                           _es.findings_to_vulns, "Elasticsearch")
+    if active:
+        _mark_capability_scanned(store, tgts)
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> Elasticsearch sheet written; findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -3989,9 +4082,12 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     in the module's stored analysis targets, or it carries a finding from that source.
     Ordered highest-impact first so `status` surfaces the critical exposures."""
     from . import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
-                   snmp as _snmp, mongodb as _mongo)
+                   snmp as _snmp, mongodb as _mongo, redis as _redis,
+                   elasticsearch as _es)
     mods = [
         ("MongoDB", "mongodb", _mongo.is_mongodb, "recce mongodb"),
+        ("Redis", "redis", _redis.is_redis, "recce redis"),
+        ("Elasticsearch", "elasticsearch", _es.is_elasticsearch, "recce elasticsearch"),
         ("Docker", "docker", docker.is_docker, "recce docker"),
         ("Kubernetes", "kubernetes", k8s.is_k8s, "recce k8s"),
         ("MSSQL", "mssql", mssql.is_mssql, "recce mssql -u USER -p PASS -d DOM"),
@@ -5118,6 +5214,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     mp.add_argument("-o", "--output-dir", default="engagement")
     mp.add_argument("--title", default="Recce Engagement")
     mp.set_defaults(func=cmd_mongodb)
+
+    # Redis enumeration.
+    rp = sub.add_parser("redis",
+                        help="Redis: unauthenticated RESP probe (6379/6380) -> CONFIRM "
+                             "INFO without auth = critical exposure (read/write + RCE)")
+    rp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "Redis hosts in the datastore)")
+    rp.add_argument("--no-probe", action="store_true",
+                    help="skip the live probe; just write the commands")
+    rp.add_argument("-o", "--output-dir", default="engagement")
+    rp.add_argument("--title", default="Recce Engagement")
+    rp.set_defaults(func=cmd_redis)
+
+    # Elasticsearch enumeration.
+    ep = sub.add_parser("elasticsearch", aliases=["es", "elastic"],
+                        help="Elasticsearch: unauthenticated HTTP probe (9200/9201) -> "
+                             "CONFIRM /_cat/indices without auth = critical data exposure")
+    ep.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all "
+                         "Elasticsearch hosts in the datastore)")
+    ep.add_argument("--no-probe", action="store_true",
+                    help="skip the live probe; just write the commands")
+    ep.add_argument("-o", "--output-dir", default="engagement")
+    ep.add_argument("--title", default="Recce Engagement")
+    ep.set_defaults(func=cmd_elasticsearch)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")

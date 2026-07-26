@@ -175,6 +175,8 @@ _SOURCE_TOOL = {
     "ldap": "LDAP / AD enum (recce stdlib BER/ASN.1 client)",
     "snmp": "SNMP enum (recce stdlib BER v2c UDP client)",
     "mongodb": "MongoDB enum (recce stdlib OP_MSG/BSON wire client)",
+    "redis": "Redis enum (recce stdlib RESP wire client)",
+    "elasticsearch": "Elasticsearch enum (recce stdlib HTTP API client)",
 }
 
 # Severity -> hex colour (no #), matching the workbook + HTML-preview severity ramp.
@@ -203,6 +205,7 @@ _SERVICE_ROLE = {
     3306: "database service (MySQL)", 5432: "database service (PostgreSQL)",
     1433: "database service (Microsoft SQL Server)", 1521: "database service (Oracle)",
     27017: "database service (MongoDB)", 6379: "in-memory data store (Redis)",
+    9200: "search / analytics service (Elasticsearch)",
     161: "network-management (SNMP) service", 2049: "file-sharing (NFS) service",
 }
 
