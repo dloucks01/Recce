@@ -1740,13 +1740,17 @@ def findings_to_vulns(fs: list[dict]) -> dict:
 
 
 def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
-            lhost: str = "<LHOST>") -> dict:
+            lhost: str = "<LHOST>", budget: float | None = None, progress=None) -> dict:
     """Full MSSQL analysis: pre-auth probes, findings, and the per-target runbook +
-    chain. JSON-serialisable for the datastore + report."""
+    chain. JSON-serialisable for the datastore + report. `budget` caps wall-clock
+    seconds; `progress(i, n, target)` fires per target."""
+    from . import svcprobe
     targets = mssql_targets(hosts)
     probes: dict = {}
     browser: dict = {}          # SQL Browser (UDP 1434) result cached per IP
-    for t in targets:
+    state: dict = {}
+
+    def _one(t):
         key = f"{t['ip']}:{t['port']}"
         if active and t["ip"] not in browser:
             browser[t["ip"]] = sql_browser(t["ip"])
@@ -1758,6 +1762,11 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
             t["version"] = pv
         t["encryption"] = probes[key]["prelogin"].get("encryption", "")
         t["instances"] = probes[key]["instances"]
+        return None
+
+    for _t, _r in svcprobe.iter_probe(targets, _one, budget=budget,
+                                      progress=progress, state=state):
+        pass
     fs = findings(hosts, probes)
     runbooks = []
     for t in targets:
@@ -1769,5 +1778,6 @@ def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     fs.sort(key=lambda x: order.get(x["severity"], 5))
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
-            "stats": {"targets": len(targets), "findings": len(fs)}}
+            "stats": {"targets": len(targets), "findings": len(fs),
+                      "stopped": state.get("stopped")}}
 

@@ -16,7 +16,11 @@ All notable changes to recce are documented here. Dates are UTC.
   safety** (a keyboard interrupt stops the loop and the partial results are still folded
   + saved). When a run stops early the CLI says so explicitly, so partial coverage is
   never mistaken for a complete assessment. Behaviour is unchanged when `--budget` is
-  omitted.
+  omitted. Now applied to **all** the sequential deep modules — smb, ftp, ldap, mssql
+  and web included (web cancels pending hosts at the budget and keeps the per-host
+  results it already persisted; ldap and mssql run each whole per-target unit — probe +
+  paged auth enum / SQL-Browser — under the guard, so a slow authenticated enum can't
+  overrun unbounded and a Ctrl-C keeps partial results).
 
 - **Credential-less AD roasting (`recce kerberos` / `asrep`).** A minimal Kerberos
   client — hand-rolled ASN.1 DER over TCP 88, no impacket — that needs **no credential**,

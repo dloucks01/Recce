@@ -18,7 +18,7 @@ import re
 import sys
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 from . import ad
 from . import exploits
@@ -1799,12 +1799,24 @@ def cmd_web(args: argparse.Namespace) -> int:
             print(f"    [{h.ip}] crawled {pages} page(s), +{added} finding(s)")
         return profiles
 
+    budget = getattr(args, "budget", None)
+    started = time.monotonic()
+    stopped_budget = False
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_scan, h): h for h in targets}
         for fut in as_completed(futures):
+            # Wall-clock budget: stop scheduling more hosts (in-flight ones finish and
+            # are persisted per host below, so partial coverage is kept).
+            if budget is not None and not stopped_budget \
+                    and time.monotonic() - started > budget:
+                stopped_budget = True
+                for pending in futures:
+                    pending.cancel()
             h = futures[fut]
             try:
                 profiles = fut.result()
+            except CancelledError:
+                continue
             except Exception as e:  # noqa: BLE001 - one host never aborts the sweep
                 _record_issues(store, paths, h.ip, [{"phase": "web", "level": "warning",
                                "message": f"web scan failed: {e}"}])
@@ -1818,6 +1830,9 @@ def cmd_web(args: argparse.Namespace) -> int:
                 total_findings += wv
                 print(f"    {pr['url']:<28} {pr.get('server', '') or '?':<20}"
                       f"{tech}  ({wv} finding(s))")
+    if stopped_budget:
+        print("    [!] Time budget (--budget) reached - stopped scheduling more hosts; "
+              "results scanned so far were saved.")
     _final_report(store, paths, store.get_meta("engagement") or args.title)
     store.close()
     if getattr(args, "screenshots", False):
@@ -3128,7 +3143,7 @@ def cmd_mssql(args: argparse.Namespace) -> int:
 
     active = not args.no_probe
     analysis = mssql.analyze(hosts, creds=creds, active=active,
-                             lhost=args.lhost or "<LHOST>")
+                             lhost=args.lhost or "<LHOST>", **_probe_kwargs(args, "mssql"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No MSSQL endpoints in the datastore (no port 1433 / ms-sql "
@@ -3427,7 +3442,7 @@ def cmd_smb(args: argparse.Namespace) -> int:
                  "dc_ip": args.dc_ip or ""}
 
     active = not args.no_probe
-    analysis = smb.analyze(hosts, creds=creds, active=active)
+    analysis = smb.analyze(hosts, creds=creds, active=active, **_probe_kwargs(args, "smb"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No SMB endpoints in the datastore (no port 445/139). Run `enum` "
@@ -3564,7 +3579,7 @@ def cmd_ftp(args: argparse.Namespace) -> int:
         creds = {"user": args.username, "secret": args.password or ""}
 
     active = not args.no_probe
-    analysis = ftp.analyze(hosts, creds=creds, active=active)
+    analysis = ftp.analyze(hosts, creds=creds, active=active, **_probe_kwargs(args, "ftp"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No FTP endpoints in the datastore (no port 21 / ftp service). Run "
@@ -3764,7 +3779,7 @@ def cmd_ldap(args: argparse.Namespace) -> int:
                  "hash": getattr(args, "hash", None) or ""}   # --hash -> NTLM pass-the-hash
 
     active = not args.no_probe
-    analysis = _ldap.analyze(hosts, creds=creds, active=active)
+    analysis = _ldap.analyze(hosts, creds=creds, active=active, **_probe_kwargs(args, "ldap"))
     tgts = analysis["targets"]
     if not tgts:
         print("[!] No LDAP endpoints in the datastore (no port 389/636/3268/3269). "
@@ -5111,6 +5126,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "side effect (delete / pay / send / post / ...). Off by default "
                          "- those forms are recorded, not submitted. File uploads are "
                          "never submitted. Use only on a throwaway/dev target.")
+    _add_budget(wb)
     wb.set_defaults(func=cmd_web)
 
     # Per-finding exploitation plan: runnable artifacts driving existing tools.
@@ -5333,6 +5349,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="max linked-server chain depth to walk (default 4)")
     ms.add_argument("-o", "--output-dir", default="engagement")
     ms.add_argument("--title", default="Recce Engagement")
+    _add_budget(ms)
     ms.set_defaults(func=cmd_mssql)
 
     # SMB offensive enumeration + attack surface.
@@ -5360,6 +5377,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live SMB2/SMBv1 negotiate probes")
     sm.add_argument("-o", "--output-dir", default="engagement")
     sm.add_argument("--title", default="Recce Engagement")
+    _add_budget(sm)
     sm.set_defaults(func=cmd_smb)
 
     # FTP offensive enumeration.
@@ -5382,6 +5400,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="skip the live banner/anonymous/FEAT probe")
     fp.add_argument("-o", "--output-dir", default="engagement")
     fp.add_argument("--title", default="Recce Engagement")
+    _add_budget(fp)
     fp.set_defaults(func=cmd_ftp)
 
     # Docker Engine API enumeration.
@@ -5432,6 +5451,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "accepts it (LDAPS 636 needs no sealing)")
     lp.add_argument("-o", "--output-dir", default="engagement")
     lp.add_argument("--title", default="Recce Engagement")
+    _add_budget(lp)
     lp.set_defaults(func=cmd_ldap)
 
     # SNMP enumeration (UDP 161).

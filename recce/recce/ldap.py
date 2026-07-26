@@ -1020,39 +1020,50 @@ def findings_to_vulns(fs: list[dict]) -> dict:
     return _f2v(fs, "ldap", _DEFAULT_PORT)
 
 
-def analyze(hosts: list[Host], creds: dict | None = None,
-            active: bool = True) -> dict:
+def analyze(hosts: list[Host], creds: dict | None = None, active: bool = True,
+            budget: float | None = None, progress=None) -> dict:
     """Full LDAP analysis. Returns {targets, findings, runbooks, probes, stats}.
 
     When creds are supplied and active, also runs AUTHENTICATED enumeration per DC
     (paged users/computers/domain) and folds the resulting Account objects onto the
     matching host in place - so they populate Users & Accounts, AD Quick Wins,
-    Kerberoast and AS-REP without a hand-off to nxc/bloodhound-python."""
+    Kerberoast and AS-REP without a hand-off to nxc/bloodhound-python.
+    `budget` caps wall-clock seconds; `progress(i, n, target)` fires per DC. The whole
+    per-DC unit (probe + paged auth enum) runs under the budget/Ctrl-C guard, so a slow
+    authenticated enum can't overrun unbounded and a Ctrl-C keeps partial results."""
+    from . import svcprobe
     targets = ldap_targets(hosts)
     host_by_ip = {h.ip: h for h in hosts}
     probes: dict = {}
     auth_fs: list[dict] = []
+    state: dict = {}
+
+    def _one(t):
+        pr = probe(t["ip"], t["port"])
+        if pr:
+            probes[(t["ip"], t["port"])] = pr
+            t["domain"] = pr.get("domain", "")
+            t["dc_dns"] = pr.get("dc_dns", "")
+            t["anon_bind"] = pr.get("anon_bind", False)
+            t["anon_read"] = pr.get("anon_read", False)
+            t["dc_level"] = pr.get("dc_level", "")
+            t["naming_context"] = pr.get("naming_context", "")
+        base = t.get("naming_context") or (pr or {}).get("naming_context") or ""
+        if creds and base:
+            en = enum_authenticated(t["ip"], t["port"], base, creds)
+            if en.get("error"):
+                t["auth_error"] = en["error"]
+            else:
+                summary, afs = apply_enum(host_by_ip.get(t["ip"]),
+                                          t.get("domain", ""), t["ip"], t["port"], en)
+                t.update(summary)
+                auth_fs.extend(afs)
+        return pr
+
     if active:
-        for t in targets:
-            pr = probe(t["ip"], t["port"])
-            if pr:
-                probes[(t["ip"], t["port"])] = pr
-                t["domain"] = pr.get("domain", "")
-                t["dc_dns"] = pr.get("dc_dns", "")
-                t["anon_bind"] = pr.get("anon_bind", False)
-                t["anon_read"] = pr.get("anon_read", False)
-                t["dc_level"] = pr.get("dc_level", "")
-                t["naming_context"] = pr.get("naming_context", "")
-            base = t.get("naming_context") or (pr or {}).get("naming_context") or ""
-            if creds and base:
-                en = enum_authenticated(t["ip"], t["port"], base, creds)
-                if en.get("error"):
-                    t["auth_error"] = en["error"]
-                else:
-                    summary, afs = apply_enum(host_by_ip.get(t["ip"]),
-                                              t.get("domain", ""), t["ip"], t["port"], en)
-                    t.update(summary)
-                    auth_fs.extend(afs)
+        for _t, _pr in svcprobe.iter_probe(targets, _one, budget=budget,
+                                           progress=progress, state=state):
+            pass
     fs = findings(hosts, probes) + auth_fs
     runbooks = []
     for t in targets:
@@ -1062,4 +1073,5 @@ def analyze(hosts: list[Host], creds: dict | None = None,
                          "credentialed": cred_runbook(t["ip"], t["port"], base, creds)})
     return {"targets": targets, "findings": fs, "runbooks": runbooks,
             "probes": {f"{k[0]}:{k[1]}": v for k, v in probes.items()},
-            "stats": {"targets": len(targets), "findings": len(fs)}}
+            "stats": {"targets": len(targets), "findings": len(fs),
+                      "stopped": state.get("stopped")}}
