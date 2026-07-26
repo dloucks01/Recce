@@ -44,6 +44,14 @@ All notable changes to recce are documented here. Dates are UTC.
   and a real nmap-backed `recce enum` discovers a live open port — proving the whole
   scan → parse → probe → fold → report path against live sockets, not fixtures. Plus
   `sweep` selection/deferral wiring tests against the bundled sample.
+- **Credentialed-path integration tests** (`tests/test_cred_integration.py`). Install a
+  fake `nxc` binary on PATH that emits real netexec output, so the credentialed modules
+  run their actual `subprocess.run` → stdout-parse → finding-fold → access-derivation
+  path (including `recce credenum` end to end) without needing netexec or a live DC —
+  previously these were only monkeypatched.
+- **Scale test** (`tests/test_scale.py`). Builds a 500-host / 20-subnet datastore and
+  rebuilds the workbook + runs `status`/`access` over it, asserting correct output and
+  a near-linear time budget so an O(n²) regression in reporting/tracking is caught.
 - **`ldap` — deep LDAP / Active Directory directory enumeration (stdlib only).** A
   hand-rolled BER/ASN.1 LDAP client on a raw socket (no python-ldap / ldap3), so it
   runs on a stock airgapped Kali. Credential-free and read-only, against a Directory
