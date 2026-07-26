@@ -1380,13 +1380,28 @@ def _sweep_defaults(args: argparse.Namespace) -> None:
             setattr(args, k, v)
 
 
-def cmd_sweep(args: argparse.Namespace) -> int:
-    """Run every applicable credential-free deep-enum module in one shot, instead of
-    typing each of `web`/`smb`/`ftp`/`ldap`/`snmp`/`mongodb`/`docker`/`kubernetes`/
-    `mssql` by hand after `enum`. Each module self-skips when the datastore has no
-    matching service, so running them all is cheap; the workbook is rebuilt once at
-    the end. Any creds you pass (-u/-p/-d) flow through to the modules that use them.
-    """
+# The credential-free deep pass: recce's own stdlib probes. Order is foothold-ish -
+# web + protocol posture first, then the heavier service dives. Each no-ops cleanly
+# when the datastore has no matching host.
+_UNAUTH_SWEEP = [
+    ("web", "cmd_web"), ("smb", "cmd_smb"), ("ftp", "cmd_ftp"), ("ldap", "cmd_ldap"),
+    ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("docker", "cmd_docker"),
+    ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
+]
+# The authenticated pass: the modules that DO something new once you have creds -
+# the netexec/impacket phase plus the authenticated facets of the deep modules. The
+# unauth-only modules (web/snmp/mongodb/docker/k8s) are intentionally absent; you run
+# `sweep` for those. Each handler here keys its authenticated path off args.username.
+_AUTH_SWEEP = [
+    ("credenum", "cmd_credenum"), ("ldap", "cmd_ldap"), ("smb", "cmd_smb"),
+    ("mssql", "cmd_mssql"), ("ftp", "cmd_ftp"),
+]
+
+
+def _run_sweep(args: argparse.Namespace, *, authenticated: bool) -> int:
+    """Shared engine for `sweep` (unauth) and `credsweep` (auth). Runs each applicable
+    module with the workbook rebuild deferred to a single pass at the end; a module
+    that errors is isolated so one failure doesn't abort the rest."""
     global _DEFER_REPORTS
     print(BANNER)
     paths = _open_paths(args.output_dir)
@@ -1395,13 +1410,28 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         return 1
     _sweep_defaults(args)
 
-    # (name, handler). Order is foothold-ish: web + protocol posture first, then the
-    # heavier database/service dives. Every one no-ops cleanly with no matching hosts.
-    modules = [
-        ("web", cmd_web), ("smb", cmd_smb), ("ftp", cmd_ftp), ("ldap", cmd_ldap),
-        ("snmp", cmd_snmp), ("mongodb", cmd_mongodb), ("docker", cmd_docker),
-        ("kubernetes", cmd_kubernetes), ("mssql", cmd_mssql),
-    ]
+    if authenticated:
+        if not getattr(args, "username", None):
+            print("[x] credsweep is the authenticated pass and needs credentials: "
+                  "-u USER -p PASS [-d DOMAIN]. For the credential-free modules, "
+                  "run `recce sweep`.")
+            return 1
+        # The whole point of credsweep is to run the authenticated tooling, so the
+        # nxc/impacket matrix must actually execute (handlers gate it on `not no_run`).
+        args.no_run = False
+        table, kind, tag = _AUTH_SWEEP, "credentialed", "CREDSWEEP"
+    else:
+        # `sweep` is strictly unauthenticated: drop any creds so a stray -u can't fire
+        # a credentialed action as an invisible side-effect of this command.
+        if getattr(args, "username", None):
+            print("[!] `sweep` is the unauthenticated pass - ignoring the credentials "
+                  "you passed. Run `recce credsweep -u ... -p ...` for the "
+                  "authenticated modules.")
+            args.username = args.password = None
+            args.ldap_enum = args.ldap_anon = False
+        table, kind, tag = _UNAUTH_SWEEP, "credential-free", "SWEEP"
+
+    modules = [(n, globals()[fn]) for n, fn in table]
     skip = {s.strip().lower() for s in (getattr(args, "skip", None) or [])}
     only = {s.strip().lower() for s in (getattr(args, "only_modules", None) or [])}
     if only:
@@ -1409,7 +1439,8 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     if skip:
         modules = [(n, h) for n, h in modules if n not in skip]
 
-    run_vulns = getattr(args, "vulns", False)
+    # The NSE vuln scan is an unauthenticated concept - only offered on `sweep`.
+    run_vulns = getattr(args, "vulns", False) and not authenticated
     ran, failed = [], []
     _DEFER_REPORTS = True
     try:
@@ -1422,7 +1453,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
                 failed.append(("vulns", e))
                 print(f"[!] vulns failed: {type(e).__name__}: {e}")
         for name, handler in modules:
-            print("\n" + "=" * 64 + f"\n[SWEEP] {name}\n" + "=" * 64)
+            print("\n" + "=" * 64 + f"\n[{tag}] {name}\n" + "=" * 64)
             try:
                 handler(args)
                 ran.append(name)
@@ -1441,13 +1472,33 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         store.close()
 
     print("\n" + "=" * 64)
-    print(f"[+] Sweep complete: ran {len(ran)} module(s) "
+    print(f"[+] {kind.capitalize()} sweep complete: ran {len(ran)} module(s) "
           f"({', '.join(ran) or 'none'}).")
     if failed:
         print(f"[!] {len(failed)} module(s) errored: "
               f"{', '.join(n for n, _ in failed)} - re-run individually to debug.")
-    print("    Reports rebuilt. Next: `recce prove` then `recce attackpath`.")
+    nxt = ("`recce credsweep -u ... -p ...` (once you have creds), then `recce prove`"
+           if not authenticated else "`recce prove` then `recce attackpath`")
+    print(f"    Reports rebuilt. Next: {nxt}.")
     return 1 if failed else 0
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """Unauthenticated deep pass: run every applicable credential-free module
+    (web/smb/ftp/ldap/snmp/mongodb/docker/kubernetes/mssql) in one shot after `enum`,
+    instead of typing each by hand. Each self-skips when there's no matching service;
+    the workbook is rebuilt once at the end. For the authenticated modules use
+    `credsweep`."""
+    return _run_sweep(args, authenticated=False)
+
+
+def cmd_credsweep(args: argparse.Namespace) -> int:
+    """Authenticated deep pass (needs -u/-p): run the credentialed modules in one shot
+    - the netexec/impacket phase (`credenum`) plus the authenticated facets of
+    `ldap` (kerberoast/AS-REP/accounts), `smb` (credentialed shares + write proof),
+    `mssql` (access/privilege matrix) and `ftp`. Assumes you already ran `sweep` for
+    the credential-free surface."""
+    return _run_sweep(args, authenticated=True)
 
 
 def cmd_db(args: argparse.Namespace) -> int:
@@ -4584,6 +4635,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sw.add_argument("--no-probe", action="store_true",
                     help="passive: fold what enum already found, don't send probes")
     sw.set_defaults(func=cmd_sweep)
+
+    # The authenticated counterpart of `sweep`: needs creds, runs the credentialed
+    # modules (credenum + authenticated ldap/smb/mssql/ftp) in one shot.
+    csw = sub.add_parser("credsweep",
+                         help="authenticated deep pass (needs -u/-p): run ALL "
+                              "credentialed modules in one shot (credenum + "
+                              "authenticated ldap/smb/mssql/ftp)")
+    csw.add_argument("targets", nargs="*",
+                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    _add_common(csw)
+    _add_creds(csw)
+    csw.add_argument("--prove-write", action="store_true",
+                     help="include the reversible writable-share / writable-dir proofs "
+                          "(smb/ftp)")
+    csw.add_argument("--skip", nargs="*", metavar="MOD",
+                     help="credentialed modules to skip (e.g. --skip mssql)")
+    csw.add_argument("--only-modules", nargs="*", metavar="MOD",
+                     help="run only these modules (e.g. --only-modules credenum ldap)")
+    csw.add_argument("--no-probe", action="store_true",
+                     help="passive: fold what enum already found, don't send probes")
+    csw.set_defaults(func=cmd_credsweep)
 
     # Fold on-target recce-enum.sh/.ps1 output into the Priv-Esc sheet.
     ing = sub.add_parser("ingest",
