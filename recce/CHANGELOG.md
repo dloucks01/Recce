@@ -4,6 +4,8 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-26
+
 ### Added
 - **Wall-clock budget + live progress for the deep-service probe loops** (`svcprobe`).
   The credential-free modules probe hosts sequentially on raw sockets; a large target
