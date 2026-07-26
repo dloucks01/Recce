@@ -274,9 +274,9 @@ def svg(hosts: list[Host], domains=None, ad_data=None) -> str:
     x0 = m
     els, dc_anchor = [], {}          # dc_anchor[ip] = (x, y_bottom) of its card
 
-    def card(x, y, fill, stroke, lines, w=cardW, h=cardH):
+    def card(x, y, fill, stroke, lines, w=cardW, h=cardH, sw=1.5):
         out = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="7" '
-               f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>']
+               f'fill="{fill}" stroke="{stroke}" stroke-width="{sw}"/>']
         ty = y + 16
         for i, (txt, bold) in enumerate(lines):
             weight = "700" if bold else "400"
@@ -291,14 +291,15 @@ def svg(hosts: list[Host], domains=None, ad_data=None) -> str:
         rows = sorted(by_subnet[sub], key=lambda z: _ipkey(z.ip))
         x = x0 + ci * (colW + colGap)
         els.append(f'<text x="{x}" y="{m + 18}" font-size="13" font-weight="700" '
-                   f'fill="#115e59">{_x(sub, 24)} '
+                   f'fill="#115e59">{_x(sub, 20)} '
                    f'<tspan fill="#5f6f6e" font-weight="400">'
                    f'({len(rows)})</tspan></text>')
         owned = sum(1 for h in rows if has_access(h))
         if owned:
-            els.append(f'<text x="{x + 46}" y="{m + 18}" font-size="11" '
-                       f'font-weight="700" fill="{_ACCESS_STROKE}">✓ {owned} '
-                       'owned</text>')
+            # Right-aligned at the column edge so it never overlaps the subnet label.
+            els.append(f'<text x="{x + cardW}" y="{m + 18}" text-anchor="end" '
+                       f'font-size="11" font-weight="700" fill="{_ACCESS_STROKE}">'
+                       f'✓ {owned} owned</text>')
         y = m + headerH
         if aggregate:
             counts: dict[str, int] = {}
@@ -318,24 +319,27 @@ def svg(hosts: list[Host], domains=None, ad_data=None) -> str:
                 role = role_with_ad(h, dc_names)
                 fill, stroke = _ROLE_COLOR[role]
                 accessed = has_access(h)
-                if accessed:
-                    stroke = _ACCESS_STROKE       # green outline = we hold access
                 l1 = _x(h.ip, 22)
-                l2 = _x((h.hostname + "  ") if h.hostname else "") + _e(role)
+                # Keep hostname and role visibly separate (a bare concat read as
+                # "dc01.corp.localDC"). The role keeps its own colour via l2b below.
+                hn = _x(h.hostname, 18) if h.hostname else ""
+                l2 = (hn + " · " if hn else "") + _e(role)
                 l3 = _x(h.os_name, 30) if h.os_name else ""
                 lines = [(l1, True), (l2, False)] + ([(l3, False)] if l3 else [])
-                els.append(card(x, y, fill, stroke, lines))
-                # Overlays (top-right): risk dot for the worst confirmed finding,
-                # then a green ✓ when recce confirmed access to this host.
+                # Access = a bold border in the host's own role colour (never a
+                # colour swap — the old green outline collided with the Web role).
+                els.append(card(x, y, fill, stroke, lines, sw=3 if accessed else 1.5))
+                # Overlays (top-right, white-ringed for contrast on any card): risk
+                # dot for the worst confirmed finding, then a ✓ when access is held.
                 bx = x + cardW - 12
                 sev = worst_severity(h)
                 if sev in _SEV_DOT:
                     els.append(f'<circle cx="{bx:.0f}" cy="{y + 13}" r="5.5" '
-                               f'fill="{_SEV_DOT[sev]}"/>')
-                    bx -= 17
+                               f'fill="{_SEV_DOT[sev]}" stroke="#fff" stroke-width="1"/>')
+                    bx -= 18
                 if accessed:
-                    els.append(f'<circle cx="{bx:.0f}" cy="{y + 13}" r="7" '
-                               f'fill="{_ACCESS_STROKE}"/>')
+                    els.append(f'<circle cx="{bx:.0f}" cy="{y + 13}" r="7.5" '
+                               f'fill="{_ACCESS_STROKE}" stroke="#fff" stroke-width="1"/>')
                     els.append(f'<text x="{bx:.0f}" y="{y + 17}" text-anchor="middle" '
                                f'font-size="10" font-weight="700" fill="#fff">✓</text>')
                 if role == "DC":
@@ -384,8 +388,8 @@ def svg(hosts: list[Host], domains=None, ad_data=None) -> str:
         els.append(f'<text x="{lx2 + 6}" y="{leg2_y}" text-anchor="middle" '
                    f'font-size="10" font-weight="700" fill="#fff">✓</text>')
         els.append(f'<text x="{lx2 + 18}" y="{leg2_y}" font-size="11" '
-                   f'fill="#3a4644">access confirmed (green outline)</text>')
-        lx2 += 250
+                   f'fill="#3a4644">access confirmed (bold border + ✓)</text>')
+        lx2 += 260
     if any_risk:
         els.append(f'<circle cx="{lx2 + 6}" cy="{leg2_y - 4}" r="5.5" fill="#C00000"/>')
         els.append(f'<text x="{lx2 + 16}" y="{leg2_y}" font-size="11" '
@@ -428,14 +432,20 @@ def _ad_color(node: dict):
     return _AD_OTHER
 
 
-def ad_svg(arch: dict) -> str:
+def ad_svg(arch: dict, owned_labels=None) -> str:
     """A directly-viewable inline SVG of the *tier-0* Active Directory architecture
     that recce derived from a BloodHound/SharpHound collection: the domain(s) on
     top, the high-value groups and Domain Controllers below, and their privileged
     members at the bottom — with MemberOf / control (ACL, DCSync) edges and domain
     trust edges. Renders in any browser and prints to PDF; no tools, no JavaScript.
-    `arch` is the dict from bloodhound.architecture()."""
+    `arch` is the dict from bloodhound.architecture().
+
+    Enriched like the network map: a tier-0 object recce **already holds** (its label
+    is in `owned_labels` — usernames from captured credentials, or a DC we accessed)
+    gets a bold border + ✓; a node that is the **direct target of a control edge**
+    (DCSync = critical, other ACL = high) gets a risk dot."""
     from html import escape as _e
+    owned = {str(x).upper() for x in (owned_labels or set())}
     nodes = (arch or {}).get("nodes") or {}
     if not nodes:
         return ('<svg viewBox="0 0 360 60" width="360" height="60" role="img" '
@@ -473,6 +483,17 @@ def ad_svg(arch: dict) -> str:
         if toward_y > cy:
             return cx, cy + boxH / 2
         return cx, cy
+
+    # Per-node risk from incoming control edges: DCSync = critical, other ACL = high.
+    node_risk: dict[str, str] = {}
+    for src, label, dst in edges:
+        if label == "MemberOf":
+            continue
+        sev = "critical" if label == "DCSync" else "high"
+        if node_risk.get(dst) != "critical":
+            node_risk[dst] = sev
+    any_owned = any((nodes[s].get("label") or "").upper() in owned for s in pos)
+    any_risk = bool(node_risk)
 
     els: list[str] = []
     # Edges first, so the boxes sit on top of the lines.
@@ -516,13 +537,28 @@ def ad_svg(arch: dict) -> str:
         x, y = cx - boxW / 2, cy - boxH / 2
         rx = boxH / 2 if n.get("type") == "Domain" else 7
         tag = "DC" if n.get("dc") else n.get("type", "")
-        return (
+        held = (n.get("label") or "").upper() in owned
+        out = [
             f'<rect x="{x:.0f}" y="{y:.0f}" width="{boxW}" height="{boxH}" rx="{rx:.0f}" '
-            f'fill="{fill}" stroke="{stroke}" stroke-width="1.6"/>'
+            f'fill="{fill}" stroke="{stroke}" stroke-width="{3 if held else 1.6}"/>'
             f'<text x="{cx:.0f}" y="{cy - 2:.0f}" text-anchor="middle" font-size="11.5" '
             f'font-weight="700" fill="#1a2422">{_x(n.get("label") or sid, 22)}</text>'
             f'<text x="{cx:.0f}" y="{cy + 12:.0f}" text-anchor="middle" font-size="9.5" '
-            f'fill="#5f6f6e">{_x(tag, 18)}</text>')
+            f'fill="#5f6f6e">{_x(tag, 18)}</text>']
+        # Overlays (top-right): risk dot for the worst incoming control edge, then a
+        # ✓ when recce already holds this principal.
+        bx = x + boxW - 9
+        sev = node_risk.get(sid)
+        if sev in _SEV_DOT:
+            out.append(f'<circle cx="{bx:.0f}" cy="{y + 9:.0f}" r="5.5" '
+                       f'fill="{_SEV_DOT[sev]}" stroke="#fff" stroke-width="1"/>')
+            bx -= 17
+        if held:
+            out.append(f'<circle cx="{bx:.0f}" cy="{y + 9:.0f}" r="7" '
+                       f'fill="{_ACCESS_STROKE}" stroke="#fff" stroke-width="1"/>')
+            out.append(f'<text x="{bx:.0f}" y="{y + 13:.0f}" text-anchor="middle" '
+                       f'font-size="10" font-weight="700" fill="#fff">✓</text>')
+        return "".join(out)
 
     for sid in pos:
         els.append(box(sid))
@@ -544,6 +580,25 @@ def ad_svg(arch: dict) -> str:
                f'fill="#9aa8a6">— MemberOf</text>')
 
     height = leg_y + 30
+    # Overlay keys, only when they apply (keeps the legend honest).
+    if any_owned or any_risk:
+        oy = leg_y + 36
+        ox = m
+        if any_owned:
+            els.append(f'<circle cx="{ox + 6}" cy="{oy - 4:.0f}" r="7" '
+                       f'fill="{_ACCESS_STROKE}" stroke="#fff" stroke-width="1"/>')
+            els.append(f'<text x="{ox + 6}" y="{oy:.0f}" text-anchor="middle" '
+                       f'font-size="10" font-weight="700" fill="#fff">✓</text>')
+            els.append(f'<text x="{ox + 18}" y="{oy:.0f}" font-size="10.5" '
+                       f'fill="#3a4644">already held (bold border + ✓)</text>')
+            ox += 240
+        if any_risk:
+            els.append(f'<circle cx="{ox + 6}" cy="{oy - 4:.0f}" r="5.5" fill="#C00000" '
+                       'stroke="#fff" stroke-width="1"/>')
+            els.append(f'<text x="{ox + 16}" y="{oy:.0f}" font-size="10.5" '
+                       f'fill="#3a4644">directly seizable (DCSync=critical, ACL=high)'
+                       '</text>')
+        height += 24
     if (arch or {}).get("truncated"):
         els.append(f'<text x="{m}" y="{height - 2:.0f}" font-size="10" fill="#5f6f6e">'
                    'Showing the top tier-0 objects (graph truncated for legibility).</text>')
