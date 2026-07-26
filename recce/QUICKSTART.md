@@ -233,8 +233,9 @@ work on **just that subset** of what's already enumerated — e.g.
 | File | What it is |
 |---|---|
 | **`enumeration.xlsx`** | the tracking workbook you work out of |
-| **`report.html`** | self-contained client-ready page — **At a glance** dashboard, a **Network map** (draws directly, prints to PDF), an **AD architecture** diagram (tier-0 view built from the BloodHound import, when present), **Key information**, **Users & accounts**, **Credentials** (masked), an expanded **exec summary**, a **How findings are scored** legend, findings with confidence + evidence, the attack path, and a **read-only coverage checklist**. Open it in a browser; use **Print → Save as PDF** for a PDF. |
-| `architecture.mmd` / `.dot` | the network map as Mermaid + Graphviz sources (optional — the diagram already renders inside `report.html`) |
+| **`report.html`** | self-contained client-ready **findings** page — an expanded **exec summary**, an **At a glance** dashboard, a **How findings are scored** legend, findings with confidence + evidence, the attack path, and a **read-only coverage checklist**. Links to the companion `assets.html`. Open it in a browser; use **Print → Save as PDF** for a PDF. |
+| **`assets.html`** | self-contained **architecture & assets** companion page — the **Network map**, the **AD architecture** diagram (tier-0 view built from the BloodHound import, when present), **Key information**, **Users & accounts**, and **Credentials** (masked). Links back to `report.html`. Both draw directly and print to PDF. |
+| `architecture.mmd` / `.dot` | the network map as Mermaid + Graphviz sources (optional — the diagram already renders inside `assets.html`) |
 | `ad-architecture.svg` | the tier-0 AD diagram as a standalone image you can open directly in a browser (written only after an `ad`/BloodHound import) |
 | `enumeration.md` / `services.csv` | notes-friendly + flat pivot data |
 | `writeups/*.docx` | per-finding Word write-ups + a combined report (after `writeups`) |

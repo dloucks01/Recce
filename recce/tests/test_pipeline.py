@@ -2918,8 +2918,9 @@ class HtmlReportTest(unittest.TestCase):
             self.assertNotIn(bad, html)
 
     def test_users_and_credentials_inventory(self):
-        """All users and captured credentials are surfaced; the credential secret is
-        masked in the shareable HTML (full values stay in the workbook)."""
+        """All users and captured credentials are surfaced on the companion assets
+        page; the credential secret is masked in the shareable HTML (full values stay
+        in the workbook)."""
         from recce import report_html
         from recce.models import Account, Credential
         h = Host(ip="10.0.10.10", state="up", up_reason="syn-ack",
@@ -2934,8 +2935,9 @@ class HtmlReportTest(unittest.TestCase):
                             domain="corp.local", source="secretsdump",
                             origin_ip="10.0.10.10")]
         with tempfile.TemporaryDirectory() as d:
-            p = os.path.join(d, "r.html")
-            report_html.build_html([h], p, credentials=creds)
+            p = os.path.join(d, "assets.html")
+            report_html.build_assets_html([h], p, credentials=creds,
+                                          report_link="report.html")
             with open(p, encoding="utf-8") as fh:
                 html = fh.read()
         self.assertIn("Users &amp; accounts", html)
@@ -2946,6 +2948,17 @@ class HtmlReportTest(unittest.TestCase):
         self.assertIn("secretsdump", html)
         self.assertNotIn("Passw0rd!", html)             # secret is MASKED
         self.assertIn("[9 chars]", html)                # masked length shown
+        self.assertIn("Findings report", html)          # cross-link back to report
+        # The findings report itself no longer carries these sections.
+        with tempfile.TemporaryDirectory() as d:
+            rp = os.path.join(d, "report.html")
+            report_html.build_html([h], rp, credentials=creds,
+                                   assets_link="assets.html")
+            with open(rp, encoding="utf-8") as fh:
+                report = fh.read()
+        self.assertNotIn("Credentials captured", report)
+        self.assertNotIn("Users &amp; accounts", report)
+        self.assertIn("Architecture &amp; assets", report)   # link to companion page
 
     def test_empty_hosts_ok(self):
         from recce import report_html
@@ -6196,7 +6209,7 @@ class BloodHoundTest(unittest.TestCase):
         import json as _json
         _json.loads(_json.dumps(analysis))
 
-    def test_architecture_embedded_in_html_report(self):
+    def test_architecture_embedded_in_assets_page(self):
         from recce import bloodhound as bh
         from recce import report_html
         from recce.models import Host
@@ -6205,8 +6218,9 @@ class BloodHoundTest(unittest.TestCase):
             analysis = bh.analyze(d)
             host = Host(ip="10.0.0.10", subnet="10.0.0.0/24", state="up",
                         up_reason="syn-ack", roles=["Domain Controller"])
-            p = os.path.join(d, "r.html")
-            report_html.build_html([host], p, title="AD", ad_bloodhound=analysis)
+            p = os.path.join(d, "assets.html")
+            report_html.build_assets_html([host], p, title="AD",
+                                          ad_bloodhound=analysis)
             with open(p, encoding="utf-8") as fh:
                 html = fh.read()
         self.assertIn("AD architecture", html)

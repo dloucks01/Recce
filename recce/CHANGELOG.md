@@ -33,6 +33,13 @@ All notable changes to recce are documented here. Dates are UTC.
   values for spraying stay on the workbook's Credentials tab.
 
 ### Changed
+- **Split the HTML report into a findings page and an architecture & assets page.**
+  `report.html` now stays focused on the assessment (exec summary, dashboard, scoring
+  legend, findings, attack path, coverage checklist), while a new self-contained
+  **`assets.html`** holds the reference material: the **network map**, the **AD
+  architecture** diagram, **key information**, the **users / accounts** inventory, and
+  the **(masked) credentials**. The two pages cross-link in their headers. Both are
+  still fully self-contained (no JS, no external assets) and print to PDF.
 - **Attack path is now framed honestly as PROJECTED, not a proven kill chain.** recce
   builds the path from confirmed findings (`_confirmed_vulns` excludes "potential"
   version guesses) and observes each step's precondition — but it does **not** execute
