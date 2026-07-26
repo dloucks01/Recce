@@ -37,6 +37,9 @@ from recce import ntlm
 from recce import smb
 from recce import web
 from recce import parser
+from recce import mssql
+from recce import credenum
+from recce import bloodhound
 from tests import wire_vectors as W
 
 
@@ -277,6 +280,144 @@ class TextDecoderFuzzTest(unittest.TestCase):
                     self.assertIsInstance(hosts, list)
         finally:
             os.unlink(path)
+
+
+# --- tool-output text parsers ---------------------------------------------------
+# recce shells out to nxc/netexec, impacket and sqlcmd, then parses their stdout.
+# That text is effectively untrusted: a tool can print a truncated table, an error
+# banner mid-output, ANSI colour, or unexpected unicode. Every parser must degrade
+# to an empty/partial result of the right *type*, never raise - a crash here aborts
+# the credentialed-enum phase. These specs mutate a real sample of each format.
+
+class _TextSpec:
+    def __init__(self, name, fn, seed, rettype):
+        self.name = name
+        self.fn = fn                        # str -> result (dbs args pre-bound)
+        self.seed = seed
+        self.rettype = rettype
+
+
+def _text_specs():
+    return [
+        _TextSpec("mssql.parse_nxc_mssql", mssql.parse_nxc_mssql,
+                  W.NXC_MSSQL_OUTPUT, dict),
+        _TextSpec("mssql.parse_enum", mssql.parse_enum,
+                  W.MSSQL_ENUM_OUTPUT, dict),
+        _TextSpec("mssql.parse_dbowner",
+                  lambda t: mssql.parse_dbowner(t, W.MSSQL_DBOWNER_DBS),
+                  W.MSSQL_DBOWNER_OUTPUT, dict),
+        _TextSpec("mssql.parse_exec", mssql.parse_exec,
+                  W.MSSQL_EXEC_OUTPUT, str),
+        _TextSpec("mssql.parse_datamine",
+                  lambda t: mssql.parse_datamine(t, W.MSSQL_DATAMINE_DBS),
+                  W.MSSQL_DATAMINE_OUTPUT, dict),
+        _TextSpec("mssql.parse_permmine",
+                  lambda t: mssql.parse_permmine(t, W.MSSQL_PERMMINE_DBS),
+                  W.MSSQL_PERMMINE_OUTPUT, dict),
+        _TextSpec("mssql.parse_write_proof", mssql.parse_write_proof,
+                  W.MSSQL_WRITE_PROOF_OUTPUT, dict),
+        _TextSpec("credenum.parse_nxc_smb", credenum.parse_nxc_smb,
+                  W.NXC_SMB_OUTPUT, dict),
+        _TextSpec("credenum.parse_getuserspns", credenum.parse_getuserspns,
+                  W.GETUSERSPNS_OUTPUT, list),
+        _TextSpec("credenum.parse_getnpusers", credenum.parse_getnpusers,
+                  W.GETNPUSERS_OUTPUT, list),
+        _TextSpec("credenum.parse_secretsdump", credenum.parse_secretsdump,
+                  W.SECRETSDUMP_OUTPUT, list),
+        _TextSpec("credenum.parse_ssh_enum", credenum.parse_ssh_enum,
+                  W.SSH_ENUM_OUTPUT, dict),
+        _TextSpec("bloodhound.parse_tgs", bloodhound.parse_tgs,
+                  W.BH_TGS_OUTPUT, list),
+        _TextSpec("bloodhound.parse_asrep", bloodhound.parse_asrep,
+                  W.BH_ASREP_OUTPUT, list),
+        _TextSpec("bloodhound.parse_secretsdump", bloodhound.parse_secretsdump,
+                  W.BH_SECRETSDUMP_OUTPUT, list),
+    ]
+
+
+_TEXT_NOISE = ("", "|", "@@", "@@B:", ":::", "\x1b[31m", "\x00", "😀",
+               "%s%n", "-" * 400, "\t\t\t", "None", "0xDEADBEEF",
+               "$krb5tgs$", "(Pwn3d!)", "NULL")
+
+
+def _text_mutations(seed, rng, rounds=50):
+    """Yield hostile variants of one real tool-output sample."""
+    lines = seed.split("\n")
+    # every line-prefix truncation (tool killed / pipe closed mid-stream)
+    for k in range(len(lines) + 1):
+        yield "\n".join(lines[:k])
+    # character-level truncations
+    for k in range(0, len(seed), max(1, len(seed) // 40)):
+        yield seed[:k]
+    # drop random lines
+    for _ in range(rounds):
+        keep = [ln for ln in lines if rng.random() > 0.3]
+        yield "\n".join(keep)
+    # corrupt delimiters / sentinels / fields in place
+    for _ in range(rounds):
+        b = list(seed)
+        for _ in range(rng.randrange(1, 8)):
+            if not b:
+                break
+            i = rng.randrange(len(b))
+            if rng.random() < 0.5:
+                b[i] = rng.choice("|:@$\\ \t\n0")
+            else:
+                del b[i]
+        yield "".join(b)
+    # inject noise lines at random positions
+    for _ in range(rounds):
+        pos = rng.randrange(len(lines) + 1)
+        noisy = lines[:pos] + [rng.choice(_TEXT_NOISE) * rng.randrange(1, 5)] + lines[pos:]
+        yield "\n".join(noisy)
+    # duplicate the whole block (tools re-emitting on retry) and reverse it
+    yield seed + seed
+    yield "\n".join(reversed(lines))
+    # pure noise blobs
+    for _ in range(rounds):
+        yield "".join(rng.choice(_TEXT_NOISE + ("a", "1", "\n"))
+                      for _ in range(rng.randrange(0, 200)))
+
+
+class TextParserFuzzTest(unittest.TestCase):
+
+    def _hammer(self, spec):
+        rng = random.Random(0x7E ^ (hash(spec.name) & 0xFFFF))
+        for inp in _text_mutations(spec.seed, rng):
+            with self.subTest(parser=spec.name, inp=inp[:60]):
+                try:
+                    with _bounded():
+                        result = spec.fn(inp)
+                except _Timeout as t:
+                    self.fail(f"{spec.name} did not terminate on {inp[:80]!r}: {t}")
+                except Exception as e:            # noqa: BLE001 - parsers must not raise
+                    self.fail(f"{spec.name} raised {type(e).__name__} "
+                              f"on {inp[:80]!r}: {e}")
+                self.assertIsInstance(
+                    result, spec.rettype,
+                    f"{spec.name} returned {type(result).__name__}, "
+                    f"expected {spec.rettype.__name__}, on {inp[:80]!r}")
+
+    def test_all_text_parsers_survive_mutations(self):
+        for spec in _text_specs():
+            self._hammer(spec)
+
+    def test_dbs_arg_mismatch_is_tolerated(self):
+        """The mssql db-scoped parsers take a `dbs` list index-aligned with the
+        output's sentinels. A mismatch (empty list, or more dbs than sentinels, or
+        the wrong names) is a realistic race between what we asked for and what the
+        server echoed - it must yield a dict, not an IndexError."""
+        cases = [
+            (mssql.parse_dbowner, W.MSSQL_DBOWNER_OUTPUT),
+            (mssql.parse_datamine, W.MSSQL_DATAMINE_OUTPUT),
+            (mssql.parse_permmine, W.MSSQL_PERMMINE_OUTPUT),
+        ]
+        for fn, out in cases:
+            for dbs in ([], ["only-one"], ["a", "b", "c", "d", "e", "f"],
+                        ["MASTER", "PayRoll"]):
+                with self.subTest(fn=fn.__name__, dbs=dbs):
+                    with _bounded():
+                        self.assertIsInstance(fn(out, dbs), dict)
 
 
 if __name__ == "__main__":

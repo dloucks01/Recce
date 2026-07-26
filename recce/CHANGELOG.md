@@ -180,6 +180,16 @@ All notable changes to recce are documented here. Dates are UTC.
   live target drives is exercised. Closes the loopback-server gap for the probes that had
   none (SNMP/MongoDB/LDAP already had them); includes an integration-level regression guard
   for the `_is_tls` plain-HTTP bug.
+- **Tool-output text-parser fuzzing.** The same harness now mutates a real stdout sample
+  of every parser that ingests external-tool output — `mssql.parse_nxc_mssql` / `parse_enum`
+  / `parse_dbowner` / `parse_exec` / `parse_datamine` / `parse_permmine` / `parse_write_proof`,
+  `credenum.parse_nxc_smb` / `parse_getuserspns` / `parse_getnpusers` / `parse_secretsdump`
+  / `parse_ssh_enum`, and `bloodhound.parse_tgs` / `parse_asrep` / `parse_secretsdump` — with
+  line truncation, field/sentinel corruption, injected noise lines, ANSI/unicode/NUL and pure
+  garbage. Asserts each degrades to an empty/partial result of the right *type* rather than
+  crashing the credentialed-enum phase, plus a `dbs`-argument-mismatch case for the db-scoped
+  MSSQL parsers. (All 15 held up — the parsers were already defensively written; this locks
+  the contract in as a regression guard.)
 - Shared fixtures live in `tests/wire_vectors.py`, so the fuzzer and the golden tests
   mutate/parse byte-for-byte the same real message.
 

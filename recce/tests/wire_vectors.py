@@ -154,6 +154,114 @@ NMAP_XML = """<?xml version="1.0"?>
 """
 
 
+# --- tool-output text samples ---------------------------------------------------
+# Real stdout formats from the external tools recce shells out to (nxc/netexec,
+# impacket, and recce's own sentinel-wrapped mssql query output). These match the
+# actual field layout the parsers key off - the sentinel-driven mssql parsers read
+# @@B:/@@E:, @@DBO:, @@TBL:, @@GST:/@@PBP:, @@W:begin, @@X:out markers, so a seed
+# without those markers would sail past the extraction paths and prove nothing.
+# The fuzzer mutates these; the parsers must survive every mutation without raising.
+
+NXC_MSSQL_OUTPUT = (
+    "MSSQL       10.0.0.50       1433   SQL01            "
+    "[+] CORP\\alice:P@ss (Pwn3d!)\n"
+)
+
+# recce wraps each MSSQL query block in @@B:<section>/@@E:<section> sentinels; rows
+# are pipe-delimited. This mirrors the shared _LIVE fixture the parser tests use.
+MSSQL_ENUM_OUTPUT = (
+    "SQL (CORP\\alice guest@master)>\n"
+    "@@B:server\nSQL01|CORP\\alice|0|1|15.0.2000.5\n@@E:server\n"
+    "@@B:logins\nsa|1\nCORP\\alice|0\n@@E:logins\n"
+    "@@B:databases\nmaster|0|sa\npayroll|1|sa\nappdb|0|CORP\\svc\n@@E:databases\n"
+    "@@B:links\nDW01|SQL Server|dw01.corp.local\n@@E:links\n"
+    "@@B:impersonate\nsa|1\n@@E:impersonate\n"
+    "@@B:config\nxp_cmdshell|1\n@@E:config\n"
+    "@@B:serverperms\nCONNECT SQL|GRANT\nIMPERSONATE ANY LOGIN|GRANT\n@@E:serverperms\n"
+    "@@B:publicserver\nALTER ANY LOGIN|GRANT\n@@E:publicserver\n"
+    "@@B:startup\nsp_backdoor|startup\n@@E:startup\n"
+    "@@B:hashes\nsa|0x0200ABCD\n@@E:hashes\n"
+)
+
+# parse_dbowner / parse_datamine / parse_permmine take a `dbs` list index-aligned
+# with the @@DBO:{i} / @@TBL:{i} / @@GST:{i} sentinels; the first pipe-field of each
+# row must match the db name or the row is dropped (a USE-context guard).
+MSSQL_DBOWNER_OUTPUT = "@@DBO:0\n1|payroll\n@@DBOE:0\n"
+MSSQL_DBOWNER_DBS = ["payroll"]
+
+MSSQL_EXEC_OUTPUT = "SQL>\n@@X:out\n--------\noutput\ncorp\\alice\nNULL\n@@XE:out\n"
+
+MSSQL_DATAMINE_OUTPUT = (
+    "@@TBL:1\npayroll|dbo.Employees|1240\npayroll|dbo.Salaries|1240\n@@TBLE:1\n"
+    "@@COL:1\npayroll|dbo.Employees.ssn\npayroll|dbo.Employees.email\n@@COLE:1\n"
+    "@@TBL:2\nappdb|dbo.Users|55\n@@TBLE:2\n"
+    "@@COL:2\nappdb|dbo.Users.password_hash\n@@COLE:2\n"
+)
+MSSQL_DATAMINE_DBS = ["master", "payroll", "appdb"]
+
+MSSQL_PERMMINE_OUTPUT = (
+    "@@GST:1\npayroll|guest_enabled\n@@GSTE:1\n"
+    "@@PBP:1\npayroll|public|SELECT|dbo.Salaries\npayroll|guest|EXECUTE|dbo.sp_Pay\n@@PBPE:1\n"
+    "@@GST:2\n@@GSTE:2\n"
+    "@@PBP:2\nhr|public|SELECT|dbo.Employees\n@@PBPE:2\n"
+)
+MSSQL_PERMMINE_DBS = ["master", "payroll", "hr"]
+
+MSSQL_WRITE_PROOF_OUTPUT = (
+    "@@W:begin\nINSERT|before\nUPDATE|MODIFIED_ab12cd\nPERM|1\n@@W:end\n"
+)
+
+NXC_SMB_OUTPUT = (
+    "SMB  10.0.0.10  445  DC01  [*] Windows Server 2019 Build 17763 "
+    "(name:DC01) (domain:corp.local) (signing:True)\n"
+    "SMB  10.0.0.10  445  DC01  [+] corp.local\\admin:Pw (Pwn3d!)\n"
+    "SMB  10.0.0.10  445  DC01  [*] Enumerated shares\n"
+    "SMB  10.0.0.10  445  DC01  Share    Permissions   Remark\n"
+    "SMB  10.0.0.10  445  DC01  -----    -----------   ------\n"
+    "SMB  10.0.0.10  445  DC01  ADMIN$   READ,WRITE    Remote Admin\n"
+    "SMB  10.0.0.10  445  DC01  [*] Enumerated domain user(s)\n"
+    "SMB  10.0.0.10  445  DC01  corp.local\\Administrator  badpwdcount: 0\n"
+    "SMB  10.0.0.10  445  DC01  [+] Dumping password info for domain: CORP\n"
+    "SMB  10.0.0.10  445  DC01  Account lockout threshold: None\n"
+)
+
+GETUSERSPNS_OUTPUT = (
+    "MSSQL/dc.corp.local  sqlsvc  Domain Users  2020\n"
+    "$krb5tgs$23$*sqlsvc$CORP.LOCAL$MSSQL*$deadbeef\n"
+)
+
+GETNPUSERS_OUTPUT = "$krb5asrep$23$svc-web@CORP.LOCAL:abcd\n"
+
+SECRETSDUMP_OUTPUT = (
+    "Administrator:500:aad3b435b51404eeaad3b435b51404ee:"
+    "31d6cfe0d16ae931b73c59d7e0c089c0:::\n"
+)
+
+SSH_ENUM_OUTPUT = (
+    "===ID===\nuid=0(root)\n"
+    "===SUDO===\n(ALL) NOPASSWD: ALL\n"
+    "===SUID===\n/usr/bin/find\n/usr/bin/sudo\n"
+)
+
+BH_TGS_OUTPUT = (
+    "[*] Getting TGS for svc_sql\n"
+    "$krb5tgs$23$*svc_sql$CORP.LOCAL$MSSQLSvc/db.corp.local:1433*$a1b2c3d4$deadbeef\n"
+    "$krb5tgs$23$*svc_web$CORP.LOCAL$HTTP/web.corp.local*$00112233$cafebabe\n"
+)
+
+BH_ASREP_OUTPUT = (
+    "[*] AS-REP for jdoe\n"
+    "$krb5asrep$23$jdoe@CORP.LOCAL:aabbcc$ddeeff001122\n"
+)
+
+BH_SECRETSDUMP_OUTPUT = (
+    "Administrator:500:aad3b435b51404eeaad3b435b51404ee:"
+    "31d6cfe0d16ae931b73c59d7e0c089c0:::\n"
+    "CORP.LOCAL\\krbtgt:502:aad3b435b51404eeaad3b435b51404ee:"
+    "1a2b3c4d5e6f70819293a4b5c6d7e8f9:::\n"
+)
+
+
 ALL_BYTE_VECTORS = {
     "snmp_get_response": snmp_get_response,
     "mongodb_hello_doc": mongodb_hello_doc,
