@@ -345,7 +345,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
     build_csv(hosts, paths["csv"])
     from .report_html import build_html
     build_html(hosts, paths["html"], title=title, domains=domains,
-               credentials=credentials, generated=_now(), tracking=tracking)
+               credentials=credentials, generated=_now(), tracking=tracking,
+               ad_bloodhound=meta.get("ad_bloodhound"))
     # Standalone architecture diagram sources (render with any Mermaid viewer, or
     # `dot -Tpng architecture.dot`). Best-effort - never block a report on these.
     try:
@@ -355,6 +356,15 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             fh.write(netmap.mermaid(hosts, domains))
         with open(os.path.join(eng_dir, "architecture.dot"), "w", encoding="utf-8") as fh:
             fh.write(netmap.dot(hosts, domains))
+        # Standalone, directly-viewable AD tier-0 diagram (open the .svg in any
+        # browser). It needs the xmlns the embedded copy omits to render as a file.
+        arch = (meta.get("ad_bloodhound") or {}).get("architecture")
+        if arch and arch.get("nodes"):
+            svg = netmap.ad_svg(arch).replace(
+                "<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+            with open(os.path.join(eng_dir, "ad-architecture.svg"), "w",
+                      encoding="utf-8") as fh:
+                fh.write(svg)
     except OSError:
         pass
     if not quiet:
@@ -4313,10 +4323,68 @@ def cmd_demo(args: argparse.Namespace) -> int:
             h.db_scanned = True
             h.privesc_checked = True
         store.upsert_host(h)
+    _demo_bloodhound(store)
     _generate_reports(store, paths, "DEMO engagement")
     store.close()
     print("[+] Demo reports generated from bundled sample scan.")
     return 0
+
+
+def _demo_bloodhound(store: Store) -> None:
+    """Seed a small synthetic SharpHound collection so the demo report showcases the
+    AD findings, attack paths and the tier-0 **AD architecture diagram**. Offline and
+    deterministic — analysed exactly like a real collection."""
+    from . import bloodhound as bh
+    B = "S-1-5-21-4242-4242-4242"
+    users = {"meta": {"type": "users"}, "data": [
+        {"ObjectIdentifier": f"{B}-1104",
+         "Properties": {"name": "JSMITH@CORP.LOCAL", "domain": "CORP.LOCAL",
+                        "enabled": True, "hasspn": True,
+                        "serviceprincipalnames": ["MSSQL/db01.corp.local"]}, "Aces": []},
+        {"ObjectIdentifier": f"{B}-500",
+         "Properties": {"name": "ADMINISTRATOR@CORP.LOCAL", "domain": "CORP.LOCAL",
+                        "enabled": True}, "Aces": []},
+    ]}
+    computers = {"meta": {"type": "computers"}, "data": [
+        {"ObjectIdentifier": f"{B}-1000",
+         "Properties": {"name": "DC01.CORP.LOCAL", "domain": "CORP.LOCAL",
+                        "enabled": True, "isdc": True}, "Aces": []},
+    ]}
+    groups = {"meta": {"type": "groups"}, "data": [
+        {"ObjectIdentifier": f"{B}-512",
+         "Properties": {"name": "DOMAIN ADMINS@CORP.LOCAL", "highvalue": True},
+         "Members": [{"ObjectIdentifier": f"{B}-500", "ObjectType": "User"}], "Aces": []},
+        {"ObjectIdentifier": f"{B}-516",
+         "Properties": {"name": "DOMAIN CONTROLLERS@CORP.LOCAL", "highvalue": True},
+         "Members": [{"ObjectIdentifier": f"{B}-1000", "ObjectType": "Computer"}], "Aces": []},
+        {"ObjectIdentifier": f"{B}-513",
+         "Properties": {"name": "DOMAIN USERS@CORP.LOCAL"},
+         "Members": [{"ObjectIdentifier": f"{B}-1104", "ObjectType": "User"}], "Aces": []},
+        {"ObjectIdentifier": f"{B}-1150",
+         "Properties": {"name": "IT SUPPORT@CORP.LOCAL"},
+         "Members": [{"ObjectIdentifier": f"{B}-1104", "ObjectType": "User"}],
+         "Aces": [{"PrincipalSID": f"{B}-513", "RightName": "GenericWrite"}]},
+    ]}
+    domains = {"meta": {"type": "domains"}, "data": [
+        {"ObjectIdentifier": B,
+         "Properties": {"name": "CORP.LOCAL", "functionallevel": "2016",
+                        "machineaccountquota": 10},
+         "Trusts": [], "Aces": [
+             {"PrincipalSID": f"{B}-1150", "RightName": "GetChanges"},
+             {"PrincipalSID": f"{B}-1150", "RightName": "GetChangesAll"}]},
+    ]}
+    import tempfile as _tf
+    try:
+        with _tf.TemporaryDirectory() as d:
+            for name, blob in (("users", users), ("computers", computers),
+                               ("groups", groups), ("domains", domains)):
+                with open(os.path.join(d, f"demo_{name}.json"), "w",
+                          encoding="utf-8") as fh:
+                    fh.write(json.dumps(blob))
+            analysis = bh.analyze(d, owned={"JSMITH@CORP.LOCAL"})
+        store.set_meta("ad_bloodhound", json.dumps(analysis))
+    except (OSError, ValueError):
+        pass
 
 
 def _add_common(pp) -> None:

@@ -111,6 +111,59 @@ class MermaidTest(unittest.TestCase):
         self.assertNotIn('"we"ird', mm)                # inner quote neutralised
 
 
+class AdArchitectureSvgTest(unittest.TestCase):
+
+    def _arch(self):
+        B = "S-1-5-21-9-9-9"
+        return {
+            "nodes": {
+                B: {"type": "Domain", "label": "CORP.LOCAL", "domain": "",
+                    "hv": True, "dc": False, "tier": 0},
+                "S-1-5-21-7-7-7": {"type": "Domain", "label": "CHILD.CORP.LOCAL",
+                                   "domain": "", "hv": True, "dc": False, "tier": 0},
+                f"{B}-512": {"type": "Group", "label": "DOMAIN ADMINS", "domain": "CORP.LOCAL",
+                             "hv": True, "dc": False, "tier": 1},
+                f"{B}-1000": {"type": "Computer", "label": "DC01", "domain": "CORP.LOCAL",
+                              "hv": True, "dc": True, "tier": 1},
+                f"{B}-1105": {"type": "Group", "label": "HELPDESK", "domain": "CORP.LOCAL",
+                              "hv": False, "dc": False, "tier": 2},
+                f"{B}-1001": {"type": "User", "label": "BOB", "domain": "CORP.LOCAL",
+                              "hv": False, "dc": False, "tier": 2},
+            },
+            "edges": [[f"{B}-1105", "MemberOf", f"{B}-512"],
+                      [f"{B}-1001", "GenericAll", f"{B}-1105"],
+                      [f"{B}-1001", "DCSync", B]],
+            "trusts": [["CORP.LOCAL", "Bidirectional", "CHILD.CORP.LOCAL"]],
+            "truncated": False,
+        }
+
+    def test_ad_svg_renders_and_is_self_contained(self):
+        import xml.dom.minidom as md
+        s = netmap.ad_svg(self._arch())
+        self.assertTrue(s.startswith("<svg"))
+        md.parseString(s)                              # well-formed XML (renders anywhere)
+        self.assertNotIn("xmlns", s)                   # inline, self-contained
+        self.assertNotIn("http://", s)
+        self.assertIn("DOMAIN ADMINS", s)              # a high-value group
+        self.assertIn("CORP.LOCAL", s)                 # the domain
+        self.assertIn("DC01", s)                       # the Domain Controller
+        self.assertIn("#C00000", s)                    # DC / control-edge colour
+        self.assertIn("GenericAll", s)                 # a control edge is labelled
+        self.assertIn("DCSync", s)
+        self.assertIn("trust", s)                      # domain trust edge label
+        self.assertIn("<path", s)
+
+    def test_ad_svg_empty_is_graceful(self):
+        s = netmap.ad_svg({})
+        self.assertIn("No BloodHound", s)
+        self.assertTrue(s.startswith("<svg"))
+
+    def test_ad_svg_truncation_note(self):
+        arch = self._arch()
+        arch["truncated"] = True
+        self.assertIn("truncated", netmap.ad_svg(arch).lower())
+
+
 class ReportEmbedTest(unittest.TestCase):
 
     def test_network_map_in_html_report(self):

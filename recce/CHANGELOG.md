@@ -5,6 +5,16 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **AD architecture diagram from the BloodHound / SharpHound collection**
+  (`bloodhound.architecture()` + `netmap.ad_svg()`), rendered as an **inline SVG that
+  draws directly in the HTML report** (and prints to PDF) — no BloodHound GUI, Neo4j,
+  Mermaid or Graphviz needed. It is the **curated tier-0 slice**, not the unreadable
+  full graph: the **domain(s)** on top, the **high-value groups** (Domain Admins,
+  Administrators, …) and **Domain Controllers** below, and the **privileged members /
+  principals that can seize tier-0** at the bottom — with **MemberOf**, **control (ACL /
+  DCSync)** and **domain-trust** edges between them. Large graphs are capped for
+  legibility (with a truncation note); a standalone `ad-architecture.svg` is also
+  written next to the report. Everything is grounded in what SharpHound collected.
 - **Architecture / network map from the enumeration** (`netmap.py`), rendered as an
   **inline SVG that draws directly in the HTML report** — no Mermaid/Graphviz tools
   needed, and it prints straight to PDF from the browser. Each **subnet** is a network

@@ -285,6 +285,155 @@ def svg(hosts: list[Host], domains=None) -> str:
             + "".join(els) + "</svg>")
 
 
+# AD tier-0 palette (fill, stroke) — distinct from the network-map roles.
+_AD_DOMAIN = ("#fff6e6", "#C15A11")     # domain object
+_AD_GROUP = ("#fde7ef", "#a01050")      # high-value group (Domain Admins, ...)
+_AD_DC = ("#fbe3e3", "#C00000")         # Domain Controller
+_AD_USER = ("#e7eefb", "#1f4e9c")       # privileged user
+_AD_COMPUTER = ("#eef1f1", "#5f6f6e")   # member computer
+_AD_OTHER = ("#ffffff", "#8a9997")
+
+
+def _ad_color(node: dict):
+    if node.get("type") == "Domain":
+        return _AD_DOMAIN
+    if node.get("dc"):
+        return _AD_DC
+    if node.get("type") == "Group" and node.get("hv"):
+        return _AD_GROUP
+    if node.get("type") == "User":
+        return _AD_USER
+    if node.get("type") == "Computer":
+        return _AD_COMPUTER
+    return _AD_OTHER
+
+
+def ad_svg(arch: dict) -> str:
+    """A directly-viewable inline SVG of the *tier-0* Active Directory architecture
+    that recce derived from a BloodHound/SharpHound collection: the domain(s) on
+    top, the high-value groups and Domain Controllers below, and their privileged
+    members at the bottom — with MemberOf / control (ACL, DCSync) edges and domain
+    trust edges. Renders in any browser and prints to PDF; no tools, no JavaScript.
+    `arch` is the dict from bloodhound.architecture()."""
+    from html import escape as _e
+    nodes = (arch or {}).get("nodes") or {}
+    if not nodes:
+        return ('<svg viewBox="0 0 360 60" width="360" height="60" role="img" '
+                'aria-label="AD architecture"><text x="12" y="34" font-size="14" '
+                'fill="#5f6f6e">No BloodHound tier-0 graph available.</text></svg>')
+    edges = (arch or {}).get("edges") or []
+    trusts = (arch or {}).get("trusts") or []
+
+    tiers: dict[int, list[str]] = {0: [], 1: [], 2: []}
+    for sid, n in nodes.items():
+        t = n.get("tier", 1)
+        tiers.setdefault(t if t in (0, 1, 2) else 2, []).append(sid)
+    for t in tiers:
+        tiers[t].sort(key=lambda s: (nodes[s].get("label") or s).upper())
+
+    boxW, boxH, hGap, vGap, m = 156, 40, 18, 96, 22
+    ncols = max(1, max(len(v) for v in tiers.values()))
+    width = m * 2 + ncols * (boxW + hGap) - hGap
+    row_y = {0: m + 24, 1: m + 24 + vGap, 2: m + 24 + 2 * vGap}
+
+    pos: dict[str, tuple] = {}
+    for t in (0, 1, 2):
+        row = tiers.get(t) or []
+        if not row:
+            continue
+        tw = len(row) * (boxW + hGap) - hGap
+        startx = max(float(m), (width - tw) / 2)
+        for i, sid in enumerate(row):
+            pos[sid] = (startx + i * (boxW + hGap) + boxW / 2, row_y[t])
+
+    def anchor(sid, toward_y):
+        cx, cy = pos[sid]
+        if toward_y < cy:
+            return cx, cy - boxH / 2
+        if toward_y > cy:
+            return cx, cy + boxH / 2
+        return cx, cy
+
+    els: list[str] = []
+    # Edges first, so the boxes sit on top of the lines.
+    for src, label, dst in edges:
+        if src not in pos or dst not in pos:
+            continue
+        x1, y1 = anchor(src, pos[dst][1])
+        x2, y2 = anchor(dst, pos[src][1])
+        control = label != "MemberOf"
+        col = "#C00000" if control else "#9aa8a6"
+        dash = ' stroke-dasharray="5 3"' if control else ""
+        els.append(f'<path d="M{x1:.0f},{y1:.0f} L{x2:.0f},{y2:.0f}" stroke="{col}" '
+                   f'stroke-width="1.4" fill="none"{dash}/>')
+        if control:
+            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            els.append(f'<text x="{mx:.0f}" y="{my:.0f}" font-size="9.5" '
+                       f'fill="#C00000" text-anchor="middle">{_e(label)}</text>')
+
+    # Trust edges between domain boxes (dashed, orange), matched by label text.
+    label_pos: dict[str, tuple] = {}
+    for sid in tiers.get(0, []):
+        label_pos[(nodes[sid].get("label") or "").upper()] = pos[sid]
+    for src_name, direction, dst_name in trusts:
+        a = label_pos.get((src_name or "").upper())
+        b = label_pos.get((dst_name or "").upper())
+        if not a or not b:
+            continue
+        els.append(f'<path d="M{a[0]:.0f},{a[1] - boxH / 2:.0f} '
+                   f'C{a[0]:.0f},{a[1] - boxH:.0f} {b[0]:.0f},{b[1] - boxH:.0f} '
+                   f'{b[0]:.0f},{b[1] - boxH / 2:.0f}" stroke="#C15A11" '
+                   f'stroke-width="1.3" stroke-dasharray="4 3" fill="none"/>')
+        mx = (a[0] + b[0]) / 2
+        els.append(f'<text x="{mx:.0f}" y="{a[1] - boxH - 2:.0f}" font-size="9.5" '
+                   f'fill="#C15A11" text-anchor="middle">trust '
+                   f'{_x(direction, 14)}</text>')
+
+    def box(sid):
+        n = nodes[sid]
+        cx, cy = pos[sid]
+        fill, stroke = _ad_color(n)
+        x, y = cx - boxW / 2, cy - boxH / 2
+        rx = boxH / 2 if n.get("type") == "Domain" else 7
+        tag = "DC" if n.get("dc") else n.get("type", "")
+        return (
+            f'<rect x="{x:.0f}" y="{y:.0f}" width="{boxW}" height="{boxH}" rx="{rx:.0f}" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.6"/>'
+            f'<text x="{cx:.0f}" y="{cy - 2:.0f}" text-anchor="middle" font-size="11.5" '
+            f'font-weight="700" fill="#1a2422">{_x(n.get("label") or sid, 22)}</text>'
+            f'<text x="{cx:.0f}" y="{cy + 12:.0f}" text-anchor="middle" font-size="9.5" '
+            f'fill="#5f6f6e">{_x(tag, 18)}</text>')
+
+    for sid in pos:
+        els.append(box(sid))
+
+    # Legend.
+    leg_y = row_y[2] + boxH / 2 + 30
+    lx = m
+    items = [("Domain", _AD_DOMAIN), ("HV group", _AD_GROUP), ("DC", _AD_DC),
+             ("User", _AD_USER), ("Computer", _AD_COMPUTER)]
+    for name, (fill, stroke) in items:
+        els.append(f'<rect x="{lx}" y="{leg_y - 10:.0f}" width="12" height="12" rx="2" '
+                   f'fill="{fill}" stroke="{stroke}"/>')
+        els.append(f'<text x="{lx + 17}" y="{leg_y:.0f}" font-size="11" '
+                   f'fill="#3a4644">{name}</text>')
+        lx += 34 + len(name) * 7
+    els.append(f'<text x="{m}" y="{leg_y + 18:.0f}" font-size="10.5" fill="#8a3030">'
+               '— control edge (ACL / DCSync)</text>')
+    els.append(f'<text x="{m + 220}" y="{leg_y + 18:.0f}" font-size="10.5" '
+               f'fill="#9aa8a6">— MemberOf</text>')
+
+    height = leg_y + 30
+    if (arch or {}).get("truncated"):
+        els.append(f'<text x="{m}" y="{height - 2:.0f}" font-size="10" fill="#5f6f6e">'
+                   'Showing the top tier-0 objects (graph truncated for legibility).</text>')
+        height += 16
+    return (f'<svg viewBox="0 0 {int(width)} {int(height)}" width="{int(width)}" '
+            f'height="{int(height)}" role="img" aria-label="AD tier-0 architecture" '
+            f'font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'
+            + "".join(els) + "</svg>")
+
+
 def dot(hosts: list[Host], domains=None) -> str:
     """Graphviz DOT of the same map (render: dot -Tpng architecture.dot -o arch.png)."""
     up = [h for h in hosts if h.is_up]
