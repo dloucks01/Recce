@@ -127,7 +127,7 @@ SIGNATURES: list[dict] = [
      "remediation": "Upgrade OpenSSH to 9.3p2+.",
      "desc": "Memory-safety issues in ssh-agent/forwarding paths that have been "
              "shown to be exploitable in some configurations."},
-    {"product": ["openssh"], "eq": "9.8p1", "severity": "critical",
+    {"product": ["openssh"], "ge": "8.5p1", "lt": "9.8p1", "severity": "critical",
      "title": "OpenSSH 'regreSSHion' pre-auth RCE",
      "cves": ["CVE-2024-6387"], "cwe": ["CWE-364"],
      "remediation": "Upgrade OpenSSH to 9.8p1+ or set LoginGraceTime 0.",
@@ -775,9 +775,28 @@ SIGNATURES: list[dict] = [
 ]
 
 
+# nmap reports Windows as product names ("Windows 7", "Server 2008 R2") that carry
+# no dotted NT kernel version, so a bare regex can't gate os_lt sigs (e.g. BlueKeep,
+# os_lt 6.2). Map the common product names to their NT version as a fallback.
+_WIN_NT = [
+    ("2022", "10.0"), ("2019", "10.0"), ("2016", "10.0"), ("windows 11", "10.0"),
+    ("windows 10", "10.0"), ("2012 r2", "6.3"), ("windows 8.1", "6.3"),
+    ("2012", "6.2"), ("windows 8", "6.2"), ("2008 r2", "6.1"), ("windows 7", "6.1"),
+    ("2008", "6.0"), ("vista", "6.0"), ("2003", "5.2"), ("windows xp", "5.1"),
+    ("windows 2000", "5.0"),
+]
+
+
 def _os_version(host: Host) -> str:
-    m = re.search(r"(\d+\.\d+)", host.os_name or "")
-    return m.group(1) if m else ""
+    osn = (host.os_name or "")
+    m = re.search(r"(\d+\.\d+)", osn)
+    if m:
+        return m.group(1)
+    low = osn.lower()
+    for name, nt in _WIN_NT:
+        if name in low:
+            return nt
+    return ""
 
 
 def _is_dc(host: Host) -> bool:

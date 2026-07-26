@@ -293,7 +293,10 @@ def _basic_auth_defaults(ip: str, port: Port, base_url: str, paths: list[str]) -
         for user, pw in _BASIC_DEFAULTS[:_MAX_BASIC_TRIES]:
             token = base64.b64encode(f"{user}:{pw}".encode()).decode()
             a = _fetch(ip, port, path, auth={"Authorization": f"Basic {token}"})
-            if a and a[0] in (200, 301, 302):
+            # Only a 200 proves the credential was accepted. A 301/302 can be a
+            # generic redirect (to a login page, or /admin -> /admin/) independent of
+            # credential validity, so it is NOT proof - don't claim a confirmed finding.
+            if a and a[0] == 200:
                 out.append(_mk(ip, port, "web-default-creds", "high",
                                f"Default HTTP Basic credentials: {user}:{pw or '<blank>'}",
                                ["CWE-1392", "CWE-287"],

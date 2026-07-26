@@ -144,6 +144,10 @@ def _decode_value(tag: int, value: bytes):
         n = 0
         for b in value:
             n = (n << 8) | b
+        # ASN.1 INTEGER is two's-complement signed; sign-extend if the high bit is
+        # set (Counters/Gauges/Ticks are unsigned, but a signed INTEGER can be < 0).
+        if tag == 0x02 and value and (value[0] & 0x80):
+            n -= 1 << (8 * len(value))
         return n
     if tag == 0x06:
         return decode_oid(value)
