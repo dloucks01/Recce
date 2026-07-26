@@ -21,6 +21,11 @@ def _is_ip(s: str) -> bool:
         return False
 
 
+# Refuse to materialise a network bigger than this (a /16). A /8 is 16M addresses and
+# an IPv6 /64 is astronomical - expanding either would exhaust memory before any scan.
+_MAX_EXPAND = 65536
+
+
 def _expand_token(token: str) -> list[str]:
     token = token.strip()
     if not token or token.startswith("#"):
@@ -28,22 +33,30 @@ def _expand_token(token: str) -> list[str]:
     # CIDR (e.g. 10.0.0.0/24) -> all usable hosts.
     if "/" in token:
         net = ipaddress.ip_network(token, strict=False)
+        if net.num_addresses > _MAX_EXPAND:
+            raise ValueError(
+                f"{token} expands to {net.num_addresses} addresses (max {_MAX_EXPAND}); "
+                "split it into smaller subnets (e.g. /16 or narrower)")
         if net.num_addresses <= 2:
             return [str(h) for h in net]  # /31, /32
         return [str(h) for h in net.hosts()]
-    # Dash range in last octet: 10.0.0.10-40
+    # Dash range in the last octet: 10.0.0.10-40. Only a genuine numeric range - a
+    # hyphenated hostname (mail-1.corp.example) or a typo (10.0.0.10-) must fall through
+    # to be treated as a single target, not crash the whole scope with a ValueError.
     if "-" in token and token.count(".") == 3:
         base, _, tail = token.rpartition(".")
         lo_s, _, hi_s = tail.partition("-")
-        lo, hi = int(lo_s), int(hi_s)
-        octets = list(range(lo, hi + 1))
-        # Drop the /24 network (.0) and broadcast (.255) when the range spans them
-        # but has other hosts too - a range like 10.0.0.0-254 means "the subnet",
-        # not "scan the network address". A range that is ONLY .0 or .255 is left
-        # alone (respect an explicit single-address request).
-        if len(octets) > 1:
-            octets = [o for o in octets if o not in (0, 255)]
-        return [f"{base}.{o}" for o in octets]
+        if lo_s.isdigit() and hi_s.isdigit() and all(o.isdigit() for o in base.split(".")):
+            lo, hi = int(lo_s), int(hi_s)
+            if lo <= hi:
+                octets = list(range(lo, hi + 1))
+                # Drop the /24 network (.0) and broadcast (.255) when the range spans
+                # them but has other hosts too - a range like 10.0.0.0-254 means "the
+                # subnet", not "scan the network address". A range that is ONLY .0 or
+                # .255 is left alone (respect an explicit single-address request).
+                if len(octets) > 1:
+                    octets = [o for o in octets if o not in (0, 255)]
+                return [f"{base}.{o}" for o in octets]
     return [token]  # single IP or hostname
 
 

@@ -52,9 +52,13 @@ def bson_doc(*elements: bytes) -> bytes:
 
 
 def bson_parse(data: bytes, i: int = 0) -> tuple[dict, int]:
-    """Parse a BSON document at offset i. Returns (dict, index-after-document)."""
+    """Parse a BSON document at offset i. Returns (dict, index-after-document).
+    Hardened against a hostile/corrupt document: a negative or non-advancing length
+    field is rejected instead of spinning the loop forever."""
     length = struct.unpack_from("<i", data, i)[0]
-    end = i + length
+    if length < 5:                                     # a BSON doc is >= 5 bytes
+        return {}, i + 4
+    end = min(i + length, len(data))
     i += 4
     out: dict = {}
     while i < end - 1:
@@ -69,6 +73,8 @@ def bson_parse(data: bytes, i: int = 0) -> tuple[dict, int]:
         elif etype == 0x02:                            # string
             slen = struct.unpack_from("<i", data, i)[0]
             i += 4
+            if slen < 1:                               # reject negative/zero -> no loop stall
+                break
             out[name] = data[i:i + slen - 1].decode("utf-8", "replace")
             i += slen
         elif etype == 0x03:                            # embedded document
@@ -78,6 +84,8 @@ def bson_parse(data: bytes, i: int = 0) -> tuple[dict, int]:
             out[name] = [sub[k] for k in sorted(sub, key=lambda x: int(x))]
         elif etype == 0x05:                            # binary
             blen = struct.unpack_from("<i", data, i)[0]
+            if blen < 0:
+                break
             i += 4 + 1 + blen
             out[name] = None
         elif etype == 0x07:                            # ObjectId
@@ -132,6 +140,8 @@ def command(sock, doc: bytes, request_id: int, timeout: float) -> dict | None:
         if len(hdr) < 4:
             return None
         length = struct.unpack("<i", hdr)[0]
+        if length < 5 or length > 16 * 1024 * 1024:    # sane bound; a hostile daemon
+            return None                                 # can't make us buffer ~2 GB
         rest = _recvn(sock, length - 4)
         msg = hdr + rest
         reply, _ = bson_parse(msg, 16 + 4 + 1)         # header(16) + flagBits(4) + kind(1)

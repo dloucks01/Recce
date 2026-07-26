@@ -161,6 +161,40 @@ All notable changes to recce are documented here. Dates are UTC.
     injection lives) stay fuzzable. `--fuzz-risky-forms` opts back into submitting
     state-changing forms on a throwaway target (file uploads are never submitted).
 
+### Fixed (audit + end-to-end run)
+- **Plain-HTTP services on odd ports were scanned as HTTPS and missed entirely.**
+  `_is_tls` substring-matched the *product* name, so any product containing "http"+"s"
+  ("SimpleHTTPServer" → "…**https**erver"), "ssl" or "tls" was wrongly treated as TLS —
+  a plain-HTTP 8080 got probed over TLS, the handshake failed, and **every** web finding
+  (.git/.env/SQLi/etc.) on that port was silently lost. Now only the nmap service +
+  tunnel decide TLS; an explicit `http` service is trusted as plaintext. (Found by the
+  end-to-end run.)
+- **A hostname target or large CIDR could abort the whole scope.** `_expand_token`
+  misparsed a hyphenated FQDN (`mail-1.corp.example`) or a typo (`10.0.0.10-`) as a
+  numeric range and raised `ValueError`, rejecting *every* target; and it materialised
+  an entire CIDR with no cap (an IPv4 `/8` = 16M, an IPv6 `/64` = astronomical) → hang/
+  OOM before any scan. Now a range only expands when both sides are numeric, and a
+  network above 65 536 addresses is refused with a clear message.
+- **`parse_nmap_xml` could raise despite its "never raises" contract** — a well-formed
+  XML with an empty/odd numeric attribute (`portid=""`) crashed the run on the main
+  thread. Numeric attributes now parse tolerantly.
+- **MongoDB BSON parser hung forever on a hostile/corrupt document** (a negative string/
+  binary length made the parse offset stand still); the wire reader also had no
+  message-length cap. Both are now bounded, so a decoy/misbehaving daemon can't hang or
+  OOM the probe.
+- **Docker probe crashed on a malformed JSON array**, the LDAP pass-the-hash **sealed
+  channel crashed the module on a truncated/tampered frame**, and a **`--targets-up`
+  seed marked a truncated enum as complete** on merge — all now degrade cleanly / are
+  preserved.
+- **Review-coverage could never reach 100%**: unconfirmed `-Pn` phantom hosts were
+  counted in the denominator but appear on no sheet. Coverage now counts confirmed-up
+  hosts only, matching the Checklist. (Directly relevant to per-host completion tracking.)
+- Smaller hardening: `PROFILES` are deep-copied per run (were shared mutable singletons);
+  `Host.from_json` tolerates schema drift (unknown keys) on a carried-over datastore;
+  `--exclude` persistence and masscan partial-sweep now fail/​warn instead of silently
+  losing hosts; HTTP-Basic default-cred probe capped at a real 5 attempts; SNMP replies
+  are correlated by request-id (UDP); report generation survives a null severity.
+
 ### Fixed (full-codebase audit)
 - **`_discover` crashed the caller on invalid targets.** Its error paths returned a
   3-tuple after the callers were updated to unpack 4 values, so a bad CIDR / empty

@@ -191,13 +191,35 @@ def parse_response(data: bytes) -> tuple[int, list[tuple[str, object]]] | None:
 
 # --- probe ----------------------------------------------------------------------
 
+def _response_request_id(data: bytes):
+    """The request-id echoed in a GetResponse, or None if unparseable."""
+    try:
+        _, msg, _ = _parse_tlv(data, 0)
+        _, _ver, i = _parse_tlv(msg, 0)
+        _, _comm, i = _parse_tlv(msg, i)
+        _, pdu, _ = _parse_tlv(msg, i)
+        _, rid_b, _ = _parse_tlv(pdu, 0)
+        return int.from_bytes(rid_b, "big")
+    except (IndexError, ValueError):
+        return None
+
+
 def _get(sock, ip: str, port: int, community: str, oid: str, timeout: float,
          request_id: int, pdu_tag: int = 0xA0):
-    """One GET/GETNEXT. Returns [(oid, value)] or None (timeout / error)."""
+    """One GET/GETNEXT. Returns [(oid, value)] or None (timeout / error). Correlates
+    the reply by request-id so a stray/duplicate/out-of-order UDP datagram (connection-
+    less) isn't accepted as the answer to a different OID."""
     try:
         sock.sendto(build_request(community, oid, request_id, pdu_tag), (ip, port))
         sock.settimeout(timeout)
-        data, _ = sock.recvfrom(65535)
+        data = None
+        for _ in range(4):                          # skip a few stale datagrams, bounded
+            data, _ = sock.recvfrom(65535)
+            rid = _response_request_id(data)
+            if rid is None or rid == request_id:
+                break
+        else:
+            return None
     except OSError:
         return None
     parsed = parse_response(data)

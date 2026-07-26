@@ -196,8 +196,14 @@ def item_keys(hosts: list) -> dict[str, list[str]]:
     from . import web
 
     for h in hosts:
-        push("hosts", host_key(h.ip))
-        subnets.add(h.subnet or "unknown")
+        # Only CONFIRMED-up hosts get a reviewable "hosts"/subnet key - the Checklist
+        # (the sheet that carries those cells) renders up hosts only. Counting an
+        # unconfirmed -Pn phantom here inflates the denominator with a key on no sheet,
+        # so review coverage could never reach 100%. (Per-finding keys below are still
+        # emitted for any host that carries them - those live on their own sheets.)
+        if h.is_up:
+            push("hosts", host_key(h.ip))
+            subnets.add(h.subnet or "unknown")
         for p in h.open_ports:
             push("services", svc_key(h.ip, p.protocol, p.portid))
             if web.is_web(p):
@@ -235,9 +241,12 @@ def compute_coverage(hosts: list, tracking: dict[str, tuple]) -> dict[str, dict]
 
 
 def subnet_coverage(hosts: list, tracking: dict[str, tuple]) -> dict[str, dict]:
-    """Per-subnet host-review coverage."""
+    """Per-subnet host-review coverage (confirmed-up hosts only, matching the
+    Checklist and the Overview's Live-hosts table)."""
     agg: dict[str, dict] = {}
     for h in hosts:
+        if not h.is_up:
+            continue
         s = h.subnet or "unknown"
         a = agg.setdefault(s, {"total": 0, "done": 0})
         a["total"] += 1

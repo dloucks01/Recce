@@ -108,12 +108,13 @@ def probe(ip: str, port: int, timeout: float = _TIMEOUT) -> dict | None:
             {"image": c.get("Image", ""),
              "names": [n.lstrip("/") for n in (c.get("Names") or [])],
              "command": c.get("Command", ""), "state": c.get("State", "")}
-            for c in cj[1][:25]]
+            for c in cj[1][:25] if isinstance(c, dict)]
     ij = _get(ip, port, "/images/json", timeout)
     if ij and ij[0] == 200 and isinstance(ij[1], list):
         tags = []
         for im in ij[1]:
-            tags.extend(im.get("RepoTags") or [])
+            if isinstance(im, dict):
+                tags.extend(im.get("RepoTags") or [])
         out["image_tags"] = [t for t in tags if t and t != "<none>:<none>"][:40]
     return out
 

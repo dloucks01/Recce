@@ -7919,5 +7919,89 @@ class DiscoveryReconfirmTest(unittest.TestCase):
         self.assertTrue(prof2.ping_discovery)
 
 
+class AuditRegressionTest(unittest.TestCase):
+    """Regressions for bugs found in the full code audit + end-to-end run."""
+
+    def test_plain_http_product_not_flipped_to_tls(self):
+        # BUG: _is_tls substring-matched the PRODUCT, so "SimpleHTTPServer" (contains
+        # "https") got scanned as HTTPS and every web finding was missed on 8080.
+        from recce import probes
+        from recce.models import Port
+        self.assertFalse(probes._is_tls(
+            Port(portid=8080, service="http", product="SimpleHTTPServer")))
+        self.assertFalse(probes._is_tls(Port(portid=80, service="http", product="nginx")))
+        # Real TLS still detected via service/tunnel (not the port-only heuristic).
+        self.assertTrue(probes._is_tls(Port(portid=8443, service="http", tunnel="ssl")))
+        self.assertTrue(probes._is_tls(Port(portid=9999, service="ssl/http")))
+
+    def test_targets_dashed_hostname_and_huge_cidr(self):
+        from recce.targets import _expand_token
+        # A hyphenated FQDN / typo must not crash the scope (was ValueError).
+        self.assertEqual(_expand_token("mail-1.corp.example"), ["mail-1.corp.example"])
+        self.assertEqual(_expand_token("10.0.0.10-"), ["10.0.0.10-"])
+        # A genuine range still expands.
+        self.assertEqual(_expand_token("10.0.0.10-12"),
+                         ["10.0.0.10", "10.0.0.11", "10.0.0.12"])
+        # A too-large network is refused, not materialised (OOM guard).
+        with self.assertRaises(ValueError):
+            _expand_token("10.0.0.0/8")
+
+    def test_parser_tolerates_bad_numeric_attr(self):
+        from recce import parser
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "x.xml")
+            with open(f, "w") as fh:
+                fh.write('<?xml version="1.0"?><nmaprun><host><status state="up" '
+                         'reason="syn-ack"/><address addr="1.2.3.4" addrtype="ipv4"/>'
+                         '<ports><port protocol="tcp" portid=""><state state="open"/>'
+                         '</port></ports></host></nmaprun>')
+            hosts = parser.parse_nmap_xml(f)          # must not raise
+        self.assertEqual(len(hosts), 1)
+
+    def test_bson_parse_negative_length_terminates(self):
+        from recce import mongodb
+        import struct
+        body = b"\x02\x00" + struct.pack("<i", -6)    # string, empty name, negative len
+        doc = struct.pack("<i", len(body) + 5) + body + b"\x00"
+        out, idx = mongodb.bson_parse(doc, 0)          # must return, not hang
+        self.assertEqual(out, {})
+
+    def test_from_json_ignores_unknown_keys(self):
+        from recce.models import Host
+        data = {"ip": "1.2.3.4", "subnet": "1.2.3.0/24",
+                "some_removed_field": "legacy",       # schema drift on a carried DB
+                "ports": [{"portid": 80, "state": "open", "gone_field": 1}]}
+        h = Host.from_json(data)                        # must not raise TypeError
+        self.assertEqual(h.ip, "1.2.3.4")
+        self.assertEqual([p.portid for p in h.ports], [80])
+
+    def test_coverage_excludes_unconfirmed_phantom_hosts(self):
+        from recce import tracking as tr
+        confirmed = Host(ip="10.0.0.5", subnet="10.0.0.0/24",
+                         ports=[Port(portid=445, state="open")])
+        phantom = Host(ip="10.0.0.250", subnet="10.0.0.0/24", up_reason="user-set")
+        keys = tr.item_keys([confirmed, phantom])
+        self.assertIn(tr.host_key("10.0.0.5"), keys["hosts"])
+        self.assertNotIn(tr.host_key("10.0.0.250"), keys["hosts"])  # not on any sheet
+        # A fully-reviewed confirmed host => 100%, not stuck below by a phantom.
+        cov = tr.compute_coverage([confirmed, phantom],
+                                  {tr.host_key("10.0.0.5"): (True, "")})
+        self.assertEqual(cov["hosts"], {"total": 1, "done": 1, "pct": 100})
+
+    def test_incomplete_scan_survives_merge_over_seed(self):
+        # A --targets-up seed (never enumerated) must not mark a truncated enum complete.
+        from recce.store import Store
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "r.sqlite"))
+            st.upsert_host(Host(ip="10.0.0.9", subnet="10.0.0.0/24",
+                                up_reason="target-list"))          # seed, enumerated=False
+            st.upsert_host(Host(ip="10.0.0.9", subnet="10.0.0.0/24", enumerated=True,
+                                incomplete_scan=True,
+                                ports=[Port(portid=80, state="open")]))  # truncated enum
+            h = st.get_host("10.0.0.9")
+            st.close()
+        self.assertTrue(h.incomplete_scan)             # truncation preserved
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

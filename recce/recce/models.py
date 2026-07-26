@@ -6,7 +6,7 @@ the reporting layer never has to care which tool produced the data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from typing import Any
 
 
@@ -274,18 +274,25 @@ class Host:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "Host":
+        # Filter each row to the dataclass's known fields so a results.sqlite written by
+        # a different recce version (a renamed/removed field) loads instead of raising
+        # TypeError and aborting the whole phase.
+        def _keep(kls, row):
+            allowed = {f.name for f in fields(kls)}
+            return {k: v for k, v in row.items() if k in allowed}
         ports = [
-            Port(**{**p, "scripts": [Script(**s) for s in p.get("scripts", [])]})
+            Port(**{**_keep(Port, p),
+                    "scripts": [Script(**_keep(Script, s)) for s in p.get("scripts", [])]})
             for p in data.get("ports", [])
         ]
-        vulns = [Vuln(**v) for v in data.get("vulns", [])]
-        accounts = [Account(**a) for a in data.get("accounts", [])]
-        exploits = [Exploit(**e) for e in data.get("exploits", [])]
-        host_scripts = [Script(**s) for s in data.get("host_scripts", [])]
-        core = {
+        vulns = [Vuln(**_keep(Vuln, v)) for v in data.get("vulns", [])]
+        accounts = [Account(**_keep(Account, a)) for a in data.get("accounts", [])]
+        exploits = [Exploit(**_keep(Exploit, e)) for e in data.get("exploits", [])]
+        host_scripts = [Script(**_keep(Script, s)) for s in data.get("host_scripts", [])]
+        core = _keep(cls, {
             k: v
             for k, v in data.items()
             if k not in ("ports", "vulns", "accounts", "exploits", "host_scripts")
-        }
+        })
         return cls(ports=ports, vulns=vulns, accounts=accounts, exploits=exploits,
                    host_scripts=host_scripts, **core)

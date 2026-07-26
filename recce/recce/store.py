@@ -117,6 +117,9 @@ class Store:
     def _merge(self, old: Host, new: Host) -> Host:
         """Combine two scans of the same host, preferring the richer data."""
         merged = old
+        # Capture pre-merge enumerated states: `merged is old`, so the assignments below
+        # mutate old.enumerated before the incomplete_scan logic would read it.
+        old_was_enum, new_was_enum = old.enumerated, new.enumerated
         # Ports: index by (proto, portid); newer non-empty fields win.
         port_index = {(p.protocol, p.portid): p for p in old.ports}
         for np in new.ports:
@@ -162,8 +165,16 @@ class Store:
         merged.distance = new.distance or old.distance
         merged.enumerated = old.enumerated or new.enumerated
         # Ports are unioned across scans, so the host is complete if ANY sweep
-        # finished; only incomplete when every scan of it was truncated.
-        merged.incomplete_scan = old.incomplete_scan and new.incomplete_scan
+        # finished; only incomplete when every scan of it was truncated. A record that
+        # was NEVER enumerated (a --targets-up seed) contributed no ports, so its
+        # default `incomplete_scan=False` must not count as "a scan completed" - that
+        # would mark a truncated enum as complete.
+        if not old_was_enum:
+            merged.incomplete_scan = new.incomplete_scan
+        elif not new_was_enum:
+            merged.incomplete_scan = old.incomplete_scan
+        else:
+            merged.incomplete_scan = old.incomplete_scan and new.incomplete_scan
         merged.db_scanned = old.db_scanned or new.db_scanned
         merged.privesc_checked = old.privesc_checked or new.privesc_checked
         merged.cred_enumerated = old.cred_enumerated or new.cred_enumerated
