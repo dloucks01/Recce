@@ -5,6 +5,16 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Credential-less AD roasting (`recce kerberos` / `asrep`).** A minimal Kerberos
+  client — hand-rolled ASN.1 DER over TCP 88, no impacket — that needs **no credential**,
+  only a DC and candidate usernames (from the LDAP/SharpHound accounts recce already
+  enumerated, or a `--userlist`). For each name it sends a pre-auth-less AS-REQ: an
+  **AS-REP back** means the account has pre-auth disabled, and recce captures the
+  encrypted part as a crackable `$krb5asrep$` hash (**AS-REP roasting with no
+  credential** — CONFIRMED high, critical if privileged); a **KDC_ERR_PREAUTH_REQUIRED**
+  confirms a **valid username** (enumeration with no logon → no lockouts), while
+  **PRINCIPAL_UNKNOWN** means it doesn't exist. Feeds the totals, a dedicated
+  **Kerberos** tab, the prove engine, and `sweep`. Read-only — it only requests tickets.
 - **rsync-daemon deep module (`recce rsync`).** Speaks the rsync daemon protocol
   (TCP 873) directly — no rsync binary. Reads the `@RSYNCD` greeting, lists the modules
   with `#list`, then probes each for anonymous access: an `@RSYNCD: OK` module is

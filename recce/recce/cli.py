@@ -330,7 +330,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             meta["ldap"] = json.loads(ldap_blob)
         except ValueError:
             pass
-    for _mk in ("snmp", "mongodb", "redis", "elasticsearch", "rsync", "nfs"):
+    for _mk in ("snmp", "mongodb", "redis", "elasticsearch", "rsync", "nfs",
+                "kerberos"):
         _blob = store.get_meta(_mk)
         if _blob:
             try:
@@ -1415,7 +1416,7 @@ _UNAUTH_SWEEP = [
     ("web", "cmd_web"), ("smb", "cmd_smb"), ("ftp", "cmd_ftp"), ("ldap", "cmd_ldap"),
     ("snmp", "cmd_snmp"), ("mongodb", "cmd_mongodb"), ("redis", "cmd_redis"),
     ("elasticsearch", "cmd_elasticsearch"), ("rsync", "cmd_rsync"),
-    ("nfs", "cmd_nfs"), ("docker", "cmd_docker"),
+    ("nfs", "cmd_nfs"), ("kerberos", "cmd_kerberos"), ("docker", "cmd_docker"),
     ("kubernetes", "cmd_kubernetes"), ("mssql", "cmd_mssql"),
 ]
 # The authenticated pass: the modules that DO something new once you have creds -
@@ -4091,6 +4092,79 @@ def cmd_nfs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kerberos(args: argparse.Namespace) -> int:
+    """Credential-less AD roasting: speak Kerberos (stdlib) to the DC, AS-REP roast
+    every pre-auth-disabled account (capture a crackable hash with NO credential), and
+    validate usernames via the KDC's pre-auth response. Read-only - no logon, no
+    lockouts."""
+    from . import kerberos as _krb
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` (and, for the "
+              "user list, `ldap`/`ad`) first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+
+    # Candidate users: --user / --userlist override the enumerated account names.
+    users = None
+    if getattr(args, "user", None):
+        users = list(args.user)
+    elif getattr(args, "userlist", None):
+        try:
+            with open(args.userlist, encoding="utf-8", errors="replace") as fh:
+                users = [ln.strip() for ln in fh if ln.strip()
+                         and not ln.startswith("#")]
+        except OSError as e:
+            print(f"[x] Could not read --userlist {args.userlist!r}: {e}")
+            store.close()
+            return 1
+    # Privileged names (for critical severity) from admin-flagged accounts.
+    privileged = {a.name.lower() for h in hosts for a in (h.accounts or [])
+                  if str((a.attrs or {}).get("admincount", "")).lower() in ("1", "true")
+                  or a.name.lower() in ("administrator", "admin")}
+
+    active = not args.no_probe
+    realm = getattr(args, "domain", "") or store.get_meta("domain") or ""
+    analysis = _krb.analyze(hosts, users=users, realm=realm,
+                            dc_ip=getattr(args, "dc_ip", "") or "",
+                            privileged=privileged, active=active)
+    if not analysis["dc_ip"]:
+        print("[!] No Kerberos DC found (no host with port 88). Pass --dc-ip, or run "
+              "`enum` against the domain controller first.")
+        store.close()
+        return 0
+    if not analysis["realm"]:
+        print("[!] No realm/domain known. Pass --domain <REALM> (e.g. CORP.LOCAL).")
+        store.close()
+        return 0
+    st = analysis["stats"]
+    if not analysis["results"]:
+        print(f"[!] No candidate usernames to test against {analysis['dc_ip']} "
+              f"({analysis['realm']}). Enumerate users (ldap/ad) or pass --userlist.")
+        store.close()
+        return 0
+    print(f"[+] Kerberos {analysis['realm']} @ {analysis['dc_ip']}: tested "
+          f"{st['users_tested']} user(s) -> {st['valid']} valid, "
+          f"{st['roastable']} AS-REP roastable.")
+    for r in analysis["results"]:
+        if r["state"] == "roastable":
+            print(f"      [ROASTABLE] {r['user']}")
+
+    _fold_service_findings(store, hosts, analysis, "kerberos",
+                           _krb.findings_to_vulns, "Kerberos")
+    if active:
+        _mark_capability_scanned(store, [{"ip": analysis["dc_ip"], "port": 88}])
+    title = store.get_meta("engagement") or args.title
+    _generate_reports(store, paths, title)
+    store.close()
+    print("    -> Kerberos sheet written; findings folded into the main totals.")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -4172,13 +4246,15 @@ def _service_module_coverage(store, hosts) -> list[dict]:
     Ordered highest-impact first so `status` surfaces the critical exposures."""
     from . import (mssql, smb, ftp, docker, kubernetes as k8s, ldap as _ldap,
                    snmp as _snmp, mongodb as _mongo, redis as _redis,
-                   elasticsearch as _es, rsync as _rsync, nfs as _nfs)
+                   elasticsearch as _es, rsync as _rsync, nfs as _nfs,
+                   kerberos as _krb)
     mods = [
         ("MongoDB", "mongodb", _mongo.is_mongodb, "recce mongodb"),
         ("Redis", "redis", _redis.is_redis, "recce redis"),
         ("Elasticsearch", "elasticsearch", _es.is_elasticsearch, "recce elasticsearch"),
         ("rsync", "rsync", _rsync.is_rsync, "recce rsync"),
         ("NFS", "nfs", _nfs.is_nfs, "recce nfs"),
+        ("Kerberos", "kerberos", _krb.is_kerberos, "recce kerberos -d DOMAIN"),
         ("Docker", "docker", docker.is_docker, "recce docker"),
         ("Kubernetes", "kubernetes", k8s.is_k8s, "recce k8s"),
         ("MSSQL", "mssql", mssql.is_mssql, "recce mssql -u USER -p PASS -d DOM"),
@@ -5357,6 +5433,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     nfp.add_argument("-o", "--output-dir", default="engagement")
     nfp.add_argument("--title", default="Recce Engagement")
     nfp.set_defaults(func=cmd_nfs)
+
+    # Credential-less Kerberos AS-REP roasting + user enumeration.
+    kp = sub.add_parser("kerberos", aliases=["asrep", "asreproast"],
+                        help="credential-less AD roasting: AS-REP roast pre-auth-disabled "
+                             "accounts + validate usernames via the KDC (no creds, port 88)")
+    kp.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file")
+    kp.add_argument("--dc-ip", dest="dc_ip", default="",
+                    help="domain controller IP (default: a host with port 88 open)")
+    kp.add_argument("-d", "--domain", default="",
+                    help="Kerberos realm / AD domain (e.g. CORP.LOCAL)")
+    kp.add_argument("--userlist",
+                    help="file of candidate usernames, one per line (default: the "
+                         "user accounts recce already enumerated)")
+    kp.add_argument("--user", action="append",
+                    help="test a single username (repeatable)")
+    kp.add_argument("--no-probe", action="store_true",
+                    help="skip the live probe; just write the commands")
+    kp.add_argument("-o", "--output-dir", default="engagement")
+    kp.add_argument("--title", default="Recce Engagement")
+    kp.set_defaults(func=cmd_kerberos)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")

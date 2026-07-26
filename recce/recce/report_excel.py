@@ -102,7 +102,7 @@ TAB_COLORS = {
     "Kubernetes": _TAB_FIND, "LDAP": _TAB_FIND,
     "SNMP": _TAB_FIND, "MongoDB": _TAB_FIND, "Redis": _TAB_FIND,
     "Elasticsearch": _TAB_FIND, "rsync": _TAB_FIND, "NFS": _TAB_FIND,
-    "Raw NSE": _TAB_RAW,
+    "Kerberos": _TAB_FIND, "Raw NSE": _TAB_RAW,
 }
 
 
@@ -1345,6 +1345,10 @@ def _build_runbook(wb, meta: dict) -> None:
         "NFS: speaks ONC RPC to the portmapper + mountd (showmount -e), then flags any "
         "export shared to * / everyone - a CONFIRMED world-mountable export is readable "
         "by any host (and writable via no_root_squash).")
+    cmd("kerberos -d DOMAIN -o eng   [--dc-ip IP] [--userlist f]",
+        "Credential-less AD roasting: speaks Kerberos (no impacket) to AS-REP roast "
+        "every pre-auth-disabled account (capture a crackable hash with NO credential) "
+        "and validate usernames via the KDC - no logon, no lockouts.")
 
     section("6. Act on the findings - turn CONFIRMED findings into a plan",
             "Once findings are proven (Verification tab), stage the exploitation and "
@@ -2452,6 +2456,54 @@ def _build_nfs(wb, analysis: dict) -> None:
     sh.set_col(2, 120)
 
 
+def _build_kerberos(wb, analysis: dict) -> None:
+    """Kerberos sheet: per-user AS-REP roast / validation results + findings."""
+    analysis = analysis or {}
+    results = analysis.get("results") or []
+    fs = analysis.get("findings") or []
+    runbooks = analysis.get("runbooks") or []
+    if not results and not fs:
+        return
+    from . import kerberos as _krb
+    sh = wb.add_sheet("Kerberos")
+    sh.write([("Kerberos - credential-less AD roasting", "title")])
+    sh.write([("recce speaks Kerberos directly (stdlib ASN.1 DER, no impacket): for "
+               "each candidate user it sends a pre-auth-less AS-REQ to the DC. An "
+               "AS-REP back means pre-auth is disabled - recce captures a crackable "
+               "$krb5asrep$ hash with NO credential; a PREAUTH_REQUIRED error confirms "
+               "a valid username. It only requests tickets - no logon, no lockouts.",
+               "sub")])
+    sh.write([""])
+    sh.write([("How Kerberos is tested", "title")])
+    for phase, text in _krb.TESTING_NARRATIVE:
+        sh.write([(phase, "bold")])
+        sh.write(["", text])
+    sh.write([""])
+    sh.write([(f"DC {analysis.get('dc_ip', '')}  realm {analysis.get('realm', '')}",
+               "bold")])
+    sh.write([(h, "bold") for h in ("Username", "Result", "etype")])
+    _state = {"roastable": ("AS-REP ROASTABLE", "sev_high"),
+              "valid": ("valid (pre-auth)", "sev_low"),
+              "locked": ("valid (locked/expired)", "sev_medium"),
+              "unknown_user": "does not exist", "error": "error", "no_reply": "no reply"}
+    for r in results:
+        cell = _state.get(r["state"], r["state"])
+        sh.write([r["user"], cell, str(r.get("etype", "")) if r.get("etype") else ""])
+    sh.write([""])
+    _write_findings_table(sh, fs)
+    for rb in runbooks:
+        sh.write([(f"Runbook - {rb['target']}", "boldred")])
+        cur = None
+        for step in (rb.get("credfree") or []) + (rb.get("credentialed") or []):
+            if step["phase"] != cur:
+                cur = step["phase"]
+                sh.write([(cur, "bold")])
+            sh.write(["", f"[{step['tool']}]  {step.get('command', '')}"])
+        sh.write([""])
+    sh.set_col(1, 24)
+    sh.set_col(2, 120)
+
+
 # --- public entry points --------------------------------------------------------
 
 def _spec_credentials(hosts: list[Host], creds_stored: list | None = None) -> SheetSpec:
@@ -2620,6 +2672,7 @@ def build_workbook(hosts: list[Host], out_path: str, meta: dict | None = None,
     _build_elasticsearch(wb, meta.get("elasticsearch") or {})
     _build_rsync(wb, meta.get("rsync") or {})
     _build_nfs(wb, meta.get("nfs") or {})
+    _build_kerberos(wb, meta.get("kerberos") or {})
     # AD cluster, kept contiguous: inventory -> quick wins -> import findings/paths
     # -> users & accounts.
     _build_active_directory(wb, hosts, domains)
