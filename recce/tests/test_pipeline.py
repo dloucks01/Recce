@@ -2889,6 +2889,29 @@ class HtmlReportTest(unittest.TestCase):
         self.assertIn('class="basis"', html)
         self.assertIn("CVE-2024-27316", html)
 
+    def test_coverage_checklist_mirrors_tracking(self):
+        """A read-only 'Assessment coverage' checklist reflects both the tool's auto
+        state (enumerated host -> Enumerated done) and an operator tick passed via
+        tracking (a reviewed host shows checked)."""
+        from recce import report_html, tracking as tr
+        h = Host(ip="10.0.0.10", subnet="10.0.0.0/24", state="up",
+                 up_reason="syn-ack", enumerated=True,
+                 ports=[Port(portid=445, state="open", service="microsoft-ds")])
+        ticks = {tr.host_key("10.0.0.10"): (True, "done here")}
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.html")
+            report_html.build_html([h], p, title="Cov", tracking=ticks)
+            with open(p, encoding="utf-8") as fh:
+                html = fh.read()
+        self.assertIn("Assessment coverage", html)
+        self.assertIn('table class="cov"', html)
+        self.assertIn("10.0.0.10", html)
+        self.assertIn("&#10003;", html)                  # at least one ✓ (enum/reviewed)
+        self.assertIn("1/1 reviewed", html)              # the operator tick is mirrored
+        # Still self-contained.
+        for bad in ("src=", "<link", "<script"):
+            self.assertNotIn(bad, html)
+
     def test_empty_hosts_ok(self):
         from recce import report_html
         with tempfile.TemporaryDirectory() as d:
