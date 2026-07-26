@@ -168,8 +168,9 @@ def _spec_checklist(hosts: list[Host]) -> SheetSpec:
     become a handful of bands you expand one at a time. Within a subnet, hosts with
     critical/high findings sort to the top, and the # Vulns cell is coloured by the
     worst severity so risk pops out. Auto steps (Enumerated/Vuln-scan/Web/DB) turn
-    green when the tool finishes them; manual steps (AD review, Access/Priv-esc/
-    Creds/Lateral) are operator sign-offs you tick as you go. Steps that don't
+    green when the tool finishes them (Access ticks when credentialed enum confirms
+    a foothold, or via `recce access`); manual steps (AD review, Creds, Lateral) are
+    operator sign-offs you tick as you go. Steps that don't
     apply to a host show "—" instead of a box (no Web box without a web server,
     no AD box off a DC, no DB box without a database), so a checked box always
     means real work was done. The Reviewed checkbox is your per-host sign-off.
@@ -958,10 +959,11 @@ def _build_guide(wb, meta: dict) -> None:
         "high/critical findings sort to the top of each subnet.",
         "2. The step columns are colour-coded in the header so you can see which fill "
         "themselves: GREEN headers = AUTO (the tool ticks them) - Enumerated, "
-        "Vuln-scan, Web, DB, Priv-esc turn green as recce finishes each phase (running "
-        "smb/ftp/docker/k8s/mssql/ldap also auto-ticks the ports they assess). AMBER "
-        "headers = MANUAL sign-offs you tick yourself - AD, Access, Creds, Lateral - "
-        "the kill-chain steps only you can confirm.",
+        "Vuln-scan, Web, DB, Access, Priv-esc turn green as recce finishes each phase "
+        "(running smb/ftp/docker/k8s/mssql/ldap also auto-ticks the ports they assess; "
+        "Access ticks when credentialed enum confirms a foothold, or via `recce "
+        "access`). AMBER headers = MANUAL sign-offs you tick yourself - AD, Creds, "
+        "Lateral - the kill-chain steps only you can confirm.",
         "3. Steps that don't apply to a host show '—' instead of a box (e.g. no AD "
         "box off a non-DC). SMB/remote/mail/SNMP are tracked on the SERVICES tab.",
         "4. You can tick/untick any box by hand - your choice sticks (untick to "
@@ -1119,6 +1121,9 @@ def _build_guide(wb, meta: dict) -> None:
          "Fills Credentials."),
         ("writeups", "Generate a Word (.docx) write-up per finding - finish each "
                      "in Word (screenshots auto-added for web when a browser is present)."),
+        ("access [--host IP --note '...']",
+         "Review footholds per host (auto-derived from credentialed enum), or record "
+         "one you gained another way - ticks the Checklist Access step."),
         ("status / report", "Show progress + deep-dive coverage / rebuild this "
                             "workbook from the datastore."),
     ]:
@@ -1344,6 +1349,9 @@ def _build_runbook(wb, meta: dict) -> None:
                          "(preserves your ticks and notes).")
     cmd("status -o eng", "Print live review-coverage + per-service deep-dive coverage "
                          "and the suggested next command.")
+    cmd("access -o eng", "Review which hosts you have a foothold on (auto-derived from "
+                         "credentialed enum). Record one you got another way with "
+                         "`access --host IP --note '...'` - it ticks the Access step.")
 
     section("On-target - run these ON a compromised host (read-only)",
             "Copy the script from recce/local/ to the target, self-test, then run "

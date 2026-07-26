@@ -285,6 +285,14 @@ def run_nxc_smb(ip: str, creds: dict) -> tuple[dict | None, str | None]:
 def _fold_nxc(host: Host, data: dict, label: str = "supplied credentials",
               admin_only: bool = False) -> None:
     dom = (data.get("host_info") or "")
+    # A successful authenticated session (or confirmed local admin) IS a foothold -
+    # record it so the Access step auto-ticks and status/reports reflect it.
+    if data.get("admin"):
+        host.access_gained = True
+        host.access_detail = f"SMB local admin (Pwn3d!) - {label}"
+    elif data.get("auth") and not host.access_gained:
+        host.access_gained = True
+        host.access_detail = f"SMB authenticated - {label}"
     if not admin_only:            # the admin re-run only records reach, no re-fold
         for sh in data.get("shares", []):
             host.accounts.append(Account(ip=host.ip, source="netexec", kind="share",
@@ -417,6 +425,10 @@ def run_ssh_local(ip: str, ssh: dict) -> tuple[dict | None, str | None]:
 
 
 def _fold_ssh(host: Host, facts: dict) -> None:
+    # Reaching here means the SSH credential authenticated and the local-enum ran -
+    # that is a foothold on this host.
+    host.access_gained = True
+    host.access_detail = host.access_detail or "SSH credentialed access"
     summary = (f"id: {facts.get('id', '')}\nkernel: {facts.get('kernel', '')}\n"
                f"os: {facts.get('os', '')}").strip()
     if summary:

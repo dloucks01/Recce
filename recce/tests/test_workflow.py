@@ -728,8 +728,10 @@ class WorkbookStructureTest(unittest.TestCase):
         hrow = next(r for r in range(1, ws.max_row + 1)
                     if "IP" in [c.value for c in ws[r]])
         hdr = [c.value for c in ws[hrow]]
-        auto = {"Enumerated", "Vuln-scan", "Web", "DB", "Priv-esc"}
-        manual = {"AD", "Access", "Creds", "Lateral"}
+        # Access is auto now: recce derives it from credentialed enum (creds/admin/
+        # SSH/MSSQL) and it auto-ticks like the other tool phases.
+        auto = {"Enumerated", "Vuln-scan", "Web", "DB", "Priv-esc", "Access"}
+        manual = {"AD", "Creds", "Lateral"}
         for h in auto:
             c = ws.cell(row=hrow, column=hdr.index(h) + 1)
             self.assertEqual(c.fill.fgColor.rgb, "FF2E7D32", f"{h} should be auto-green")

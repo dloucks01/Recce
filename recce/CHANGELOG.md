@@ -5,6 +5,17 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Added
+- **Initial-access tracking — the `Access` step is now auto-derived, and a new
+  `access` command.** recce marks a host as *access gained* the moment a credentialed
+  phase confirms a foothold — a valid credential or local admin from `credenum` /
+  `credsweep`, an SSH session, or a working MSSQL login (`Host.access_gained`) — and the
+  Checklist **Access** step auto-ticks (green/auto instead of amber/manual, joining
+  enum/vuln/web/db/priv-esc). The `access` command reviews footholds per host
+  (`recce access`), re-derives them from existing findings, or records one you gained
+  another way (`recce access --host IP --note '...'`, `--undo` to clear). `status` now
+  shows Access under the auto "Tool progress" block (operator-tick still overrides), and
+  the flag round-trips the datastore + survives a re-scan merge. Closes the per-host
+  "what's done, what's left" tracking goal for the access phase.
 - **`recce sweep` / `recce credsweep` — one command each for the two post-`enum` deep
   passes.** Instead of typing the deep modules by hand after enum, these run them in
   one shot; each module self-skips when the datastore has no matching service, and the

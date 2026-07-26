@@ -3304,6 +3304,16 @@ def cmd_mssql(args: argparse.Namespace) -> int:
             uniq.append(f)
     analysis["findings"] = uniq
 
+    # A working SQL login is a foothold on that host -> record access so the Access
+    # step auto-ticks. (nxc sets t["access"] above; mark it before the fold persists.)
+    host_by_ip = {h.ip: h for h in hosts}
+    for t in tgts:
+        if t.get("access") and t["ip"] in host_by_ip:
+            h = host_by_ip[t["ip"]]
+            h.access_gained = True
+            h.access_detail = h.access_detail or (
+                "MSSQL sysadmin" if t.get("admin") else "MSSQL login")
+
     # Fold findings into the main severity totals + writeups (attach to each host).
     _fold_service_findings(store, hosts, analysis, "mssql",
                            mssql.findings_to_vulns, "MSSQL")
@@ -4036,6 +4046,16 @@ def cmd_status(args: argparse.Namespace) -> int:
                    if tracking.get(tr.step_key(step, h.ip), (False, ""))[0])
         return done, len(applic)
 
+    def merged_count(step):
+        # Matches the Checklist cell: operator tick if set, else the auto/derived state.
+        applic = [h for h in hosts if tr.step_applies(h, step)]
+        done = 0
+        for h in applic:
+            k = tr.step_key(step, h.ip)
+            done += 1 if (tracking[k][0] if k in tracking
+                          else tr.step_auto(h, step)) else 0
+        return done, len(applic)
+
     en_d, en_t = phase_count("enum")
     vs_d, vs_t = phase_count("vuln")
     web_d, web_t = phase_count("web")
@@ -4048,6 +4068,9 @@ def cmd_status(args: argparse.Namespace) -> int:
           + (f"   ({scanned_ports}/{len(open_ports)} open ports)" if open_ports else ""))
     print(f"    Web           {web_d}/{web_t}   (hosts serving HTTP/HTTPS)")
     print(f"    DB-scanned    {db_d}/{db_t}   (hosts with DB services)")
+    ac_d, ac_t = merged_count("access")
+    print(f"    Access gained {ac_d}/{ac_t}   (foothold: creds/admin/SSH/MSSQL "
+          "- see `recce access`)")
 
     # Deep service-module coverage (mssql / smb / ftp / docker / kubernetes): for each
     # module, how many hosts with an applicable service have actually had it run.
@@ -4061,13 +4084,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Manual sign-offs (from your ticks): AD review + the kill-chain.
     ad_d, ad_t = manual_count("ad")
-    ac_d, ac_t = manual_count("access")
     cr_d, cr_t = manual_count("creds")
     lat_d, lat_t = manual_count("lateral")
     pe_done = sum(1 for h in hosts if h.privesc_checked)
     print("\n  Manual sign-offs (from your ticks) - hosts done / applicable:")
     print(f"    AD reviewed   {ad_d}/{ad_t}   (domain controllers / directory hosts)")
-    print(f"    Access gained {ac_d}/{ac_t}")
     print(f"    Priv-esc      {pe_done}/{len(hosts)}   (post-exploitation performed)")
     print(f"    Creds got     {cr_d}/{cr_t}")
     print(f"    Lateral       {lat_d}/{lat_t}")
@@ -4133,6 +4154,72 @@ def cmd_status(args: argparse.Namespace) -> int:
         nxt = "all phases complete - review the workbook and tick Reviewed."
     print(f"\n  Next: {nxt}")
     print()
+    store.close()
+    return 0
+
+
+def cmd_access(args: argparse.Namespace) -> int:
+    """Record and review initial access (footholds) per host. recce auto-derives
+    access as the credentialed phases run (valid creds / local admin / SSH / MSSQL);
+    use this to see the picture across the engagement, or to record a foothold you
+    gained by other means so the Checklist Access step ticks."""
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']}. Run `enum`/`import` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    changed: list = []
+
+    if args.host:
+        targeted = set(args.host)
+        for h in hosts:
+            if h.ip not in targeted:
+                continue
+            if args.undo:
+                if h.access_gained:
+                    h.access_gained, h.access_detail = False, ""
+                    changed.append(h)
+            else:
+                h.access_gained = True
+                h.access_detail = (args.note or h.access_detail
+                                   or "manual: operator-recorded foothold")
+                changed.append(h)
+        for h in changed:
+            store.upsert_host(h, merge=False)
+        print(f"[+] Access {'cleared on' if args.undo else 'recorded on'} "
+              f"{len(changed)} host(s).")
+    else:
+        # Re-derive from the stable credentialed findings (credenum / SSH); never
+        # clears a flag a module already set (e.g. MSSQL access).
+        for h in hosts:
+            if h.access_gained:
+                continue
+            detail = tr.access_from_findings(h)
+            if detail:
+                h.access_gained, h.access_detail = True, detail
+                changed.append(h)
+        for h in changed:
+            store.upsert_host(h, merge=False)
+        if changed:
+            print(f"[+] Derived access on {len(changed)} host(s) from existing findings.")
+
+    applicable = [h for h in hosts if h.open_ports]
+    gained = [h for h in sorted(hosts, key=lambda x: _ip_key(x.ip)) if h.access_gained]
+    print(f"\n  Access gained: {len(gained)}/{len(applicable)} host(s) with a foothold\n")
+    for h in gained:
+        name = f" ({h.hostname})" if h.hostname else ""
+        print(f"    {h.ip}{name}  -  {h.access_detail}")
+    if not gained:
+        print("    (none yet - gain access via `credsweep` / `credenum` / `mssql`, or "
+              "record one: `recce access --host IP --note '...'`)")
+    print()
+
+    if changed:
+        _generate_reports(store, paths, store.get_meta("engagement") or args.title)
     store.close()
     return 0
 
@@ -4910,6 +4997,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="print live review coverage")
     st.add_argument("-o", "--output-dir", default="engagement")
     st.set_defaults(func=cmd_status)
+
+    ax = sub.add_parser("access",
+                        help="record / review initial access (footholds) per host - "
+                             "auto-derived from credentialed enum, or record your own")
+    ax.add_argument("targets", nargs="*",
+                    help="restrict the listing to these IPs / ranges / CIDRs / @file")
+    ax.add_argument("-o", "--output-dir", default="engagement")
+    ax.add_argument("--title", default="Recce Engagement")
+    ax.add_argument("--host", nargs="*",
+                    help="record a foothold on this IP (or --undo to clear it)")
+    ax.add_argument("--note", help="how access was gained (shown in the report)")
+    ax.add_argument("--undo", action="store_true",
+                    help="with --host, clear the recorded foothold")
+    ax.set_defaults(func=cmd_access)
 
     rv = sub.add_parser("review", help="mark items reviewed / not reviewed")
     rv.add_argument("-o", "--output-dir", default="engagement")
