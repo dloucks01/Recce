@@ -427,9 +427,13 @@ def _network_map(hosts, domains, ad_data=None):
         'It is not a physical or routing topology: recce does not trace links or '
         'firewall rules between hosts, so only relationships it actually saw are drawn.</p>'
         f'<div class="netmap">{nm.svg(hosts, domains, ad_data)}</div>'
-        '<p class="basis">This diagram renders here directly (and prints to PDF). The '
-        'same map is also written as <b>architecture.mmd</b> (Mermaid) and '
-        '<b>architecture.dot</b> (Graphviz) next to this report, for those tools.</p>'
+        '<p class="basis">This diagram renders here directly (and prints to PDF); a '
+        'large estate (&gt;50 hosts) is shown collapsed to per-role counts per subnet '
+        'to stay readable. Two standalone copies are written next to this report: '
+        '<b>network-map-full.svg</b> (every host broken out) and '
+        '<b>network-map-overview.svg</b> (by role) — plus <b>architecture.mmd</b>/'
+        '<b>.dot</b> and <b>architecture-overview.mmd</b>/<b>.dot</b> for Mermaid / '
+        'Graphviz.</p>'
         '</section>')
 
 

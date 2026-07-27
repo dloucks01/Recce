@@ -360,10 +360,28 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
         from . import netmap
         eng_dir = os.path.dirname(paths["html"])
         ad_blob = meta.get("ad_bloodhound")
-        with open(os.path.join(eng_dir, "architecture.mmd"), "w", encoding="utf-8") as fh:
-            fh.write(netmap.mermaid(hosts, domains, ad_blob))
-        with open(os.path.join(eng_dir, "architecture.dot"), "w", encoding="utf-8") as fh:
-            fh.write(netmap.dot(hosts, domains, ad_blob))
+
+        def _write(name, text):
+            with open(os.path.join(eng_dir, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+        def _standalone_svg(text):
+            # the embedded copy omits xmlns; a file needs it to render on its own
+            return text.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+
+        # Two network maps, each in Mermaid + DOT + a directly-viewable SVG:
+        #   * FULL     - every host as its own node (the detailed map)
+        #   * OVERVIEW - each subnet collapsed to per-role counts (readable at scale)
+        _write("architecture.mmd", netmap.mermaid(hosts, domains, ad_blob))
+        _write("architecture.dot", netmap.dot(hosts, domains, ad_blob))
+        _write("architecture-overview.mmd",
+               netmap.mermaid(hosts, domains, ad_blob, aggregate=True))
+        _write("architecture-overview.dot",
+               netmap.dot(hosts, domains, ad_blob, aggregate=True))
+        _write("network-map-full.svg",
+               _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=False)))
+        _write("network-map-overview.svg",
+               _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=True)))
         # Standalone, directly-viewable AD tier-0 diagram (open the .svg in any
         # browser). It needs the xmlns the embedded copy omits to render as a file.
         arch = (meta.get("ad_bloodhound") or {}).get("architecture")
@@ -379,7 +397,9 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
               f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}"
-              f"\n    {paths['html']}\n    {paths['assets']} (architecture & assets)")
+              f"\n    {paths['html']}\n    {paths['assets']} (architecture & assets)"
+              f"\n    network map: network-map-full.svg (every host) + "
+              f"network-map-overview.svg (by role) · architecture[-overview].mmd/.dot")
         counts = store.count_issues()
         if counts.get("total"):
             print(f"[!] {counts['total']} scan issue(s) logged "
