@@ -120,67 +120,85 @@ def _label(s: str, n: int = 40) -> str:
     return (s[: n - 1] + "…") if len(s) > n else s
 
 
-def mermaid(hosts: list[Host], steps: list[dict] | None = None) -> str:
-    """A Mermaid flowchart of the attack path: stage subgraphs left-to-right, one
-    node per step (host + finding), with dashed same-host edges showing a box being
-    walked through the stages. Paste into any Mermaid viewer / GitHub / mermaid.live."""
+# Stage palette (fill, stroke), left-to-right through the kill chain.
+_STAGE_COLOR = {
+    "Initial Access": ("#e8f4ec", "#2E7D32"),
+    "Privilege Escalation": ("#fbf3e0", "#9C7A00"),
+    "Credential Access": ("#e7eefb", "#1f4e9c"),
+    "Lateral Movement": ("#f3eefb", "#6b4fa0"),
+    "Domain Dominance": ("#fbe3e3", "#C00000"),
+}
+
+
+def svg(hosts: list[Host], steps: list[dict] | None = None) -> str:
+    """A directly-viewable inline SVG of the attack path — renders in any browser with
+    no tools or JavaScript (and prints to PDF). Left-to-right stage columns of step
+    cards (host + finding), stage-to-stage arrows, and dashed same-host connectors
+    showing one box being walked through the stages."""
+    from html import escape as _e
     steps = steps if steps is not None else build(hosts)
     used = [st for st in STAGE_ORDER if any(s["stage"] == st for s in steps)]
     if not steps:
-        return "flowchart LR\n  empty[\"No confirmed attack path yet\"]\n"
-    out = ["flowchart LR"]
-    nid: dict[str, str] = {}
-    per_host_stage: dict[tuple, str] = {}
-    i = 0
-    for si, st in enumerate(used):
-        out.append(f'  subgraph S{si}["{st}"]')
-        for s in [x for x in steps if x["stage"] == st]:
-            node = f"n{i}"
-            nid[s["key"]] = node
+        return ('<svg viewBox="0 0 340 60" width="340" height="60" role="img" '
+                'aria-label="Attack path"><text x="12" y="34" font-size="14" '
+                'fill="#5f6f6e">No confirmed attack path yet.</text></svg>')
+
+    m, headerH, cardW, cardH, vgap, colGap = 16, 30, 236, 56, 12, 40
+    by_stage = {st: [s for s in steps if s["stage"] == st] for st in used}
+    rows = max(len(v) for v in by_stage.values())
+    W = m * 2 + len(used) * cardW + (len(used) - 1) * colGap
+    H = m * 2 + headerH + 8 + rows * (cardH + vgap) + 8
+    geom: dict[tuple, tuple] = {}          # (ip, stage) -> (x, y, w, h)
+
+    els = [
+        '<defs><marker id="apar" markerWidth="9" markerHeight="9" refX="7" refY="3" '
+        'orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8a9997"/></marker>'
+        '<marker id="apho" markerWidth="9" markerHeight="9" refX="7" refY="3" '
+        'orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#b08cc0"/></marker></defs>',
+        f'<rect x="0" y="0" width="{W}" height="{H}" fill="#ffffff"/>',
+    ]
+
+    for ci, st in enumerate(used):
+        x = m + ci * (cardW + colGap)
+        fill, stroke = _STAGE_COLOR.get(st, ("#eef1f1", "#5f6f6e"))
+        els.append(f'<rect x="{x}" y="{m}" width="{cardW}" height="{headerH - 6}" rx="6" '
+                   f'fill="{stroke}"/>')
+        els.append(f'<text x="{x + cardW / 2:.0f}" y="{m + 16}" text-anchor="middle" '
+                   f'font-size="12.5" font-weight="700" fill="#ffffff">{_e(st)}</text>')
+        for ri, s in enumerate(by_stage[st]):
+            y = m + headerH + 8 + ri * (cardH + vgap)
+            geom[(s["ip"], st)] = (x, y, cardW, cardH)
             host = s["ip"] + (f" ({s['hostname']})" if s["hostname"] else "")
-            out.append(f'    {node}["{_label(host, 28)}<br/>{_label(s["title"])}"]')
-            per_host_stage[(s["ip"], st)] = node
-            i += 1
-        out.append("  end")
-    # Stage-to-stage flow.
+            els.append(f'<rect x="{x}" y="{y}" width="{cardW}" height="{cardH}" rx="7" '
+                       f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>')
+            els.append(f'<text x="{x + 10}" y="{y + 20}" font-size="11.5" '
+                       f'font-weight="700" fill="#1a2422">{_e(_label(host, 30))}</text>')
+            els.append(f'<text x="{x + 10}" y="{y + 38}" font-size="11" '
+                       f'fill="#3a4644">{_e(_label(s["title"], 34))}</text>')
+
+    # stage-to-stage flow arrows (header to header)
     for a, b in zip(range(len(used)), range(1, len(used))):
-        out.append(f"  S{a} --> S{b}")
-    # Same-host continuity across consecutive stages (dashed).
-    for h in {s["ip"] for s in steps}:
-        chain = [per_host_stage[(h, st)] for st in used if (h, st) in per_host_stage]
-        for a, b in zip(chain, chain[1:]):
-            out.append(f"  {a} -. same host .-> {b}")
-    return "\n".join(out) + "\n"
+        xa = m + a * (cardW + colGap) + cardW
+        xb = m + b * (cardW + colGap)
+        yc = m + (headerH - 6) / 2
+        els.append(f'<line x1="{xa + 4}" y1="{yc:.0f}" x2="{xb - 6}" y2="{yc:.0f}" '
+                   f'stroke="#8a9997" stroke-width="2" marker-end="url(#apar)"/>')
 
-
-def dot(hosts: list[Host], steps: list[dict] | None = None) -> str:
-    """Graphviz DOT of the attack path (render: dot -Tpng attack_path.dot -o path.png)."""
-    steps = steps if steps is not None else build(hosts)
-    used = [st for st in STAGE_ORDER if any(s["stage"] == st for s in steps)]
-    lines = ['digraph attack_path {', '  rankdir=LR; node [shape=box, style=rounded];']
-    if not steps:
-        return "".join([lines[0], "\n  empty [label=\"No confirmed attack path yet\"];\n}\n"])
-    nid: dict[str, str] = {}
-    i = 0
-    for si, st in enumerate(used):
-        lines.append(f'  subgraph cluster_{si} {{ label="{st}"; style=dashed;')
-        for s in [x for x in steps if x["stage"] == st]:
-            node = f"n{i}"
-            nid[s["key"]] = node
-            host = s["ip"] + (f" ({s['hostname']})" if s["hostname"] else "")
-            lines.append(f'    {node} [label="{_label(host, 28)}\\n{_label(s["title"])}"];')
-            i += 1
-        lines.append("  }")
-    # Same-host continuity edges.
-    per: dict[tuple, str] = {}
-    for s in steps:
-        per[(s["ip"], s["stage"])] = nid[s["key"]]
+    # same-host continuity across consecutive stages (dashed), right edge -> left edge
     for h in {s["ip"] for s in steps}:
-        chain = [per[(h, st)] for st in used if (h, st) in per]
-        for a, b in zip(chain, chain[1:]):
-            lines.append(f'  {a} -> {b};')
-    lines.append("}")
-    return "\n".join(lines) + "\n"
+        chain = [st for st in used if (h, st) in geom]
+        for sa, sb in zip(chain, chain[1:]):
+            xa, ya, wa, ha = geom[(h, sa)]
+            xb, yb, _wb, hb = geom[(h, sb)]
+            els.append(f'<path d="M{xa + wa},{ya + ha / 2:.0f} '
+                       f'C{xa + wa + 20},{ya + ha / 2:.0f} {xb - 20},{yb + hb / 2:.0f} '
+                       f'{xb - 4},{yb + hb / 2:.0f}" fill="none" stroke="#b08cc0" '
+                       f'stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#apho)"/>')
+
+    body = "".join(els)
+    return (f'<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" '
+            f'aria-label="Attack path" font-family="system-ui,Segoe UI,Arial,sans-serif">'
+            f'{body}</svg>')
 
 
 def narrative(hosts: list[Host], steps: list[dict] | None = None) -> list[str]:

@@ -2857,9 +2857,9 @@ class HtmlReportTest(unittest.TestCase):
                         "Hosts", "CVE-2017-0143"):
             self.assertIn(section, html)
         self.assertIn("smb-vuln-ms17-010 &lt;x&gt;", html)   # HTML-escaped title
-        # Attack-path graph is embedded (Mermaid), copyable and offline.
-        self.assertIn('class="mermaid', html)
-        self.assertIn("flowchart LR", html)
+        # Attack-path graph is embedded as inline SVG — renders offline, no tools/JS.
+        self.assertIn('aria-label="Attack path"', html)
+        self.assertIn("<svg", html)
         # The attack path is framed honestly: projected, precondition-grounded, and
         # explicitly NOT executed by recce (nothing reads as a proven kill chain).
         self.assertIn("projected", html)
@@ -6760,35 +6760,29 @@ class AttackPathTest(unittest.TestCase):
                  ports=[Port(portid=23, service="telnet")])
         self.assertEqual(ap.build([h]), [])              # no confirmed findings
 
-    def test_mermaid_graph(self):
+    def test_svg_graph(self):
+        import xml.dom.minidom as md
         from recce import attackpath as ap
         hosts = self._hosts()
-        mmd = ap.mermaid(hosts)
-        self.assertTrue(mmd.startswith("flowchart LR"))
-        self.assertIn('subgraph S0["Initial Access"]', mmd)
-        self.assertIn("10.0.10.5", mmd)                  # real host in a node
-        self.assertIn("-->", mmd)                        # stage-to-stage flow
-        # Same host walks stages -> a dashed continuity edge.
-        self.assertIn("same host", mmd)
+        s = ap.svg(hosts)
+        self.assertTrue(s.startswith("<svg"))
+        md.parseString(s)                                # well-formed XML (renders anywhere)
+        self.assertNotIn("xmlns", s)                     # inline, self-contained
+        self.assertIn("Initial Access", s)               # a stage header
+        self.assertIn("10.0.10.5", s)                    # real host on a card
+        self.assertIn("marker-end", s)                   # stage / same-host arrows
 
-    def test_dot_graph(self):
-        from recce import attackpath as ap
-        hosts = self._hosts()
-        dot = ap.dot(hosts)
-        self.assertTrue(dot.startswith("digraph attack_path {"))
-        self.assertIn("rankdir=LR", dot)
-        self.assertIn("cluster_0", dot)
-        self.assertIn("10.0.10.5", dot)
-        self.assertTrue(dot.rstrip().endswith("}"))
-
-    def test_graph_empty_is_valid(self):
+    def test_svg_empty_is_valid(self):
+        import xml.dom.minidom as md
         from recce import attackpath as ap
         h = Host(ip="10.0.0.1", os_family="Linux",
                  ports=[Port(portid=23, service="telnet")])
-        self.assertIn("flowchart LR", ap.mermaid([h]))
-        self.assertIn("digraph", ap.dot([h]))
+        s = ap.svg([h])
+        self.assertTrue(s.startswith("<svg"))
+        md.parseString(s)
+        self.assertIn("No confirmed attack path", s)
 
-    def test_cmd_writes_graph_files(self):
+    def test_cmd_writes_svg_diagram(self):
         from recce import cli
         from recce.store import Store
         with tempfile.TemporaryDirectory() as dd:
@@ -6799,8 +6793,12 @@ class AttackPathTest(unittest.TestCase):
             st.close()
             rc = cli.cmd_attackpath(SimpleNamespace(output_dir=dd, targets=[]))
             self.assertEqual(rc, 0)
-            self.assertTrue(os.path.exists(os.path.join(dd, "attack_path.mmd")))
-            self.assertTrue(os.path.exists(os.path.join(dd, "attack_path.dot")))
+            svg_path = os.path.join(dd, "attack-path.svg")
+            self.assertTrue(os.path.exists(svg_path))
+            self.assertFalse(os.path.exists(os.path.join(dd, "attack_path.mmd")))
+            self.assertFalse(os.path.exists(os.path.join(dd, "attack_path.dot")))
+            with open(svg_path) as fh:
+                self.assertIn("xmlns", fh.read())        # standalone-renderable
 
 
 class ListenerBackfillTest(unittest.TestCase):

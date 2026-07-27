@@ -504,12 +504,9 @@ def _attack_path(hosts):
             f'<span class="muted">— {escape(tgt)}</span></div>'
             f'<div class="mono muted">{escape(s["cmd"])}</div></div>')
     out.append("</div>")
-    # Copyable graph source (airgapped-friendly: no external JS required; paste
-    # into mermaid.live / GitHub, or `dot -Tpng` the DOT form recce writes).
-    out.append(
-        '<details class="graph"><summary>Attack-path graph (Mermaid — paste into '
-        'mermaid.live or GitHub)</summary>'
-        f'<pre class="mermaid mono">{escape(ap.mermaid(hosts, steps))}</pre></details>')
+    # Inline SVG diagram — renders directly in any browser, no tools/JS, prints to PDF.
+    # The same map is written standalone as attack-path.svg next to this report.
+    out.append(f'<div class="netmap">{ap.svg(hosts, steps)}</div>')
     out.append("</section>")
     return "".join(out)
 
