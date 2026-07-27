@@ -379,3 +379,42 @@ class HostTileLayoutTest(unittest.TestCase):
                            ports=[(445, "microsoft-ds")])], aggregate=False)
         self.assertEqual(s.count("10.0.10.10"), 1)          # IP printed once
         self.assertNotIn("10-0-10-10", s)
+
+
+class ArchitectureViewTest(unittest.TestCase):
+    """Logical architecture: AD -> core -> gateway(router/firewall) -> switch -> segment."""
+
+    def _hosts(self):
+        dc = _h("10.0.10.10", ports=[(389, "ldap"), (445, "microsoft-ds")],
+                roles=["Domain Controller"], hostname="dc01", access=True,
+                vulns=[("critical", "confirmed")])
+        dc.topology = {"routes": [{"dest": "default", "gw": "10.0.10.1", "iface": "eth0"}]}
+        web = _h("10.0.40.10", subnet="10.0.40.0/24 (DMZ)", ports=[(80, "http"), (443, "https")],
+                 hostname="web01")
+        ws = _h("10.0.20.11", subnet="10.0.20.0/24", ports=[(3389, "ms-wbt-server")],
+                os_name="Windows 10 Pro")
+        return [dc, web, ws]
+
+    def test_net_glyphs_are_well_formed(self):
+        import xml.dom.minidom as md
+        for kind in ("switch", "router", "firewall"):
+            md.parseString(f"<svg xmlns='http://www.w3.org/2000/svg'>"
+                           f"{netmap.net_glyph(kind, 4, 4, 22, '#1f4e9c')}</svg>")
+
+    def test_architecture_svg_shows_infra_and_gateway(self):
+        import xml.dom.minidom as md
+        doms = [Domain(name="corp.local", dc_ips=["10.0.10.10"])]
+        s = netmap.architecture_svg(self._hosts(), doms)
+        self.assertTrue(s.startswith("<svg"))
+        md.parseString(s)
+        self.assertIn("Routed core", s)
+        self.assertIn("AD domain", s)
+        self.assertIn("10.0.10.1", s)                  # real gateway from ingested route
+        self.assertIn("router", s)
+        self.assertIn("firewall", s)                   # the DMZ segment gateway
+        self.assertIn("Edge / DMZ", s)                 # tier label
+        self.assertIn("does not fingerprint physical switches", s)  # honesty note
+
+    def test_architecture_empty_is_graceful(self):
+        s = netmap.architecture_svg([])
+        self.assertIn("No hosts", s)

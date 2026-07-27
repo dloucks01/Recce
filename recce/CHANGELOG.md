@@ -62,6 +62,15 @@ All notable changes to recce are documented here. Dates are UTC.
   an **owned ✓**. The attack path also got a visual pass (stage accent bars, soft shadows,
   device + same-host keys).
   All still pure inline SVG, no tools.
+- **Logical architecture view (`network-architecture.svg`).** A real network diagram, not
+  a host list: the AD domain over a **routed core**, each segment reached through its
+  **gateway** — a router, or a **firewall** for an edge/DMZ segment, with the gateway IP
+  when an on-target enum's routes have been ingested — and an **L2 switch**, then the
+  segment's role make-up and access/severity, stacked by tier (edge/DMZ → servers →
+  workstations). New switch/router/firewall glyphs. Honest: every segment shown was
+  reachable from the assessment host, gateway IPs are real, and a switch is the standard
+  L2-segment symbol (recce does not fingerprint physical switches). It's the headline of
+  the report's Network map, with the per-host segment grid as the drill-down inventory.
 - **Tiered lateral map (`network-map-tiered.svg`).** A third network-map view that
   groups the estate into trust tiers — **Domain Controllers → servers → workstations &
   hosts** — with the AD domain, per-role counts and access (✓ owned) overlay, upward
