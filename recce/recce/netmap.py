@@ -247,152 +247,203 @@ def host_tile(x, y, w, h, *, kind, role, ip, hostname="", subline="", stroke="#8
     return "".join(out)
 
 
-def svg(hosts: list[Host], domains=None, ad_data=None, aggregate=None) -> str:
-    """A directly-viewable inline SVG of the network map — renders in any browser
-    with no tools or JavaScript (and prints to PDF). Subnet columns of role-coloured
-    host cards, AD domain nodes below with edges to their DCs, and a legend. Enriched
-    from other findings: hosts recce **gained access** to get a green outline + ✓, and
-    each card carries a **risk dot** for its worst confirmed finding; SharpHound
-    ground-truth **confirms Domain Controllers** (a DC that only had 445 open is still
-    marked).
+def _wrap(els, W, H, label="Network map"):
+    return (f'<svg viewBox="0 0 {int(W)} {int(H)}" width="{int(W)}" height="{int(H)}" '
+            f'role="img" aria-label="{label}" '
+            f'font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'
+            + "".join(els) + "</svg>")
 
-    `aggregate`: None (default) auto-picks — a large estate (>50 live hosts) collapses
-    each subnet to role counts so it stays readable; True/False force the aggregated
-    overview or the full per-host map regardless of size."""
+
+def _map_legend(x, y, any_access, any_risk):
+    """Shared legend: role swatches, then a severity-chip key and the owned key.
+    Returns (svg markup, bottom_y)."""
     from html import escape as _e
+    out = [f'<text x="{x}" y="{y}" font-size="11" fill="#5f6f6e">Role:</text>']
+    lx = x + 42
+    for role in _ROLE_ORDER:
+        fill, stroke = _ROLE_COLOR[role]
+        out.append(f'<rect x="{lx}" y="{y - 10}" width="12" height="12" rx="2" '
+                   f'fill="{fill}" stroke="{stroke}"/>')
+        out.append(f'<text x="{lx + 17}" y="{y}" font-size="11" fill="#3a4644">'
+                   f'{_e(role)}</text>')
+        lx += 30 + len(role) * 7
+    y2 = y
+    if any_risk or any_access:
+        y2 = y + 22
+        lx = x
+        if any_risk:
+            out.append(f'<rect x="{lx}" y="{y2 - 11}" width="34" height="14" rx="7" '
+                       f'fill="#ffffff" stroke="#C00000" stroke-width="1.2"/>')
+            out.append(f'<text x="{lx + 17}" y="{y2 - 1}" text-anchor="middle" '
+                       f'font-size="9" font-weight="700" fill="#C00000">CRIT</text>')
+            out.append(f'<text x="{lx + 42}" y="{y2}" font-size="11" fill="#3a4644">'
+                       f'worst confirmed finding (CRIT / HIGH / MED / LOW)</text>')
+            lx += 340
+        if any_access:
+            out.append(f'<circle cx="{lx + 7}" cy="{y2 - 4}" r="7" '
+                       f'fill="{_ACCESS_STROKE}"/>')
+            out.append(f'<text x="{lx + 7}" y="{y2}" text-anchor="middle" '
+                       f'font-size="9.5" font-weight="700" fill="#fff">✓</text>')
+            out.append(f'<text x="{lx + 19}" y="{y2}" font-size="11" fill="#3a4644">'
+                       f'access gained</text>')
+    return "".join(out), y2
+
+
+def _role_counts_line(rows, dc_names):
+    counts = {}
+    for h in rows:
+        r = role_with_ad(h, dc_names)
+        counts[r] = counts.get(r, 0) + 1
+    return " · ".join(f"{counts[r]} {r}" for r in _ROLE_ORDER if r in counts)
+
+
+def svg(hosts, domains=None, ad_data=None, aggregate=None):
+    """A directly-viewable inline SVG network map (renders in any browser, no tools).
+
+    Full map: each network segment is a bordered panel with its hosts laid out in a
+    multi-column grid (device icon + role header, IP, hostname, OS, a severity chip and
+    an owned check per host). `aggregate` None auto-collapses a large estate (>50 hosts)
+    to a compact per-role overview; True/False force overview / full."""
     up = [h for h in hosts if h.is_up]
     if not up:
         return ('<svg viewBox="0 0 320 60" width="320" height="60" role="img" '
                 'aria-label="Network map"><text x="12" y="34" font-size="14" '
                 'fill="#5f6f6e">No hosts enumerated yet.</text></svg>')
     dc_names = ad_dc_names(ad_data)
-    by_subnet: dict[str, list[Host]] = {}
+    by_subnet = {}
     for h in up:
         by_subnet.setdefault(h.subnet or "unknown", []).append(h)
     subnets = sorted(by_subnet, key=_ipkey)
     doms = domains or ad.derive_domains(up)
     aggregate = (len(up) > 50) if aggregate is None else aggregate
+    if aggregate:
+        return _svg_overview(up, by_subnet, subnets, doms, dc_names)
+    return _svg_full(up, by_subnet, subnets, doms, dc_names)
+
+
+def _svg_overview(up, by_subnet, subnets, doms, dc_names):
+    """Compact >50-host overview: subnet columns of per-role counts + a legend."""
+    from html import escape as _e
+    colW, cardW, cardH, cardGap, colGap = 200, 186, 32, 10, 26
+    m = 20
     any_access = any(has_access(h) for h in up)
-    any_risk = any(worst_severity(h) in _SEV_DOT for h in up)
-
-    colW, cardW, cardH, cardGap, colGap = 200, 186, 78, 10, 26
-    m, headerH = 18, 30
-    x0 = m
-    els, dc_anchor = [], {}          # dc_anchor[ip] = (x, y_bottom) of its card
-
-    def card(x, y, fill, stroke, lines, w=cardW, h=cardH, sw=1.5):
-        out = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="7" '
-               f'fill="{fill}" stroke="{stroke}" stroke-width="{sw}"/>']
-        ty = y + 16
-        for i, (txt, bold) in enumerate(lines):
-            weight = "700" if bold else "400"
-            col = "#1a2422" if i == 0 else "#3a4644"
-            out.append(f'<text x="{x + 10}" y="{ty}" font-size="11.5" '
-                       f'font-weight="{weight}" fill="{col}">{txt}</text>')
-            ty += 14
-        return "".join(out)
-
+    any_risk = any(worst_severity(h) in _SEV_CHIP for h in up)
+    els = [f'<text x="{m}" y="{m + 18}" font-size="17" font-weight="700" '
+           f'fill="#0f766e">Network map <tspan font-size="11.5" font-weight="400" '
+           f'fill="#5f6f6e">· overview by role ({len(up)} hosts)</tspan></text>']
+    top = m + 36
     max_rows = 0
     for ci, sub in enumerate(subnets):
         rows = sorted(by_subnet[sub], key=lambda z: _ipkey(z.ip))
-        x = x0 + ci * (colW + colGap)
-        els.append(f'<text x="{x}" y="{m + 18}" font-size="13" font-weight="700" '
-                   f'fill="#115e59">{_x(sub, 20)} '
-                   f'<tspan fill="#5f6f6e" font-weight="400">'
-                   f'({len(rows)})</tspan></text>')
+        x = m + ci * (colW + colGap)
+        els.append(f'<text x="{x}" y="{top + 14}" font-size="13" font-weight="700" '
+                   f'fill="#115e59">{_x(sub, 20)} <tspan fill="#5f6f6e" '
+                   f'font-weight="400">({len(rows)})</tspan></text>')
         owned = sum(1 for h in rows if has_access(h))
         if owned:
-            # Right-aligned at the column edge so it never overlaps the subnet label.
-            els.append(f'<text x="{x + cardW}" y="{m + 18}" text-anchor="end" '
+            els.append(f'<text x="{x + cardW}" y="{top + 14}" text-anchor="end" '
                        f'font-size="11" font-weight="700" fill="{_ACCESS_STROKE}">'
                        f'✓ {owned} owned</text>')
-        y = m + headerH
-        if aggregate:
-            counts: dict[str, int] = {}
-            for h in rows:
-                counts[role_with_ad(h, dc_names)] = \
-                    counts.get(role_with_ad(h, dc_names), 0) + 1
-            for role in _ROLE_ORDER:
-                if role not in counts:
-                    continue
-                fill, stroke = _ROLE_COLOR[role]
-                els.append(card(x, y, fill, stroke,
-                                [(f"{counts[role]}× {_e(role)}", True)], h=32))
-                y += 32 + cardGap
-            max_rows = max(max_rows, len(counts))
-        else:
-            for h in rows:
-                role = role_with_ad(h, dc_names)
-                _fill, stroke = _ROLE_COLOR[role]
-                els.append(host_tile(x, y, cardW, cardH, kind=role_kind(role),
-                                     role=role, ip=h.ip, hostname=real_hostname(h),
-                                     subline=os_short(h), stroke=stroke,
-                                     risk=worst_severity(h), owned=has_access(h)))
-                if role == "DC":
-                    dc_anchor[h.ip] = (x + cardW / 2, y + cardH)
-                y += cardH + cardGap
-            max_rows = max(max_rows, len(rows))
-
-    row_h = (32 + cardGap) if aggregate else (cardH + cardGap)
-    dom_y = m + headerH + max_rows * row_h + 24
-    dom_anchor = {}
+        y = top + 30
+        counts = {}
+        for h in rows:
+            r = role_with_ad(h, dc_names)
+            counts[r] = counts.get(r, 0) + 1
+        k = 0
+        for role in _ROLE_ORDER:
+            if role not in counts:
+                continue
+            fill, stroke = _ROLE_COLOR[role]
+            els.append(f'<rect x="{x}" y="{y}" width="{cardW}" height="{cardH}" rx="7" '
+                       f'fill="{fill}" stroke="{stroke}" stroke-width="1.4"/>')
+            els.append(glyph(role_kind(role), x + 8, y + cardH / 2 - 8, 16, stroke))
+            els.append(f'<text x="{x + 30}" y="{y + 20}" font-size="12" '
+                       f'font-weight="700" fill="#1a2422">{counts[role]}× '
+                       f'{_e(role)}</text>')
+            y += cardH + cardGap
+            k += 1
+        max_rows = max(max_rows, k)
+    dom_y = top + 30 + max_rows * (cardH + cardGap) + 6
     for di, d in enumerate(doms or []):
-        dx = x0 + di * (colW + colGap)
-        fill, stroke = _DOMAIN_COLOR
-        els.append(f'<rect x="{dx}" y="{dom_y}" width="{cardW}" height="34" rx="17" '
-                   f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>')
-        els.append(f'<text x="{dx + cardW / 2}" y="{dom_y + 21}" text-anchor="middle" '
-                   f'font-size="12" font-weight="700" fill="#7a3a0a">AD: '
+        dx = m + di * (colW + colGap)
+        els.append(f'<rect x="{dx}" y="{dom_y}" width="{cardW}" height="30" rx="15" '
+                   f'fill="{_DOMAIN_COLOR[0]}" stroke="{_DOMAIN_COLOR[1]}" '
+                   f'stroke-width="1.4"/>')
+        els.append(f'<text x="{dx + cardW / 2}" y="{dom_y + 19}" text-anchor="middle" '
+                   f'font-size="11.5" font-weight="700" fill="#7a3a0a">AD: '
                    f'{_x(d.name, 22)}</text>')
-        dom_anchor[(d.name or "").lower()] = (dx + cardW / 2, dom_y)
-        for ip in getattr(d, "dc_ips", []) or []:
-            if ip in dc_anchor:
-                x1, y1 = dc_anchor[ip]
-                els.insert(0, f'<path d="M{x1:.0f},{y1:.0f} L{dx + cardW / 2:.0f},'
-                              f'{dom_y:.0f}" stroke="#C15A11" stroke-width="1.4" '
-                              f'stroke-dasharray="4 3" fill="none"/>')
+    leg_y = (dom_y + 30 if doms else dom_y) + 30
+    leg, y2 = _map_legend(m, leg_y, any_access, any_risk)
+    els.append(leg)
+    W = max(m + len(subnets) * (colW + colGap), m + 720)
+    return _wrap(els, W, y2 + 18)
 
-    # legend
-    leg_y = dom_y + 52
-    lx = x0
-    els.append(f'<text x="{lx}" y="{leg_y}" font-size="11" fill="#5f6f6e">Role:</text>')
-    lx += 42
-    for role in _ROLE_ORDER:
-        fill, stroke = _ROLE_COLOR[role]
-        els.append(f'<rect x="{lx}" y="{leg_y - 10}" width="12" height="12" rx="2" '
-                   f'fill="{fill}" stroke="{stroke}"/>')
-        els.append(f'<text x="{lx + 17}" y="{leg_y}" font-size="11" '
-                   f'fill="#3a4644">{_e(role)}</text>')
-        lx += 30 + len(role) * 7
 
-    # Overlay keys (only shown when they apply, so the legend stays honest).
-    leg2_y = leg_y + 20
-    lx2 = x0
-    if any_access:
-        els.append(f'<circle cx="{lx2 + 6}" cy="{leg2_y - 4}" r="7" '
-                   f'fill="{_ACCESS_STROKE}"/>')
-        els.append(f'<text x="{lx2 + 6}" y="{leg2_y}" text-anchor="middle" '
-                   f'font-size="10" font-weight="700" fill="#fff">✓</text>')
-        els.append(f'<text x="{lx2 + 18}" y="{leg2_y}" font-size="11" '
-                   f'fill="#3a4644">access confirmed (bold border + ✓)</text>')
-        lx2 += 260
-    if any_risk:
-        els.append(f'<circle cx="{lx2 + 6}" cy="{leg2_y - 4}" r="5.5" fill="#C00000"/>')
-        els.append(f'<text x="{lx2 + 16}" y="{leg2_y}" font-size="11" '
-                   f'fill="#3a4644">critical</text>')
-        lx2 += 82
-        els.append(f'<circle cx="{lx2 + 6}" cy="{leg2_y - 4}" r="5.5" fill="#E8863D"/>')
-        els.append(f'<text x="{lx2 + 16}" y="{leg2_y}" font-size="11" '
-                   f'fill="#3a4644">high finding</text>')
-        lx2 += 110
+def _svg_full(up, by_subnet, subnets, doms, dc_names):
+    """Full per-host map: one bordered panel per subnet, hosts in a multi-column grid."""
+    from html import escape as _e
+    cardW, cardH, gap = 186, 78, 14
+    m, ppad, hbar, NCOL = 22, 16, 34, 5
+    innerW = NCOL * cardW + (NCOL - 1) * gap
+    PAGE_W = m * 2 + ppad * 2 + innerW
+    pw = PAGE_W - 2 * m
+    any_access = any(has_access(h) for h in up)
+    any_risk = any(worst_severity(h) in _SEV_CHIP for h in up)
 
-    width = max(x0 + len(subnets) * (colW + colGap), lx + 20, lx2 + 20,
-                x0 + max(1, len(doms or [])) * (colW + colGap))
-    height = (leg2_y if (any_access or any_risk) else leg_y) + 20
-    return (f'<svg viewBox="0 0 {int(width)} {int(height)}" width="{int(width)}" '
-            f'height="{int(height)}" role="img" aria-label="Network architecture map" '
-            f'font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'
-            + "".join(els) + "</svg>")
+    els = []
+    y = m
+    els.append(f'<text x="{m}" y="{y + 20}" font-size="17" font-weight="700" '
+               f'fill="#0f766e">Network map</text>')
+    els.append(f'<text x="{m}" y="{y + 38}" font-size="11.5" fill="#5f6f6e">'
+               f'{_x(summary(up, doms)[0], (pw - 10) // 6)}</text>')
+    y += 52
+    if doms:
+        parts = []
+        for d in doms:
+            dcs = ", ".join(d.dc_ips) if getattr(d, "dc_ips", None) else "no DC seen"
+            parts.append(f"{d.name} (DC: {dcs})")
+        els.append(f'<rect x="{m}" y="{y}" width="{pw}" height="26" rx="6" '
+                   f'fill="{_DOMAIN_COLOR[0]}" stroke="{_DOMAIN_COLOR[1]}"/>')
+        els.append(f'<text x="{m + 12}" y="{y + 17}" font-size="11" font-weight="700" '
+                   f'fill="#7a3a0a">AD domain(s): '
+                   f'{_x("  ·  ".join(parts), (pw - 120) // 6)}</text>')
+        y += 40
+
+    for sub in subnets:
+        rows = sorted(by_subnet[sub], key=lambda z: _ipkey(z.ip))
+        n = len(rows)
+        ncol = min(NCOL, n)
+        nrow = -(-n // ncol)
+        panelH = hbar + ppad + nrow * cardH + (nrow - 1) * gap + ppad
+        els.append(f'<rect x="{m}" y="{y}" width="{pw}" height="{panelH}" rx="10" '
+                   f'fill="#fafcfb" stroke="#dfe5e3"/>')
+        els.append(f'<path d="M{m},{y + hbar} v-{hbar - 10} a10,10 0 0 1 10,-10 '
+                   f'h{pw - 20} a10,10 0 0 1 10,10 v{hbar - 10} z" fill="#eef3f2"/>')
+        els.append(f'<text x="{m + 14}" y="{y + 22}" font-size="13" font-weight="700" '
+                   f'fill="#115e59">{_x(sub, 22)} <tspan fill="#5f6f6e" '
+                   f'font-weight="400">· {n} host{"s" if n != 1 else ""}</tspan></text>')
+        rl = _role_counts_line(rows, dc_names)
+        owned = sum(1 for h in rows if has_access(h))
+        if owned:
+            rl += f"    ✓ {owned} owned"
+        els.append(f'<text x="{m + pw - 14}" y="{y + 22}" text-anchor="end" '
+                   f'font-size="10.5" fill="#5f6f6e">{_x(rl, (pw - 260) // 6)}</text>')
+        gx0, gy0 = m + ppad, y + hbar + ppad
+        for i, h in enumerate(rows):
+            r, c = divmod(i, ncol)
+            hx = gx0 + c * (cardW + gap)
+            hy = gy0 + r * (cardH + gap)
+            role = role_with_ad(h, dc_names)
+            _f, stroke = _ROLE_COLOR[role]
+            els.append(host_tile(hx, hy, cardW, cardH, kind=role_kind(role), role=role,
+                                 ip=h.ip, hostname=real_hostname(h), subline=os_short(h),
+                                 stroke=stroke, risk=worst_severity(h),
+                                 owned=has_access(h)))
+        y += panelH + 16
+
+    leg, y2 = _map_legend(m, y + 6, any_access, any_risk)
+    els.append(leg)
+    return _wrap(els, PAGE_W, y2 + 18)
 
 
 # AD tier-0 palette (fill, stroke) — distinct from the network-map roles.

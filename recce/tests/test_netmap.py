@@ -116,14 +116,14 @@ class NetworkMapEnrichmentTest(unittest.TestCase):
         self.assertIn("#2E7D32", s)                     # green access outline/badge
         self.assertIn("✓", s)                           # access check mark
         self.assertIn("#C00000", s)                     # critical risk dot
-        self.assertIn("access confirmed", s)            # legend key present
+        self.assertIn("access gained", s)               # legend key present
 
     def test_potential_vuln_not_counted_as_risk(self):
         # An unverified 'potential' finding must NOT light the risk dot.
         h = _h("10.0.0.9", ports=[(80, "http")], vulns=[("high", "potential")])
         self.assertEqual(netmap.worst_severity(h), "")
         s = netmap.svg([h])
-        self.assertNotIn("access confirmed", s)         # no access, no overlay legend
+        self.assertNotIn("access gained", s)            # no access, no overlay legend
 
     def test_summary_reports_access_and_confirmed_dc(self):
         hosts = [_h("10.0.10.10", ports=[(445, "microsoft-ds")], hostname="dc01"),
