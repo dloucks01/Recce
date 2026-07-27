@@ -75,7 +75,10 @@ class ScaleTest(unittest.TestCase):
         self.assertEqual(rc, 0)
 
         # The workbook is valid and carries a row per host (plus per-subnet bands).
-        import openpyxl
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest("openpyxl not installed (test-only dependency)")
         wb = openpyxl.load_workbook(os.path.join(self.dir, "enumeration.xlsx"))
         self.assertIn("Checklist", wb.sheetnames)
         self.assertGreaterEqual(wb["Checklist"].max_row, _TOTAL)

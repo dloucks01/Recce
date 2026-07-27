@@ -4303,10 +4303,20 @@ def cmd_skoll_import(args: argparse.Namespace) -> int:
         print("[!] No usable findings in the file (need affected_host + steps).")
         store.close()
         return 1
-    hosts_by_ip = {h.ip: h for h in store.all_hosts()}
+    all_hosts = store.all_hosts()
+    hosts_by_ip = {h.ip: h for h in all_hosts}
+    # Resolve a hostname-only finding (affected_host had no IP) onto the host recce
+    # already enumerated under that name, so it merges instead of forking a synthetic
+    # `skoll:<name>` entry. First hostname wins on a collision.
+    hosts_by_name = {}
+    for h in all_hosts:
+        for hn in h.hostnames:
+            hosts_by_name.setdefault(hn.lower(), h)
     added_total = created = touched = 0
     for key, bucket in by_host.items():
         h = hosts_by_ip.get(key)
+        if h is None and not bucket["ip"] and bucket["hostname"]:
+            h = hosts_by_name.get(bucket["hostname"].lower())   # match by hostname
         if h is None:
             subnet = (".".join(key.split(".")[:3]) + ".0/24") if bucket["ip"] else ""
             h = Host(ip=key, subnet=subnet, enumerated=True)
@@ -4319,6 +4329,8 @@ def cmd_skoll_import(args: argparse.Namespace) -> int:
         new = [v for v in bucket["vulns"] if (v.title, v.port) not in have]
         if not new:
             continue
+        for v in new:
+            v.ip = h.ip                        # keep Vuln.ip aligned with the host it lands on
         h.vulns.extend(new)
         # A proven Sköll finding is a confirmed foothold on the host.
         if not h.access_gained:

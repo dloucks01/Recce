@@ -367,7 +367,10 @@ class CoverageMathFidelityTest(unittest.TestCase):
     def test_overview_phase_table_honors_operator_override(self):
         """Regression: the Overview per-subnet phase table must reflect an
         operator un-tick the same way the Checklist does, or the two diverge."""
-        import openpyxl
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest("openpyxl not installed (test-only dependency)")
         from recce.report_excel import build_workbook
 
         def enum_cell(path):
@@ -1836,7 +1839,10 @@ class IngestCommandTest(unittest.TestCase):
 
     def test_exploitation_sheet_lists_confirmed_findings(self):
         from recce.report_excel import build_workbook
-        import openpyxl
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest("openpyxl not installed (test-only dependency)")
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
             self._ingest(d, _LOOT_LINUX)      # sudo/suid/shadow -> confirmed
@@ -1883,7 +1889,10 @@ class IngestCommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
             self._ingest(d, _LOOT_LINUX)
-            import openpyxl
+            try:
+                import openpyxl
+            except ImportError:
+                self.skipTest("openpyxl not installed (test-only dependency)")
             ws = openpyxl.load_workbook(os.path.join(d, "enumeration.xlsx"))["Priv-Esc"]
             hdr = [c.value for c in ws[1]]
             ti = hdr.index("Type")
@@ -2049,7 +2058,10 @@ class RunbookSheetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "wb.xlsx")
             build_workbook([], p, meta={"subtitle": "x"})
-            import openpyxl
+            try:
+                import openpyxl
+            except ImportError:
+                self.skipTest("openpyxl not installed (test-only dependency)")
             wb = openpyxl.load_workbook(p)
             self.assertIn("Runbook", wb.sheetnames)
             vals = [c for row in wb["Runbook"].iter_rows(values_only=True)

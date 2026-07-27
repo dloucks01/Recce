@@ -196,6 +196,32 @@ class RoundTripCliTest(unittest.TestCase):
         self.assertEqual(skolls[0].port, 21)
         self.assertIn("CVE-2011-2523", skolls[0].ids)
 
+    def test_hostname_only_finding_merges_onto_enumerated_host(self):
+        # affected_host with no IP ("WIN-SQL01") must fold onto the enumerated host
+        # of that name, not fork a synthetic skoll:WIN-SQL01 entry.
+        store = Store(cli._open_paths(self.eng)["db"])
+        store.upsert_host(Host(ip="10.0.10.10", subnet="10.0.10.0/24",
+                               enumerated=True, hostnames=["WIN-SQL01"]))
+        store.close()
+        ff = os.path.join(self.dir, "h.json")
+        with open(ff, "w") as fh:
+            json.dump({"findings": [{
+                "title": "unquoted svc", "vector_type": "unquoted_service",
+                "affected_host": "WIN-SQL01",
+                "steps": [{"cmd": "sc", "output": "ok"}],
+            }]}, fh)
+        cli.cmd_skoll_import(self._args(findings=ff))
+        store = Store(cli._open_paths(self.eng)["db"])
+        try:
+            self.assertIsNone(store.get_host("skoll:WIN-SQL01"))   # no synthetic fork
+            h = store.get_host("10.0.10.10")
+        finally:
+            store.close()
+        sk = [v for v in h.vulns if v.source == "skoll"]
+        self.assertEqual(len(sk), 1)
+        self.assertEqual(sk[0].ip, "10.0.10.10")                  # ip realigned
+        self.assertTrue(h.access_gained)
+
     def test_import_is_idempotent(self):
         ff = os.path.join(self.dir, "f.json")
         json.dump({"findings": [{

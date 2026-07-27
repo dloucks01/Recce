@@ -107,18 +107,25 @@ def build_gnmap(hosts: list[Host]) -> str:
     return "\n".join(out) + "\n"
 
 
-# recce vuln signals (title/script_id substrings) that mean SMB is reachable without creds,
-# so Sköll should treat the host as a null-session / relay candidate.
-_NULL_SMB = ("null session", "anonymous", "guest", "smb-null", "anonymous access")
+# recce vuln signals that mean SMB is reachable without creds, so Sköll should treat
+# the host as a null-session / relay candidate. Matched on the SMB null/anon/guest
+# wording recce writes (`recce smb` and the credsweep null/guest path) rather than on a
+# fixed port, so a finding recorded with port 139/None (or by a different module) still
+# counts.
+_NULL_TOKENS = ("null", "anonymous", "guest")
 
 
 def _has_null_smb(h: Host) -> bool:
     for v in h.vulns:
-        blob = f"{v.title} {v.script_id} {v.output}".lower()
-        if v.port in (445, 139) and any(n in blob for n in _NULL_SMB):
+        title = (v.title or "").lower()
+        sid = (v.script_id or "").lower()
+        smb_ctx = ("smb" in title or "smb" in sid or v.port in (445, 139))
+        if smb_ctx and ("session" in title or "share" in title) \
+                and any(n in title for n in _NULL_TOKENS):
             return True
     for a in h.accounts:
-        if a.kind == "share" and str(a.attrs.get("access", "")).lower() in ("read", "read,write", "write"):
+        if a.kind == "share" and str(a.attrs.get("access", "")).lower() in (
+                "read", "read,write", "write", "read/write"):
             return True
     return False
 
