@@ -87,6 +87,8 @@ it (`sudo apt install nmap`) and re-run.
 | **Write-ups** | `./bin/recce writeups -o eng` | one Word doc per real finding |
 | **Access** | `./bin/recce access -o eng` | footholds per host (auto-derived from credentialed enum); record your own with `--host IP --note '...'` |
 | **Status** | `./bin/recce status -o eng` | what's left + the next command |
+| **→ Sköll** | `./bin/recce skoll-export -o eng` | export an attack plan for the Sköll exploitation kit ([INTEGRATION.md](INTEGRATION.md)) |
+| **← Sköll** | `./bin/recce skoll-import findings.json -o eng` | fold Sköll's proven findings back into the sheet + report |
 
 > [!IMPORTANT]
 > **Keep `-o eng` the same across every command** — it's the one engagement folder

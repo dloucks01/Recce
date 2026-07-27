@@ -4230,6 +4230,115 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skoll_export(args: argparse.Namespace) -> int:
+    """Export the engagement as a seed for the Sköll-Fieldkit exploitation kit."""
+    from . import skoll
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']} - run `enum` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    hosts = [h for h in hosts if h.is_up]
+    if not hosts:
+        print("[!] No live hosts to export. Run `enum`/`vulns` first.")
+        store.close()
+        return 1
+    title = store.get_meta("engagement") or args.title
+    out_dir = os.path.join(args.output_dir, "skoll")
+    os.makedirs(out_dir, exist_ok=True)
+    bridge = skoll.build_bridge(hosts, engagement=title, generated=_now())
+
+    files = {
+        "ports.gnmap": skoll.build_gnmap(hosts),
+        "smb-null.txt": skoll.build_smb_null(hosts),
+        "recce-bridge.json": json.dumps(bridge, indent=2) + "\n",
+        "SKOLL.md": skoll.build_plan_md(bridge),
+    }
+    for name, content in files.items():
+        with open(os.path.join(out_dir, name), "w") as fh:
+            fh.write(content)
+    _relax_perms(out_dir)
+
+    actionable = sum(1 for h in bridge["hosts"] if h["suggested"] or h["findings"])
+    print(f"[+] Sköll seed written to {out_dir}/ "
+          f"({len(bridge['hosts'])} live host(s), {actionable} with a Sköll route):")
+    print(f"    ports.gnmap        -> sweep.py triage --nmap ports.gnmap")
+    print(f"    smb-null.txt       -> sweep.py triage --nxc smb-null.txt")
+    print(f"    recce-bridge.json  -> sweep.py triage --recce recce-bridge.json  (richest)")
+    print(f"    SKOLL.md           -> human, severity-ranked attack plan")
+    print(f"    Next (in the Sköll checkout): "
+          f"python3 access/network/sweep.py triage --recce {out_dir}/recce-bridge.json")
+    store.close()
+    return 0
+
+
+def cmd_skoll_import(args: argparse.Namespace) -> int:
+    """Fold a Sköll findings.json (proven exploitation) back into the workbook + report."""
+    from . import skoll
+    from .models import Host, Port
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']} - run `enum` first, or `import` a scan.")
+        return 1
+    if not os.path.exists(args.findings):
+        print(f"[x] No such file: {args.findings}")
+        return 1
+    try:
+        with open(args.findings) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        print(f"[x] Cannot read {args.findings}: {e}")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+
+    by_host = skoll.findings_to_hosts(data)
+    if not by_host:
+        print("[!] No usable findings in the file (need affected_host + steps).")
+        store.close()
+        return 1
+    hosts_by_ip = {h.ip: h for h in store.all_hosts()}
+    added_total = created = touched = 0
+    for key, bucket in by_host.items():
+        h = hosts_by_ip.get(key)
+        if h is None:
+            subnet = (".".join(key.split(".")[:3]) + ".0/24") if bucket["ip"] else ""
+            h = Host(ip=key, subnet=subnet, enumerated=True)
+            if bucket["hostname"]:
+                h.hostnames = [bucket["hostname"]]
+            created += 1
+        elif bucket["hostname"] and bucket["hostname"] not in h.hostnames:
+            h.hostnames.append(bucket["hostname"])
+        have = {(v.title, v.port) for v in h.vulns}
+        new = [v for v in bucket["vulns"] if (v.title, v.port) not in have]
+        if not new:
+            continue
+        h.vulns.extend(new)
+        # A proven Sköll finding is a confirmed foothold on the host.
+        if not h.access_gained:
+            h.access_gained = True
+            h.access_detail = h.access_detail or "Sköll: proven exploitation (imported findings)"
+        store.upsert_host(h)
+        added_total += len(new)
+        touched += 1
+
+    print(f"[+] Imported {added_total} Sköll finding(s) across {touched} host(s)"
+          + (f" ({created} new host entry/entries)" if created else "") + ".")
+    print("    Source 'skoll' (confidence 'confirmed') -> Vulnerabilities sheet, "
+          "report, and write-ups. Hosts marked access-gained.")
+    if added_total:
+        title = store.get_meta("engagement") or args.title
+        _generate_reports(store, paths, title)
+    store.close()
+    return 0
+
+
 def _add_budget(parser) -> None:
     """A wall-clock cap for a deep module's sequential probe loop."""
     parser.add_argument("--budget", type=float, metavar="SECONDS",
@@ -5559,6 +5668,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     kp.add_argument("--title", default="Recce Engagement")
     _add_budget(kp)
     kp.set_defaults(func=cmd_kerberos)
+
+    sk = sub.add_parser("skoll-export",
+                        help="export the engagement as a seed for the Sköll-Fieldkit "
+                             "exploitation kit (gnmap + bridge JSON + attack plan)")
+    sk.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    sk.add_argument("-o", "--output-dir", default="engagement")
+    sk.add_argument("--title", default="Recce Engagement")
+    sk.set_defaults(func=cmd_skoll_export)
+
+    ski = sub.add_parser("skoll-import",
+                         help="fold a Sköll findings.json (proven exploitation) back "
+                              "into the workbook + report")
+    ski.add_argument("findings", help="path to a Sköll findings.json or recce_findings.json")
+    ski.add_argument("-o", "--output-dir", default="engagement")
+    ski.add_argument("--title", default="Recce Engagement")
+    ski.set_defaults(func=cmd_skoll_import)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
