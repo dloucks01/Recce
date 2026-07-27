@@ -172,6 +172,163 @@ def _suggest_for_host(h: Host) -> list[dict[str, Any]]:
     return routes
 
 
+# Open-port -> the Sköll credential->shell proto (gen_shell.py --proto). Best-first.
+_SHELL_PROTO = [
+    (5985, "winrm"), (5986, "winrm"), (1433, "mssql"), (445, "smb"),
+    (22, "ssh"), (3389, "rdp"),
+]
+
+
+# Generic vendor/OS/filler words that make a useless `gen_exploit.py find --service`
+# search (Windows CVEs come through the confirmed-findings channel instead).
+_GENERIC_SVC = {"microsoft", "windows", "ms", "the", "server", "service",
+                "services", "linux", "unix", "generic", "unknown", "httpd"}
+
+
+def _clean_service(product: str, service: str) -> str:
+    """The most specific lowercase product token for `gen_exploit.py find --service`
+    (e.g. 'Apache httpd' -> 'apache', 'Microsoft Exchange' -> 'exchange'), skipping
+    generic vendor/OS words. Falls back to the nmap service name; '' if nothing useful."""
+    for tok in re.split(r"[\s/]+", product or ""):
+        t = re.sub(r"[^a-z0-9.]", "", tok.lower())
+        if t and not t[0].isdigit() and t not in _GENERIC_SVC:
+            return t
+    svc = (service or "").lower()
+    return svc if svc not in _GENERIC_SVC else ""
+
+
+def _version_like(ver: str) -> bool:
+    """True when `ver` looks like a real version (has a digit) rather than a banner
+    fragment such as an LDAP 'Domain: corp.local' string."""
+    return bool(ver) and any(c.isdigit() for c in ver)
+
+
+def _exploit_cmds(h: Host) -> list[dict[str, Any]]:
+    """Ready `gen_exploit.py find` lines for each distinct product+version recce saw.
+
+    gen_exploit's `find` mode does the CVE lookup itself, so passing recce's exact
+    service+version is always valid and never drifts. CVEs recce already confirmed on
+    the port are attached so the operator can jump straight to the matching entry.
+    """
+    cves_by_port: dict[int, list[str]] = {}
+    for v in h.vulns:
+        if _confirmed(v) and v.port:
+            for c in v.ids:
+                if c.upper().startswith("CVE") and c not in cves_by_port.setdefault(v.port, []):
+                    cves_by_port[v.port].append(c)
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for p in h.open_ports:
+        # Version-search is only useful with a real version (Windows/MS CVEs already
+        # surface through the confirmed-findings channel, not searchsploit-by-version).
+        if not _version_like(p.version):
+            continue
+        svc = _clean_service(p.product, p.service)
+        if not svc:
+            continue
+        key = (svc, p.version)
+        if key in seen:
+            continue
+        seen.add(key)
+        cmd = (f'python3 access/network/gen_exploit.py find --service {svc} '
+               f'--version "{p.version}"')
+        out.append({"port": p.portid, "service": svc, "version": p.version,
+                    "cmd": cmd, "cves": cves_by_port.get(p.portid, [])})
+    return out
+
+
+def _cred_applies(cred, h: Host, protos: set[str]) -> bool:
+    """Is this credential worth trying against host h? Domain creds are network-wide
+    (any Windows/AD shell proto); local creds go to the host they were captured on;
+    ssh keys go to hosts with ssh open."""
+    if cred.domain and protos & {"smb", "winrm", "mssql", "rdp"}:
+        return True
+    if cred.origin_ip and cred.origin_ip == h.ip:
+        return True
+    if cred.kind == "ssh-key" and "ssh" in protos:
+        return True
+    return False
+
+
+def _shell_cmd_for(cred, ip: str, proto: str) -> str:
+    """One `gen_shell.py` invocation for a credential against ip over proto."""
+    parts = [f"python3 access/network/gen_shell.py --target {ip}",
+             f"--user {cred.username or '<user>'}"]
+    if cred.kind == "nthash":
+        parts.append(f"--hash {cred.secret}")
+    elif cred.kind == "ssh-key":
+        parts.append(f"--pass '<key:{cred.secret}>'")
+    else:
+        parts.append(f"--pass '{cred.secret}'" if cred.secret else "--pass ''")
+    if cred.domain:
+        parts.append(f"--domain {cred.domain}")
+    parts.append(f"--proto {proto}")
+    return " ".join(parts)
+
+
+def _access_cmds(h: Host, creds: list) -> list[str]:
+    """Per-host credential->shell / spray lines. A `gen_shell.py` per applicable known
+    credential (capped), plus one `gen_spray.py` against the best shell proto using the
+    exported users.txt (spray is useful even before any credential is recovered)."""
+    open_ids = {p.portid for p in h.open_ports}
+    protos = []
+    for pid, proto in _SHELL_PROTO:
+        if pid in open_ids and proto not in protos:
+            protos.append(proto)
+    if not protos:
+        return []
+    best = protos[0]
+    proto_set = set(protos)
+    cmds: list[str] = []
+    used = set()
+    for c in creds:
+        if not _cred_applies(c, h, proto_set):
+            continue
+        key = (c.username.lower(), c.domain.lower(), c.kind)
+        if key in used:
+            continue
+        used.add(key)
+        cmds.append(_shell_cmd_for(c, h.ip, best))
+        if len(cmds) >= 3:                    # keep the plan readable
+            break
+    cmds.append(f"python3 access/network/gen_spray.py --proto {best} "
+                f"--users users.txt --password '<password>' --target {h.ip}")
+    return cmds
+
+
+def collect_users(hosts: list[Host], creds: list) -> list[str]:
+    """Distinct real usernames recce enumerated (host accounts + captured creds), for
+    `gen_spray.py --users`. Drops machine accounts ('...$') and blanks."""
+    seen: dict[str, str] = {}
+    def add(name: str):
+        n = (name or "").strip()
+        if n and not n.endswith("$") and n.lower() not in seen:
+            seen[n.lower()] = n
+    for h in hosts:
+        for a in h.accounts:
+            if a.kind == "user":
+                add(a.name)
+    for c in creds:
+        add(c.username)
+    return [seen[k] for k in sorted(seen)]
+
+
+def collect_creds(creds: list) -> list[str]:
+    """Known credentials as impacket/nxc-friendly lines for reference by gen_shell.py."""
+    out = []
+    for c in creds:
+        who = (f"{c.domain}/" if c.domain else "") + (c.username or "")
+        if c.kind == "nthash":
+            out.append(f"{who}   hash:{c.secret}   (source: {c.source})")
+        elif c.kind == "ssh-key":
+            out.append(f"{who}   ssh-key:{c.secret}   (source: {c.source})")
+        elif c.kind == "blank":
+            out.append(f"{who}   (blank password)   (source: {c.source})")
+        else:
+            out.append(f"{who}:{c.secret}   (source: {c.source})")
+    return out
+
+
 def _host_findings(h: Host) -> list[dict[str, Any]]:
     """recce's CONFIRMED vulns for the bridge, worst-first, with CVE/CWE.
 
@@ -208,8 +365,9 @@ def _host_findings(h: Host) -> list[dict[str, Any]]:
 
 
 def build_bridge(hosts: list[Host], engagement: str = "Recce Engagement",
-                 generated: str = "") -> dict[str, Any]:
+                 generated: str = "", creds: list | None = None) -> dict[str, Any]:
     """The rich recce -> Sköll feed consumed by `sweep.py triage --recce`."""
+    creds = creds or []
     entries = []
     for h in hosts:
         if not h.is_up:
@@ -228,11 +386,15 @@ def build_bridge(hosts: list[Host], engagement: str = "Recce Engagement",
                       for p in h.open_ports],
             "findings": _host_findings(h),
             "suggested": _suggest_for_host(h),
+            "exploit_cmds": _exploit_cmds(h),
+            "access_cmds": _access_cmds(h, creds),
         })
     return {
         "_recce_bridge": BRIDGE_VERSION,
         "engagement": engagement,
         "generated": generated,
+        "users": collect_users(hosts, creds),
+        "creds_count": len(creds),
         "hosts": entries,
     }
 
@@ -252,7 +414,8 @@ def _host_priority(entry: dict[str, Any]) -> tuple[int, int]:
 def build_plan_md(bridge: dict[str, Any]) -> str:
     """Human, severity-ranked 'run X on host Y, because ...' plan from the bridge."""
     hosts = sorted(bridge.get("hosts", []), key=_host_priority)
-    actionable = [h for h in hosts if h["suggested"] or h["findings"]]
+    actionable = [h for h in hosts
+                  if h["suggested"] or h["findings"] or h.get("exploit_cmds")]
     L: list[str] = []
     L.append(f"# Sköll attack plan — from recce engagement '{bridge.get('engagement','')}'")
     L.append("")
@@ -267,6 +430,12 @@ def build_plan_md(bridge: dict[str, Any]) -> str:
     L.append("#   (or classic nmap path:  sweep.py triage --nmap ports.gnmap --nxc smb-null.txt)")
     L.append("```")
     L.append("")
+    users = bridge.get("users") or []
+    if users or bridge.get("creds_count"):
+        L.append(f"Spray/auth material also exported: **users.txt** ({len(users)} user(s)) "
+                 f"and **creds.txt** ({bridge.get('creds_count', 0)} known credential(s)) — "
+                 "referenced by the `gen_spray.py --users` / `gen_shell.py` lines below.")
+        L.append("")
     for h in actionable:
         tag = " [NULL-SESSION]" if h.get("null_smb") else ""
         tag += " [ACCESS]" if h.get("access_gained") else ""
@@ -292,6 +461,17 @@ def build_plan_md(bridge: dict[str, Any]) -> str:
             L.append("**Run on this host (best-first):**")
             for r in h["suggested"]:
                 L.append(f"- `{r['port']}` {r['label']} → {r['module']}")
+            L.append("")
+        if h.get("exploit_cmds"):
+            L.append("**Version→CVE (recce knows the exact version):**")
+            for e in h["exploit_cmds"]:
+                cve = (" _(recce confirmed " + ", ".join(e["cves"]) + ")_") if e.get("cves") else ""
+                L.append(f"- `{e['cmd']}`{cve}")
+            L.append("")
+        if h.get("access_cmds"):
+            L.append("**Credential → shell / spray:**")
+            for c in h["access_cmds"]:
+                L.append(f"- `{c}`")
             L.append("")
         if h.get("access_detail"):
             L.append(f"> Foothold already recorded by recce: {h['access_detail']}")
