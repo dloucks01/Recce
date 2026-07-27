@@ -102,7 +102,12 @@ class CredenumCliIntegrationTest(_FakeToolMixin):
         shutil.rmtree(self.dir, ignore_errors=True)
         super().tearDown()
 
+    @unittest.skipUnless(shutil.which("nmap"), "nmap not installed")
     def test_credenum_folds_nxc_output_and_marks_access(self):
+        # The credenum CLI shares recce's environment preflight, which requires nmap
+        # on PATH (recce's one hard dependency); skip cleanly where it's absent. The
+        # nxc subprocess/parse/fold path itself is covered by NxcSubprocessTest above,
+        # which needs no nmap.
         # Scope to the DC only, so no ssh/other tools fire against non-routable IPs.
         rc = cli.main(["credenum", "10.0.10.10", "-u", "alice", "-p", "Passw0rd!",
                        "-d", "corp.local", "-o", self.dir])

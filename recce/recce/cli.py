@@ -354,16 +354,41 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
                       credentials=credentials, generated=gen,
                       ad_bloodhound=meta.get("ad_bloodhound"),
                       report_link=os.path.basename(paths["html"]))
-    # Standalone architecture diagram sources (render with any Mermaid viewer, or
-    # `dot -Tpng architecture.dot`). Best-effort - never block a report on these.
+    # Standalone, directly-viewable diagrams (open the .svg in any browser — no tools).
+    # Best-effort - never block a report on these.
     try:
         from . import netmap
         eng_dir = os.path.dirname(paths["html"])
         ad_blob = meta.get("ad_bloodhound")
-        with open(os.path.join(eng_dir, "architecture.mmd"), "w", encoding="utf-8") as fh:
-            fh.write(netmap.mermaid(hosts, domains, ad_blob))
-        with open(os.path.join(eng_dir, "architecture.dot"), "w", encoding="utf-8") as fh:
-            fh.write(netmap.dot(hosts, domains, ad_blob))
+
+        def _write(name, text):
+            with open(os.path.join(eng_dir, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+        def _standalone_svg(text):
+            # the embedded copy omits xmlns; a file needs it to render on its own
+            return text.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+
+        # Two directly-viewable SVG network maps (open in any browser, no tools):
+        #   * FULL     - every host as its own card (the detailed map)
+        #   * OVERVIEW - each subnet collapsed to per-role counts (readable at scale)
+        _write("network-architecture.svg",
+               _standalone_svg(netmap.architecture_svg(hosts, domains, ad_blob)))
+        _write("network-map-full.svg",
+               _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=False)))
+        _write("network-map-overview.svg",
+               _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=True)))
+        _write("network-map-tiered.svg",
+               _standalone_svg(netmap.tiered_svg(hosts, domains, ad_blob)))
+        # Observed reachability — only when an on-target enum brought topology back.
+        if any((h.topology or {}) for h in hosts):
+            _write("network-reachability.svg",
+                   _standalone_svg(netmap.reachability_svg(hosts, ad_blob)))
+        # Attack path as a standalone SVG too (only when there's a confirmed path).
+        from . import attackpath as _ap
+        _ap_steps = _ap.build(hosts)
+        if _ap_steps:
+            _write("attack-path.svg", _standalone_svg(_ap.svg(hosts, _ap_steps)))
         # Standalone, directly-viewable AD tier-0 diagram (open the .svg in any
         # browser). It needs the xmlns the embedded copy omits to render as a file.
         arch = (meta.get("ad_bloodhound") or {}).get("architecture")
@@ -379,7 +404,11 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
         cov = tr.compute_coverage(hosts, tracking)["overall"]
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
               f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}"
-              f"\n    {paths['html']}\n    {paths['assets']} (architecture & assets)")
+              f"\n    {paths['html']}\n    {paths['assets']} (architecture & assets)"
+              f"\n    network map: network-architecture.svg (infra + segments) + "
+              f"network-map-full.svg (every host) + "
+              f"network-map-overview.svg (by role) + network-map-tiered.svg "
+              f"(DC→servers→hosts) — open in any browser, no tools")
         counts = store.count_issues()
         if counts.get("total"):
             print(f"[!] {counts['total']} scan issue(s) logged "
@@ -1395,6 +1424,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
     finally:
         _final_report(store, paths, args.title)
         store.close()
+    if getattr(args, "deep", False):
+        # One kickoff: continue straight into the full credential-free deep sweep over
+        # everything enum just discovered (each module self-skips where nothing matches).
+        print("\n[*] --deep: running the credential-free deep sweep across all "
+              "discovered hosts ...")
+        return _run_sweep(args, authenticated=False)
     print("\n[+] Done.")
     return 0
 
@@ -2068,18 +2103,16 @@ def cmd_attackpath(args: argparse.Namespace) -> int:
         print(f"  [{tgt}] {s['title']}")
         print(f"       {s['tool']}:  {s['cmd']}")
     # Graph artifacts - Mermaid (paste anywhere) + Graphviz DOT (render to PNG).
-    mmd_path = os.path.join(args.output_dir, "attack_path.mmd")
-    dot_path = os.path.join(args.output_dir, "attack_path.dot")
+    svg_path = os.path.join(args.output_dir, "attack-path.svg")
     try:
         os.makedirs(args.output_dir, exist_ok=True)
-        with open(mmd_path, "w", encoding="utf-8") as fh:
-            fh.write(ap.mermaid(hosts, steps))
-        with open(dot_path, "w", encoding="utf-8") as fh:
-            fh.write(ap.dot(hosts, steps))
-        print(f"\n  Graph: {mmd_path}  (paste into mermaid.live / GitHub)")
-        print(f"  Graph: {dot_path}  (render: dot -Tpng {dot_path} -o attack_path.png)")
+        svg = ap.svg(hosts, steps).replace(
+            "<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+        with open(svg_path, "w", encoding="utf-8") as fh:
+            fh.write(svg)
+        print(f"\n  Diagram: {svg_path}  (open in any browser — no tools, prints to PDF)")
     except OSError as exc:
-        print(f"  [!] Could not write graph files: {exc}")
+        print(f"  [!] Could not write the diagram: {exc}")
     print("\n  Full table on the Attack Path sheet; runnable artifacts via "
           "`recce exploitplan`.")
     return 0
@@ -2372,7 +2405,7 @@ def _fold_host(ip, parsed_list, subnet_map):
 
 # --- report / status / review ---------------------------------------------------
 
-def _resolve_ingest_host(store, parsed, args):
+def _resolve_ingest_host(store, parsed, args, topo=None):
     """Pick (or create) the Host that on-target loot belongs to.
 
     Priority: an explicit --host, else an IP parsed from the loot that already
@@ -2389,13 +2422,30 @@ def _resolve_ingest_host(store, parsed, args):
             host.hostnames.append(hn)
         _tag_host_os(host, parsed)
         return host, (ip in hosts)
-    # No --host: try the hostname against known hostnames, else synthesize.
+    # No --host: resolve from the host's OWN interface IPs in the ingested NETWORK
+    # block (so `recce ingest enum.txt` lands on the real enumerated host with no
+    # --host needed), then by hostname, else synthesize.
+    iface_ips = [i.get("ip") for i in (topo or {}).get("interfaces", []) if i.get("ip")]
+    for ip in iface_ips:
+        if ip in hosts:
+            if hn and hn not in hosts[ip].hostnames:
+                hosts[ip].hostnames.append(hn)
+            _tag_host_os(hosts[ip], parsed)
+            return hosts[ip], True
     if hn:
         for h in hosts.values():
             if hn.lower() in [x.lower() for x in h.hostnames] or \
                hn.lower() == (h.hostname or "").lower():
                 _tag_host_os(h, parsed)
                 return h, True
+    if iface_ips:                              # a real IP from the enum, just not in scope yet
+        host = hosts.get(iface_ips[0]) or Host(
+            ip=iface_ips[0],
+            subnet=".".join(iface_ips[0].split(".")[:3]) + ".0/24", enumerated=True)
+        if hn and hn not in host.hostnames:
+            host.hostnames.append(hn)
+        _tag_host_os(host, parsed)
+        return host, (iface_ips[0] in hosts)
     key = hn or os.path.splitext(os.path.basename(args.loot))[0]
     host = hosts.get(f"local:{key}") or Host(ip=f"local:{key}")
     if hn and hn not in host.hostnames:
@@ -2483,6 +2533,10 @@ def _fold_loot(host, text: str, source: str) -> tuple[int, int, int]:
     # Backfill listening-service ground truth (binary path, owning service,
     # loopback-only listeners) from the on-target scripts onto the host's ports.
     ingest.backfill_ports(host, ingest.parse_listeners(text))
+    # Observed network topology (own interfaces/routes/ARP/peers) -> reachability map.
+    topo = ingest.parse_topology(text)
+    if topo:
+        host.topology = topo
     host.privesc_checked = True
     return len(added), len(new_rows), len(promoted)
 
@@ -2507,8 +2561,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             return _ingest_service_output(svc, paths, args)
         print("[!] This doesn't look like recce-enum.sh/.ps1 output (no "
               "'recce-enum host=...' banner). Parsing [!] lines anyway.")
-    if not parsed["findings"]:
-        print("[!] No [!] findings in that loot - nothing to ingest.")
+    topo = ingest.parse_topology(text)
+    if not parsed["findings"] and not topo:
+        print("[!] No [!] findings or NETWORK block in that loot - nothing to ingest.")
         return 0
 
     source = os.path.basename(args.loot)
@@ -2516,7 +2571,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     _import_excel_tracking(store, paths)
-    host, existed = _resolve_ingest_host(store, parsed, args)
+    host, existed = _resolve_ingest_host(store, parsed, args, topo)
     added, total, promoted = _fold_loot(host, text, source)
     store.upsert_host(host)
     where = "existing host" if existed else "new host entry"
@@ -2525,6 +2580,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
           f"{host.ip}{hn}"
           + (f"; {total - added} already present" if total != added else "")
           + ".")
+    if topo:
+        nn = len(topo.get("neighbors", [])); npeers = len(topo.get("peers", []))
+        nif = len(topo.get("interfaces", []))
+        print(f"    Folded on-target topology: {nif} interface(s), {nn} ARP "
+              f"neighbour(s), {npeers} live peer(s) -> observed-reachability map.")
     if promoted:
         print(f"    Promoted {promoted} high-signal finding(s) to the "
               "Vulnerabilities sheet.")
@@ -4230,6 +4290,138 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skoll_export(args: argparse.Namespace) -> int:
+    """Export the engagement as a seed for the Sköll-Fieldkit exploitation kit."""
+    from . import skoll
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']} - run `enum` first.")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+    hosts = _selected_hosts(store.all_hosts(), args)
+    hosts = [h for h in hosts if h.is_up]
+    if not hosts:
+        print("[!] No live hosts to export. Run `enum`/`vulns` first.")
+        store.close()
+        return 1
+    title = store.get_meta("engagement") or args.title
+    creds = store.all_credentials()
+    out_dir = os.path.join(args.output_dir, "skoll")
+    os.makedirs(out_dir, exist_ok=True)
+    bridge = skoll.build_bridge(hosts, engagement=title, generated=_now(), creds=creds)
+
+    users = skoll.collect_users(hosts, creds)
+    cred_lines = skoll.collect_creds(creds)
+    files = {
+        "ports.gnmap": skoll.build_gnmap(hosts),
+        "smb-null.txt": skoll.build_smb_null(hosts),
+        "recce-bridge.json": json.dumps(bridge, indent=2) + "\n",
+        "SKOLL.md": skoll.build_plan_md(bridge),
+        "users.txt": ("\n".join(users) + "\n") if users
+                     else "# (recce enumerated no usernames yet — run credenum / ldap)\n",
+        "creds.txt": ("# known credentials (reference for gen_shell.py) — "
+                      "domain/user:secret\n" + "\n".join(cred_lines) + "\n") if cred_lines
+                     else "# (recce holds no captured credentials yet)\n",
+    }
+    for name, content in files.items():
+        with open(os.path.join(out_dir, name), "w") as fh:
+            fh.write(content)
+    _relax_perms(out_dir)
+
+    actionable = sum(1 for h in bridge["hosts"]
+                     if h["suggested"] or h["findings"] or h["exploit_cmds"])
+    print(f"[+] Sköll seed written to {out_dir}/ "
+          f"({len(bridge['hosts'])} live host(s), {actionable} with a Sköll route, "
+          f"{len(users)} user(s), {len(creds)} cred(s)):")
+    print(f"    ports.gnmap        -> sweep.py triage --nmap ports.gnmap")
+    print(f"    smb-null.txt       -> sweep.py triage --nxc smb-null.txt")
+    print(f"    recce-bridge.json  -> sweep.py triage --recce recce-bridge.json  (richest)")
+    print(f"    SKOLL.md           -> human, severity-ranked attack plan")
+    print(f"    users.txt/creds.txt-> gen_spray.py --users / gen_shell.py")
+    print(f"    Next (in the Sköll checkout): "
+          f"python3 access/network/sweep.py triage --recce {out_dir}/recce-bridge.json")
+    store.close()
+    return 0
+
+
+def cmd_skoll_import(args: argparse.Namespace) -> int:
+    """Fold a Sköll findings.json (proven exploitation) back into the workbook + report."""
+    from . import skoll
+    from .models import Host, Port
+    paths = _open_paths(args.output_dir)
+    if not os.path.exists(paths["db"]):
+        print(f"[x] No datastore at {paths['db']} - run `enum` first, or `import` a scan.")
+        return 1
+    if not os.path.exists(args.findings):
+        print(f"[x] No such file: {args.findings}")
+        return 1
+    try:
+        with open(args.findings) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        print(f"[x] Cannot read {args.findings}: {e}")
+        return 1
+    store = _open_store(paths["db"])
+    if store is None:
+        return 1
+    _import_excel_tracking(store, paths)
+
+    by_host = skoll.findings_to_hosts(data)
+    if not by_host:
+        print("[!] No usable findings in the file (need affected_host + steps).")
+        store.close()
+        return 1
+    all_hosts = store.all_hosts()
+    hosts_by_ip = {h.ip: h for h in all_hosts}
+    # Resolve a hostname-only finding (affected_host had no IP) onto the host recce
+    # already enumerated under that name, so it merges instead of forking a synthetic
+    # `skoll:<name>` entry. First hostname wins on a collision.
+    hosts_by_name = {}
+    for h in all_hosts:
+        for hn in h.hostnames:
+            hosts_by_name.setdefault(hn.lower(), h)
+    added_total = created = touched = 0
+    for key, bucket in by_host.items():
+        h = hosts_by_ip.get(key)
+        if h is None and not bucket["ip"] and bucket["hostname"]:
+            h = hosts_by_name.get(bucket["hostname"].lower())   # match by hostname
+        if h is None:
+            subnet = (".".join(key.split(".")[:3]) + ".0/24") if bucket["ip"] else ""
+            h = Host(ip=key, subnet=subnet, enumerated=True)
+            if bucket["hostname"]:
+                h.hostnames = [bucket["hostname"]]
+            created += 1
+        elif bucket["hostname"] and bucket["hostname"] not in h.hostnames:
+            h.hostnames.append(bucket["hostname"])
+        have = {(v.title, v.port) for v in h.vulns}
+        new = [v for v in bucket["vulns"] if (v.title, v.port) not in have]
+        if not new:
+            continue
+        for v in new:
+            v.ip = h.ip                        # keep Vuln.ip aligned with the host it lands on
+        h.vulns.extend(new)
+        # A proven Sköll finding is a confirmed foothold on the host.
+        if not h.access_gained:
+            h.access_gained = True
+            h.access_detail = h.access_detail or "Sköll: proven exploitation (imported findings)"
+        store.upsert_host(h)
+        added_total += len(new)
+        touched += 1
+
+    print(f"[+] Imported {added_total} Sköll finding(s) across {touched} host(s)"
+          + (f" ({created} new host entry/entries)" if created else "") + ".")
+    print("    Source 'skoll' (confidence 'confirmed') -> Vulnerabilities sheet, "
+          "report, and write-ups. Hosts marked access-gained.")
+    if added_total:
+        title = store.get_meta("engagement") or args.title
+        _generate_reports(store, paths, title)
+    store.close()
+    return 0
+
+
 def _add_budget(parser) -> None:
     """A wall-clock cap for a deep module's sequential probe loop."""
     parser.add_argument("--budget", type=float, metavar="SECONDS",
@@ -5189,11 +5381,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cd.set_defaults(func=cmd_creds)
 
     # Convenience: enum + vulns in one shot.
-    s = sub.add_parser("scan", help="run enum then vulns in one shot")
+    s = sub.add_parser("scan", help="run enum then vulns in one shot "
+                                     "(add --deep for the full credential-free sweep)")
     _add_discovery(s)
     _add_common(s)
     _add_vuln_opts(s)
     _add_creds(s)
+    s.add_argument("--deep", action="store_true",
+                   help="one kickoff, whole credential-free mass surface across ALL "
+                        "targets: discovery -> ports -> service/version -> vulns -> "
+                        "every applicable deep module (web/smb/ftp/snmp/db/nfs/...). "
+                        "Runs `sweep` right after enum+vulns.")
+    s.add_argument("--skip", nargs="*", metavar="MOD",
+                   help="with --deep: deep modules to skip (e.g. --skip mssql docker)")
+    s.add_argument("--only-modules", nargs="*", metavar="MOD",
+                   help="with --deep: run only these deep modules")
     s.set_defaults(func=cmd_scan)
 
     # One command instead of ~9: run every applicable credential-free deep module.
@@ -5241,8 +5443,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ing = sub.add_parser("ingest",
                          help="fold on-target recce-enum.sh/.ps1 output into Priv-Esc")
     ing.add_argument("loot", help="path to saved recce-enum output (-o / -OutFile file)")
-    ing.add_argument("--host", help="attach findings to this IP (default: match the "
-                                    "loot's hostname, else a 'local:<host>' entry)")
+    ing.add_argument("--host", help="attach findings to this IP (default: auto-resolve "
+                                    "from the enum's own NET-IFACE interface IPs, then "
+                                    "its hostname, else a 'local:<host>' entry)")
     ing.add_argument("-o", "--output-dir", default="engagement")
     ing.add_argument("--title", default="Recce Engagement")
     ing.set_defaults(func=cmd_ingest)
@@ -5559,6 +5762,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     kp.add_argument("--title", default="Recce Engagement")
     _add_budget(kp)
     kp.set_defaults(func=cmd_kerberos)
+
+    sk = sub.add_parser("skoll-export",
+                        help="export the engagement as a seed for the Sköll-Fieldkit "
+                             "exploitation kit (gnmap + bridge JSON + attack plan)")
+    sk.add_argument("targets", nargs="*",
+                    help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
+    sk.add_argument("-o", "--output-dir", default="engagement")
+    sk.add_argument("--title", default="Recce Engagement")
+    sk.set_defaults(func=cmd_skoll_export)
+
+    ski = sub.add_parser("skoll-import",
+                         help="fold a Sköll findings.json (proven exploitation) back "
+                              "into the workbook + report")
+    ski.add_argument("findings", help="path to a Sköll findings.json or recce_findings.json")
+    ski.add_argument("-o", "--output-dir", default="engagement")
+    ski.add_argument("--title", default="Recce Engagement")
+    ski.set_defaults(func=cmd_skoll_import)
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")

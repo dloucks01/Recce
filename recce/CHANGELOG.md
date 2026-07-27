@@ -4,6 +4,122 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Changed
+- **`recce ingest` auto-resolves the target host from the enum's own interface IPs.**
+  Running `recce ingest enum.txt` with no `--host` now lands the loot on the real
+  enumerated host in scope by matching the box's own `NET-IFACE` IP(s) from the ingested
+  network block (then by banner hostname, else synthesizing as before). So an on-target
+  enum that carries its own topology attaches to the host it came from without the
+  operator having to name it — the topology feeds straight into the architecture and
+  reachability maps.
+
+## [0.4.0] - 2026-07-27
+
+### Changed
+- **Full network map rebuilt as subnet panels + a host grid.** Each network segment is
+  now a bordered panel with a header (subnet · host count · per-role summary · owned
+  count) and its hosts laid out in a multi-column **grid** instead of one tall column, so
+  a large segment no longer scrolls forever (a 400-host estate roughly halved in height)
+  and the page reads as a structured map rather than hosts stacked down the page. Added a
+  title, an AD-domain strip and a role/severity/owned legend. The >50-host overview
+  (per-role counts) is unchanged.
+- **Attack path is now a directly-viewable SVG, not Mermaid/Graphviz.** `recce
+  attackpath` writes **`attack-path.svg`** (staged left-to-right kill chain — Initial
+  Access → Priv-Esc → Credential Access → Lateral Movement → Domain Dominance — with
+  stage arrows and dashed same-host continuity), and `report.html` embeds the same
+  diagram inline. It opens in any browser with no tools and prints to PDF. The
+  `attack_path.mmd`/`.dot` exports and `attackpath.mermaid()`/`.dot()` are removed
+  (same airgap reasoning as the network map).
+- **Network map is now SVG only, in two forms — full and overview.** Every report writes
+  **`network-map-full.svg`** (every host broken out) and **`network-map-overview.svg`**
+  (per-subnet role counts); both open in any browser with no tools and print to PDF —
+  airgap-native. `netmap.svg` takes an `aggregate` flag (the copy embedded in
+  `report.html`/`assets.html` still auto-picks by size, collapsing a >50-host estate for
+  readability). Scale-tested at 400 hosts. The Mermaid (`architecture.mmd`) and Graphviz
+  (`architecture.dot`) exports are **removed** — they required a renderer recce users on
+  an air-gapped box don't have, and the SVG needs none.
+- **Role labelling:** a Windows *client* OS (Windows 10/11/7/8/XP/Vista) with SMB open
+  is now classed as **Workstation**, not **File/SMB**. 445 is open on every domain-joined
+  workstation, so the old rule mislabelled essentially every workstation as a file
+  server; File/SMB is now reserved for server OSes.
+
+### Added
+- **One-command deep mass scan (`recce scan --deep`).** A single kickoff runs the whole
+  credential-free mass surface across every target in one invocation: host discovery →
+  port scan → service/version → vuln scan → **every applicable deep module**
+  (web/smb/ftp/snmp/db/nfs/rsync/…, each self-skipping where nothing matches). Equivalent
+  to `scan` immediately followed by `sweep`; `--skip`/`--only-modules` narrow the deep
+  pass. (Companion, Sköll side: `sweep.py plan --oneshot` emits a single runnable
+  `mass-scan.sh` that hits the whole scope in one go.)
+- **Observed-reachability map from on-target topology (`network-reachability.svg`).** The
+  on-target enums (recce's own, and the Sköll linpriv/winpriv enum) now emit a machine
+  `NET-IFACE / NET-ROUTE / NET-NEIGH / NET-PEER` block; `recce ingest` folds it onto the
+  host (`Host.topology`) and the report draws a **ground-truth** host-to-host map — a
+  link only where a foothold actually reached the other end (ARP neighbour = same-segment
+  L2 contact; live connection = an established peer). Dual-homed **pivots** that bridge
+  segments are flagged. This is the honest counterpart to the tiered map's credentialed
+  pivot *surface*: here the edges are observed, not inferred. `ingest` now also accepts a
+  topology-only block (no `[!]` findings required). `netmap.adjacency()` exposes the
+  edges/pivots.
+- **Device icons on the diagrams.** Role-based glyphs — Domain Controller (server tower
+  + star), Server (rack), Workstation/host (monitor) — now mark each card on the attack
+  path and each chip on the tiered map, with a shared legend. Per-system cards on the
+  **full network map** and the **reachability map** now use a shared `host_tile()`: a soft
+  role-tinted **header band** (device icon + role), a faintly tinted body with the **IP**,
+  a real hostname (an IP-derived name like `10-0-10-10` is suppressed so the IP never
+  prints twice) and an OS/note line, an **outline severity chip** (CRIT/HIGH/MED/LOW) and
+  an **owned ✓**. The attack path also got a visual pass (stage accent bars, soft shadows,
+  device + same-host keys).
+  All still pure inline SVG, no tools.
+- **Logical architecture view (`network-architecture.svg`).** A real network diagram, not
+  a host list: the AD domain over a **routed core**, each segment reached through its
+  **gateway** — a router, or a **firewall** for an edge/DMZ segment, with the gateway IP
+  when an on-target enum's routes have been ingested — and an **L2 switch**, then the
+  segment's role make-up and access/severity, stacked by tier (edge/DMZ → servers →
+  workstations). New switch/router/firewall glyphs. Honest: every segment shown was
+  reachable from the assessment host, gateway IPs are real, and a switch is the standard
+  L2-segment symbol (recce does not fingerprint physical switches). It's the headline of
+  the report's Network map, with the per-host segment grid as the drill-down inventory.
+  **Topology-driven pass:** once an on-target enum's routes/interfaces are folded in via
+  `ingest`, the generic core is replaced by the **real gateway devices** (their IPs from
+  `NET-ROUTE default via …`), each segment connects to its actual gateway on the routed
+  backbone, and a **dual-homed pivot draws a direct segment-to-segment link** (observed
+  ground truth). Segments with no ingested route show "gateway not observed" rather than
+  guessing; it gets more accurate the more footholds you feed it.
+- **Tiered lateral map (`network-map-tiered.svg`).** A third network-map view that
+  groups the estate into trust tiers — **Domain Controllers → servers → workstations &
+  hosts** — with the AD domain, per-role counts and access (✓ owned) overlay, upward
+  escalation arrows (client → server → DC), and a **credentialed pivot-surface** legend
+  (SMB/WinRM/RDP/SSH/MSSQL host counts + footholds held). It answers "how does this look
+  from the DC down" and "what can move where laterally" honestly: it is a *logical*
+  tiering — recce enumerates hosts independently and does not test host-to-host network
+  reachability, so the pivot surface lists services that accept remote auth, not routing.
+  Written on every report and embedded in `assets.html`.
+- **Sköll-Fieldkit integration (`skoll-export` / `skoll-import`).** recce now
+  round-trips with the [Sköll-Fieldkit](https://github.com/dloucks01/skoll-fieldkit)
+  exploitation kit, so enumeration seeds exploitation and proven findings flow back
+  into the workbook + report. Both directions are file-based and stdlib-only — neither
+  tool imports the other, so each runs standalone on an airgapped box and only the
+  handoff files travel between them.
+  - **`recce skoll-export -o eng`** writes `eng/skoll/`: a severity-ranked **`SKOLL.md`**
+    attack plan ("run *this* generator on *that* host, because …"), a rich
+    **`recce-bridge.json`** (each host's open ports, service/version, recce's **confirmed**
+    findings and the suggested Sköll generator) for `sweep.py triage --recce`, plus a
+    synthesized **`ports.gnmap`** and **`smb-null.txt`** for Sköll's unmodified
+    `sweep.py triage --nmap/--nxc` path. Respects target selection (IPs / ranges / CIDR /
+    `@file`). The plan and bridge also carry **ready-to-paste generator commands** derived
+    from what recce enumerated: `gen_exploit.py find --service <p> --version <v>` per
+    fingerprinted service (with confirmed CVEs attached), and `gen_shell.py` /
+    `gen_spray.py` lines per host from recce's captured credentials and enumerated users —
+    exported alongside as **`users.txt`** and **`creds.txt`**.
+  - **`recce skoll-import <findings.json> -o eng`** folds a Sköll findings file back in —
+    the KB-enriched `recce_findings.json` (from `gen_report.py --export-recce`) or a raw
+    `findings.json`. Each proven finding becomes a **confirmed** vulnerability (source
+    `skoll`) on its host, landing in the Vulnerabilities sheet, the report and the DOCX
+    write-ups; the host is marked *access-gained* (ticks the Checklist **Access** step).
+    Idempotent — deduped by title + host, so re-import as you prove each finding.
+  - Full round-trip guide in **`INTEGRATION.md`** (now shipped in the burn package).
+
 ## [0.3.0] - 2026-07-26
 
 ### Added

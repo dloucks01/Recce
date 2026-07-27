@@ -67,6 +67,7 @@ it (`sudo apt install nmap`) and re-run.
 | **Enumerate** | `sudo ./bin/recce enum <targets> -o eng` | discover hosts/ports/services → fills the sheet |
 | _(have a scan?)_ | `./bin/recce import scan.xml -o eng` | build the sheet from existing nmap output |
 | **Vuln-scan** | `sudo ./bin/recce vulns -o eng` | NSE + offline CVE/CWE engine + TLS/HTTP probes |
+| **One-shot deep** | `sudo ./bin/recce scan --deep <targets> -o eng` | the whole credential-free mass surface in one kickoff: enum → vulns → every applicable deep module (`--skip`/`--only-modules` to narrow) |
 | **Deep pass (unauth)** | `./bin/recce sweep -o eng` | **all** credential-free deep modules at once (web/smb/ftp/ldap/snmp/mongodb/redis/elasticsearch/rsync/nfs/kerberos/docker/k8s/mssql) — skips services you don't have |
 | **Deep pass (auth)** | `./bin/recce credsweep -u U -p P -d dom -o eng` | **all** authenticated modules at once (credenum + authenticated ldap/smb/mssql/ftp) |
 | **Per-service** | `./bin/recce services -o eng` | prints the exact enum command for each open port |
@@ -87,6 +88,8 @@ it (`sudo apt install nmap`) and re-run.
 | **Write-ups** | `./bin/recce writeups -o eng` | one Word doc per real finding |
 | **Access** | `./bin/recce access -o eng` | footholds per host (auto-derived from credentialed enum); record your own with `--host IP --note '...'` |
 | **Status** | `./bin/recce status -o eng` | what's left + the next command |
+| **→ Sköll** | `./bin/recce skoll-export -o eng` | export an attack plan for the Sköll exploitation kit ([INTEGRATION.md](INTEGRATION.md)) |
+| **← Sköll** | `./bin/recce skoll-import findings.json -o eng` | fold Sköll's proven findings back into the sheet + report |
 
 > [!IMPORTANT]
 > **Keep `-o eng` the same across every command** — it's the one engagement folder
@@ -236,7 +239,10 @@ work on **just that subset** of what's already enumerated — e.g.
 | **`enumeration.xlsx`** | the tracking workbook you work out of |
 | **`report.html`** | self-contained client-ready **findings** page — an expanded **exec summary**, an **At a glance** dashboard, a **How findings are scored** legend, findings with confidence + evidence, the attack path, and a **read-only coverage checklist**. Links to the companion `assets.html`. Open it in a browser; use **Print → Save as PDF** for a PDF. |
 | **`assets.html`** | self-contained **architecture & assets** companion page — the **Network map**, the **AD architecture** diagram (tier-0 view built from the BloodHound import, when present), **Key information**, **Users & accounts**, and **Credentials** (masked). Links back to `report.html`. Both draw directly and print to PDF. |
-| `architecture.mmd` / `.dot` | the network map as Mermaid + Graphviz sources (optional — the diagram already renders inside `assets.html`) |
+| **`network-architecture.svg`** | the **headline** network diagram — AD domain over a routed core, each segment reached through its gateway (router, or firewall for edge/DMZ) + an L2 switch, stacked by tier. Goes **topology-driven** (real gateway IPs + dual-homed pivot links) once you `ingest` on-target routes. Open in a browser, no tools |
+| `network-map-full.svg` / `network-map-overview.svg` / `network-map-tiered.svg` | the host map as standalone SVG — **full** (every host), **overview** (per-subnet role counts), and **tiered** (DC → servers → workstations with the credentialed lateral-movement surface). Open any in a browser, no tools; all also render inside `assets.html` |
+| `network-reachability.svg` | **observed** host-to-host reachability (only after you `ingest` an on-target enum's `NETWORK` block) — ARP neighbours + live connections a foothold actually reached, with dual-homed pivots flagged. Ground truth, not inferred |
+| `attack-path.svg` | the projected attack path (foothold → priv-esc → creds → lateral → domain) as a standalone SVG (written by `recce attackpath`; also embedded in `report.html`) |
 | `ad-architecture.svg` | the tier-0 AD diagram as a standalone image you can open directly in a browser (written only after an `ad`/BloodHound import) |
 | `enumeration.md` / `services.csv` | notes-friendly + flat pivot data |
 | `writeups/*.docx` | per-finding Word write-ups + a combined report (after `writeups`) |

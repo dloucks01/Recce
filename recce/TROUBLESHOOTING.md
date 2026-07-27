@@ -222,6 +222,10 @@ For a time-boxed engagement, in rough order of impact:
   `powershell -ep bypass -File recce-enum.ps1 -SelfTest`. It parse-checks the
   script and reports what will run — no enumeration, safe first step.
 - Windows: if the script won't run, use **`-ep bypass`** (execution policy).
+- Windows, `-File` unavailable (webshell / semi-interactive shell): dot-source it —
+  **`. .\recce-enum.ps1 -OutFile loot.txt`** — or load + invoke it as a scriptblock:
+  **`powershell -ep bypass -c "& ([scriptblock]::Create((Get-Content .\recce-enum.ps1 -Raw))) -OutFile loot.txt"`**.
+  The script runs its sweep on load; there's no separate entry method to call after.
 - They are **read-only** — no exploit code, no obfuscation. If an EDR still
   false-positives, coordinate an allow-list; don't try to evade it.
 

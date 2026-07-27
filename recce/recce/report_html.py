@@ -419,18 +419,54 @@ def _network_map(hosts, domains, ad_data=None):
     return (
         '<section><h2>Network map</h2>'
         '<div class="narr">' + "".join(f"<p>{escape(l)}</p>" for l in lines) + '</div>'
-        '<p class="basis">A <b>logical</b> map from the enumeration — network segments, '
-        "each host's role, and the AD domains / trusts recce observed — enriched from "
-        'the findings: a host recce <b>gained access to</b> gets a green outline + ✓, '
-        'each card carries a <b>risk dot</b> for its worst confirmed finding, and '
-        'Domain Controllers are <b>confirmed from the BloodHound data</b> where present. '
-        'It is not a physical or routing topology: recce does not trace links or '
-        'firewall rules between hosts, so only relationships it actually saw are drawn.</p>'
+        '<h3>Architecture</h3>'
+        '<p class="basis">The <b>logical architecture</b>: the AD domain over a routed '
+        'core, with each segment reached through its gateway (a router, or a firewall for '
+        'an edge/DMZ segment) and an L2 switch, then its role make-up and any access/risk. '
+        'Every segment shown was reachable from the assessment host; <b>gateway IPs are '
+        'real</b> when an on-target enum\'s routes were ingested. A switch is the standard '
+        'symbol for an L2 segment — recce does not fingerprint physical switches. '
+        'Standalone copy: <b>network-architecture.svg</b>.</p>'
+        f'<div class="netmap">{nm.architecture_svg(hosts, domains, ad_data)}</div>'
+        '<h3>Host inventory</h3>'
+        '<p class="basis">Every host, grouped into its segment panel — '
+        'a host recce <b>gained access to</b> gets a green ✓ and its worst confirmed '
+        'finding shows as an outline severity chip; Domain Controllers are '
+        '<b>confirmed from the BloodHound data</b> where present. '
+        'It is not a physical or routing topology between hosts.</p>'
         f'<div class="netmap">{nm.svg(hosts, domains, ad_data)}</div>'
-        '<p class="basis">This diagram renders here directly (and prints to PDF). The '
-        'same map is also written as <b>architecture.mmd</b> (Mermaid) and '
-        '<b>architecture.dot</b> (Graphviz) next to this report, for those tools.</p>'
+        '<p class="basis">This diagram renders here directly (and prints to PDF); a '
+        'large estate (&gt;50 hosts) is shown collapsed to per-role counts per subnet '
+        'to stay readable. Two standalone SVG copies are written next to this report — '
+        '<b>network-map-full.svg</b> (every host broken out) and '
+        '<b>network-map-overview.svg</b> (by role) — each opens in any browser with no '
+        'tools.</p>'
+        '<h3>Tiered view — DC → servers → workstations</h3>'
+        '<p class="basis">The same estate grouped into trust tiers, with the '
+        '<b>credentialed lateral-movement surface</b> (services that accept remote auth) '
+        'and any footholds recce holds. The arrows show the escalation direction '
+        '(client → server → DC); this is a <b>logical</b> tiering — recce does not test '
+        'which hosts can reach which over the network. Standalone copy: '
+        '<b>network-map-tiered.svg</b>.</p>'
+        f'<div class="netmap">{nm.tiered_svg(hosts, domains, ad_data)}</div>'
+        + _reachability_block(hosts, ad_data) +
         '</section>')
+
+
+def _reachability_block(hosts, ad_data):
+    """Observed host-to-host reachability, shown only once an on-target enum has fed
+    topology back in (ARP neighbours + live connections = ground truth)."""
+    if not any((h.topology or {}) for h in hosts):
+        return ""
+    return (
+        '<h3>Observed reachability <span class="tag">from on-target enum</span></h3>'
+        '<p class="basis">Built from the interfaces, routes, ARP caches and live '
+        'connections that compromised hosts reported (folded in via <b>ingest</b>). '
+        'Unlike the rest of this page these edges are <b>ground truth</b> — a link is '
+        'drawn only because a foothold actually contacted the other end — and '
+        'dual-homed <b>pivots</b> that bridge segments are flagged. Standalone copy: '
+        '<b>network-reachability.svg</b>.</p>'
+        f'<div class="netmap">{nm.reachability_svg(hosts, ad_data)}</div>')
 
 
 def _owned_labels(hosts, credentials):
@@ -501,12 +537,9 @@ def _attack_path(hosts):
             f'<span class="muted">— {escape(tgt)}</span></div>'
             f'<div class="mono muted">{escape(s["cmd"])}</div></div>')
     out.append("</div>")
-    # Copyable graph source (airgapped-friendly: no external JS required; paste
-    # into mermaid.live / GitHub, or `dot -Tpng` the DOT form recce writes).
-    out.append(
-        '<details class="graph"><summary>Attack-path graph (Mermaid — paste into '
-        'mermaid.live or GitHub)</summary>'
-        f'<pre class="mermaid mono">{escape(ap.mermaid(hosts, steps))}</pre></details>')
+    # Inline SVG diagram — renders directly in any browser, no tools/JS, prints to PDF.
+    # The same map is written standalone as attack-path.svg next to this report.
+    out.append(f'<div class="netmap">{ap.svg(hosts, steps)}</div>')
     out.append("</section>")
     return "".join(out)
 

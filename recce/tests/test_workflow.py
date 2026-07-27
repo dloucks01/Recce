@@ -367,7 +367,10 @@ class CoverageMathFidelityTest(unittest.TestCase):
     def test_overview_phase_table_honors_operator_override(self):
         """Regression: the Overview per-subnet phase table must reflect an
         operator un-tick the same way the Checklist does, or the two diverge."""
-        import openpyxl
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest("openpyxl not installed (test-only dependency)")
         from recce.report_excel import build_workbook
 
         def enum_cell(path):
@@ -1782,6 +1785,49 @@ class IngestCommandTest(unittest.TestCase):
             rc = args.func(args)
         return rc
 
+    def test_ingest_folds_network_topology_and_survives_merge(self):
+        from recce.store import Store
+        loot = ("recce-enum host=web01 user=root now\n"
+                "==== NETWORK ====\n"
+                "NET-IFACE eth0 10.0.20.5/24\nNET-IFACE eth1 10.0.10.9/24\n"
+                "NET-NEIGH 10.0.10.10 aa:bb:cc:00:00:10\n"
+                "NET-PEER 10.0.10.10:445 ESTAB\n==== END NETWORK ====\n")
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.20.5", hostnames=["web01"], enumerated=True))
+            # topology-only loot (no [!] findings) must still ingest
+            self.assertEqual(self._ingest(d, loot, ["--host", "10.0.20.5"]), 0)
+            db = os.path.join(d, "results.sqlite")
+            h = Store(db).get_host("10.0.20.5")
+            self.assertEqual(len(h.topology["interfaces"]), 2)
+            self.assertIn("10.0.10.10", h.topology["neighbors"])
+            # a later, unrelated upsert (merge=True) must not drop the topology
+            s = Store(db)
+            again = s.get_host("10.0.20.5")
+            again.vulns = []                          # simulate a re-scan touch
+            s.upsert_host(again)                      # merge path
+            s.close()
+            h2 = Store(db).get_host("10.0.20.5")
+            self.assertEqual(len(h2.topology.get("interfaces", [])), 2)
+
+    def test_ingest_auto_resolves_host_from_own_interface_ip(self):
+        # No --host: the box's own NET-IFACE IP must land the loot on the real
+        # enumerated host in scope, not synthesize a local: entry.
+        from recce.store import Store
+        loot = ("recce-enum host=web01 user=root now\n"
+                "==== NETWORK ====\n"
+                "NET-IFACE eth0 10.0.20.5/24\n"
+                "NET-NEIGH 10.0.10.10 aa:bb:cc:00:00:10\n"
+                "==== END NETWORK ====\n")
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.20.5", enumerated=True))   # in scope, no hostname
+            self.assertEqual(self._ingest(d, loot), 0)            # no --host
+            s = Store(os.path.join(d, "results.sqlite"))
+            h = s.get_host("10.0.20.5")
+            self.assertIsNotNone(h)
+            self.assertEqual(len(h.topology["interfaces"]), 1)    # folded onto the real host
+            self.assertIn("web01", h.hostnames)                   # banner hostname recorded
+            self.assertIsNone(s.get_host("local:web01"))          # nothing synthesized
+
     def test_ingest_matches_host_by_hostname(self):
         from recce.store import Store
         with tempfile.TemporaryDirectory() as d:
@@ -1836,7 +1882,10 @@ class IngestCommandTest(unittest.TestCase):
 
     def test_exploitation_sheet_lists_confirmed_findings(self):
         from recce.report_excel import build_workbook
-        import openpyxl
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest("openpyxl not installed (test-only dependency)")
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
             self._ingest(d, _LOOT_LINUX)      # sudo/suid/shadow -> confirmed
@@ -1883,7 +1932,10 @@ class IngestCommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._eng(d, Host(ip="10.0.0.50", hostnames=["web01"], os_family="Linux"))
             self._ingest(d, _LOOT_LINUX)
-            import openpyxl
+            try:
+                import openpyxl
+            except ImportError:
+                self.skipTest("openpyxl not installed (test-only dependency)")
             ws = openpyxl.load_workbook(os.path.join(d, "enumeration.xlsx"))["Priv-Esc"]
             hdr = [c.value for c in ws[1]]
             ti = hdr.index("Type")
@@ -2049,7 +2101,10 @@ class RunbookSheetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "wb.xlsx")
             build_workbook([], p, meta={"subtitle": "x"})
-            import openpyxl
+            try:
+                import openpyxl
+            except ImportError:
+                self.skipTest("openpyxl not installed (test-only dependency)")
             wb = openpyxl.load_workbook(p)
             self.assertIn("Runbook", wb.sheetnames)
             vals = [c for row in wb["Runbook"].iter_rows(values_only=True)

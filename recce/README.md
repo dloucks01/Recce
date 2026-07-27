@@ -448,11 +448,37 @@ sheet:
 ./recce-enum.sh -o loot.txt                                  # Linux (-t self-tests)
 powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt # Windows (-SelfTest)
 # back on Kali:
-recce ingest loot.txt -o eng          # matches the host by name (or --host IP)
+recce ingest loot.txt -o eng          # auto-resolves the host (see below); --host IP to force
+```
+
+**Running the Windows script when `-File` isn't an option.** `recce-enum.ps1` takes
+its params and runs its sweep on invocation — there's no separate entry method to
+call, so pick the form that fits your channel:
+
+```powershell
+# 1) Standard — run the script file directly:
+powershell -ep bypass -File .\recce-enum.ps1 -OutFile loot.txt
+
+# 2) Dot-source — load it into an interactive session (its helper functions become
+#    available too), then it runs with the params you pass:
+. .\recce-enum.ps1 -OutFile loot.txt
+
+# 3) Limited / semi-interactive channel (webshell, no -File) — read the script text
+#    and invoke it as a scriptblock, passing params, nothing extra written to disk:
+powershell -ep bypass -c "& ([scriptblock]::Create((Get-Content .\recce-enum.ps1 -Raw))) -OutFile loot.txt"
 ```
 
 `ingest` needs no tools or network — it parses text recce itself produced. Findings
 land as rows tagged **on-target finding** at the top of the host's Priv-Esc section.
+
+**Host resolution is automatic.** With no `--host`, `ingest` lands the loot on the
+right host by matching the box's own interface IPs from the enum's `NETWORK` block,
+then by hostname, else it synthesizes an entry — so `recce ingest loot.txt` usually
+needs no flag. The on-target enums (recce's own, and Sköll's `linpriv`/`winpriv`)
+also emit a machine `NET-IFACE / NET-ROUTE / NET-NEIGH / NET-PEER` block; `ingest`
+folds that topology onto the host and `report` draws a **ground-truth**
+`network-reachability.svg` (and upgrades `network-architecture.svg` to real gateways
++ dual-homed pivots). A topology-only block ingests fine with no `[!]` findings.
 
 ### Exploitation playbook (the *Exploitation* sheet)
 
@@ -597,6 +623,26 @@ self-signed cert warnings; headless Firefox will capture the browser's cert
 warning page for a bad-cert HTTPS target (still useful evidence). Non-web
 findings are evidenced by their captured tool output. Disable with
 `--no-screenshots`; filter with `--min-severity high`.
+
+## Sköll-Fieldkit integration (`skoll-export` / `skoll-import`)
+
+recce round-trips with the [**Sköll-Fieldkit**](https://github.com/dloucks01/skoll-fieldkit)
+exploitation kit, so enumeration seeds exploitation and proven findings flow back into the sheet:
+
+```bash
+recce skoll-export -o eng                     # -> eng/skoll/ : an attack plan Sköll consumes
+#   (in the Sköll checkout)
+#   python3 access/network/sweep.py triage --recce eng/skoll/recce-bridge.json
+#   ... exploit, then write up findings.json and:
+#   python3 report/gen_report.py findings.json --export-recce   # -> recce_findings.json
+recce skoll-import recce_findings.json -o eng  # proven findings -> Vulnerabilities sheet + report
+```
+
+`skoll-export` writes a severity-ranked `SKOLL.md` plan plus machine feeds (`recce-bridge.json`,
+`ports.gnmap`, `smb-null.txt`) that name the exact Sköll generator to run per host, weighting the
+hosts recce already confirmed vulnerable. `skoll-import` folds Sköll's proven findings back in as
+**confirmed** vulnerabilities (source `skoll`) and marks each host *access-gained* — idempotent, so
+run it as you go. Both stay stdlib-only / airgap-safe. Full guide: **[INTEGRATION.md](INTEGRATION.md)**.
 
 ## Coverage tracking
 
@@ -979,7 +1025,13 @@ python -m recce mongodb -o eng       # fingerprint + CONFIRM unauthenticated lis
 | `enumeration.xlsx` | **Start Here** (self-guide) · **Runbook** (what to type per phase) · **Overview** · **Checklist** (per-IP step tracking) · **Services** (per-port status) · **Web** · **Vulnerabilities** · **Exploits** · **Verification** · **Services by Product/Version** · **Databases** · **Active Directory** · **AD Quick Wins** · **AD Findings** · **AD Attack Paths** (SharpHound + Certipy import) · Users & Accounts · **MSSQL** (offensive SQL Server enum + attack chain) · **SMB** (offensive file-sharing enum + attack surface) · **FTP** (offensive FTP enum + attack surface) · **Docker** (exposed Engine API) · **Kubernetes** (kubelet/API/etcd exposure) · **LDAP** (AD directory enum) · **SNMP** (community walk + users/software) · **MongoDB** (unauthenticated exposure) · **Priv-Esc** · **Exploitation** (confirmed finding → exact existing tool + command + validation) — ordered to follow the engagement flow (orient → track → find → exploit → pivot → AD → post-ex); all with autofilter, freeze panes, and persistent checkbox tracking |
 | `enumeration.md`   | Summary + per-host checklist (great for notes / git) |
 | `services.csv`     | Flat services table for import/pivot anywhere |
-| `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets |
+| `report.html`      | Self-contained shareable HTML report (exec summary, severity, findings, attack path, hosts) — no external assets. Links to `assets.html` |
+| `assets.html`      | Self-contained **architecture & assets** companion — the network map, the tier-0 AD diagram (from a BloodHound import, when present), key info, users/accounts and masked credentials |
+| `network-architecture.svg` | **Headline network diagram** — the AD domain over a routed core, each segment reached through its gateway (router, or firewall for edge/DMZ) and an L2 switch, stacked by tier. **Topology-driven** once on-target routes are ingested (real gateway IPs + dual-homed pivot links). Open in any browser, no tools |
+| `network-map-full.svg` / `network-map-overview.svg` / `network-map-tiered.svg` | The host map as standalone SVG — **full** (every host as a role-tinted tile), **overview** (per-subnet role counts, readable at scale), **tiered** (DC → servers → workstations + the credentialed lateral surface) |
+| `network-reachability.svg` | **Observed** host-to-host reachability, drawn only after you `ingest` an on-target enum's `NETWORK` block — ARP neighbours + live connections a foothold actually reached, dual-homed pivots flagged. Ground truth, not inferred |
+| `attack-path.svg`  | The staged attack path (foothold → priv-esc → creds → lateral → domain) as standalone SVG — after `attackpath`; also embedded in `report.html` |
+| `ad-architecture.svg` | The tier-0 AD diagram as a standalone image — after an `ad`/BloodHound import |
 | `writeups/*.docx`  | One Word write-up per finding + `findings_report.docx` (combined, with summary tables) — after `writeups` |
 | `exploit-plan/*`   | Ready-to-run msf `.rc` + per-host plans — after `exploitplan` |
 | `creds/*.txt`      | `users.txt` / `passwords.txt` / `nthashes.txt` for the spray plan — after `creds --plan` |
@@ -1062,11 +1114,11 @@ Every command takes targets as a single IP, several IPs, a range
 | `import <files>` | Import **existing** nmap scans (`-oX`/`-oG`/`-oN`, multiple files/dirs/globs, masscan XML) → workbook, no scanning | `--enum-only`, `--searchsploit` |
 | `enum <targets>` | Discover hosts, port sweep, service/OS/AD enum → sheet | `--fast` (masscan), `--all-ports`, `--top-ports N`, `--no-discovery`, `--no-ad`, `--no-os`, `--version-all`, `--version-intensity 0-9`, `--min-rate`, `--exclude`, `--resume` |
 | `vulns [targets]` | Vuln-scan open ports (safe detection + offline CVE/CWE DB + probes) | `--fast` (top-signal + progress/ETA), `--aggressive` (full NSE), `--only SVC`, `--unscanned`, `--offline`, `--no-searchsploit`, `--no-probes`, `--udp-top N` |
-| `scan <targets>` | `enum` then `vulns` in one shot | all of enum + vulns (`--fast` = fast sweep *and* fast vulns) |
+| `scan <targets>` | `enum` then `vulns` in one shot; `--deep` runs the whole credential-free mass surface (enum → vulns → every applicable deep module) in one kickoff | all of enum + vulns · `--deep` · `--skip MOD...` · `--only-modules MOD...` |
 | `db [targets]` | Database enumeration + vuln scan | `--aggressive` (brute/xp_cmdshell/hash), `--no-searchsploit` |
 | `privesc [targets]` | Per-host priv-esc playbook | `--scan` (remote NSE checks), `--aggressive` |
 | `credenum [targets]` | Authenticated SMB/AD/SSH enum | `-u/-p/-d`, `--admin-user/--admin-pass/--admin-domain`, `--ssh-user/--ssh-pass/--ssh-key`, `--ldap-enum`, `--ldap-anon`, `--ldap-ssl`, `--dc-ip`, `--aggressive` |
-| `ingest <loot>` | Fold on-target `recce-enum.sh`/`.ps1` findings into Priv-Esc, **or** `recce-service.sh` output into Vulnerabilities (auto-detected) | `--host IP` |
+| `ingest <loot>` | Fold on-target `recce-enum.sh`/`.ps1` findings into Priv-Esc, **or** `recce-service.sh` output into Vulnerabilities (auto-detected); also folds a `NET-*` topology block for the reachability/architecture maps | `--host IP` (else auto-resolved from the enum's interface IPs / hostname) |
 | `writeups [targets]` | One Word write-up per **real** finding + combined report | `--include-potential`, `--min-severity`, `--no-screenshots`, `--no-combined`, `--overwrite` |
 | `writeup <selector>` | **One** finding's write-up, pre-filled with looted/obtained evidence (F-id / CVE / IP / title; omit to list) | `--no-screenshots`, `--overwrite` |
 | `services [targets]` | Print the per-service enum command (`recce/scripts/`) for every open port found | `-a` (append the intrusive flag) |

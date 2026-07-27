@@ -195,6 +195,10 @@ class Host:
     ntlm: dict[str, Any] = field(default_factory=dict)  # domain/fqdn/os from NTLM
     smb_signing: str = ""                            # required / not required / unknown
     defenses: list[str] = field(default_factory=list)  # AV/EDR + posture (from recce-enum)
+    # Observed network topology from an on-target enum (its own interfaces/routes/ARP/
+    # established connections) — ground truth for host-to-host reachability, folded in
+    # via `ingest`. Keys: interfaces[], routes[], neighbors[], peers[].
+    topology: dict[str, Any] = field(default_factory=dict)
     incomplete_scan: bool = False  # the port sweep was truncated (host-timeout) -
                                    # the open-port list is PARTIAL, not authoritative
     enumerated: bool = False       # tool progress: service enumeration has run
