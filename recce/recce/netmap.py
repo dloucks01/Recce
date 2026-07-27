@@ -30,9 +30,14 @@ def _ipkey(ip):
         return (999, 999, 999, 999)
 
 
+_CLIENT_OS = ("windows 10", "windows 11", "windows 7", "windows 8",
+              "windows xp", "windows vista")
+
+
 def roles_for(host: Host) -> list[str]:
     """Every role tag that applies to a host, from its confirmed open services."""
     ports = host.open_ports
+    is_client = any(w in (host.os_name or "").lower() for w in _CLIENT_OS)
     tags: list[str] = []
     if "Domain Controller" in (host.roles or []):
         tags.append("DC")
@@ -42,15 +47,14 @@ def roles_for(host: Host) -> list[str]:
         tags.append("Web")
     if any(p.portid in _MAIL_PORTS for p in ports):
         tags.append("Mail")
-    if "DC" not in tags and any(smb.is_smb(p) for p in ports):
+    # SMB on a *server* OS is a File/SMB role; on a client OS it is just ordinary
+    # Windows workstation sharing (445 is open on every domain-joined workstation),
+    # so a plain client reads as a Workstation, not a file server — otherwise every
+    # workstation in the estate is mislabelled File/SMB.
+    if "DC" not in tags and not is_client and any(smb.is_smb(p) for p in ports):
         tags.append("File/SMB")
     if not tags:
-        osn = (host.os_name or "").lower()
-        if any(w in osn for w in ("windows 10", "windows 11", "windows 7",
-                                  "windows 8", "windows xp")):
-            tags.append("Workstation")
-        else:
-            tags.append("Host")
+        tags.append("Workstation" if is_client else "Host")
     return tags
 
 
@@ -155,51 +159,93 @@ def _label(s: str, n: int = 26) -> str:
     return (s[: n - 1] + "…") if len(s) > n else s
 
 
-def mermaid(hosts: list[Host], domains=None, ad_data=None) -> str:
-    """A Mermaid diagram: one subgraph per subnet (network segment), role-coloured
-    host nodes, plus AD domain nodes with DC-of edges and trust edges. DCs are
-    confirmed from SharpHound and hosts recce holds access to are marked. Paste into
-    any Mermaid viewer / GitHub / mermaid.live."""
+def _role_counts(rows: list[Host], dc_names: set) -> tuple[dict, dict]:
+    """(count, accessed-count) per role for a set of hosts, keyed by role label."""
+    counts: dict[str, int] = {}
+    acc: dict[str, int] = {}
+    for h in rows:
+        r = role_with_ad(h, dc_names)
+        counts[r] = counts.get(r, 0) + 1
+        if has_access(h):
+            acc[r] = acc.get(r, 0) + 1
+    return counts, acc
+
+
+def mermaid(hosts: list[Host], domains=None, ad_data=None, aggregate: bool = False) -> str:
+    """A Mermaid diagram: one subgraph per subnet (network segment), plus AD domain
+    nodes with DC-of edges and trust edges. DCs are confirmed from SharpHound and
+    hosts recce holds access to are marked. Paste into any Mermaid viewer / GitHub /
+    mermaid.live.
+
+    `aggregate=False` (default) draws every host as its own node — the detailed map.
+    `aggregate=True` collapses each subnet to one node per role with a count, for a
+    readable overview of a large estate.
+    """
     up = [h for h in hosts if h.is_up]
     if not up:
         return 'flowchart TB\n  empty["No hosts enumerated yet"]\n'
     dc_names = ad_dc_names(ad_data)
     by_subnet: dict[str, list[Host]] = {}
+    subnet_of: dict[str, str] = {}
     for h in up:
-        by_subnet.setdefault(h.subnet or "unknown", []).append(h)
+        sub = h.subnet or "unknown"
+        by_subnet.setdefault(sub, []).append(h)
+        subnet_of[h.ip] = sub
 
     out = ["flowchart TB"]
-    nid: dict[str, str] = {}
+    nid: dict[str, str] = {}                 # host ip -> node id (full mode)
+    agg_node: dict[tuple, str] = {}          # (subnet, role) -> node id (aggregate mode)
     i = 0
     for si, subnet in enumerate(sorted(by_subnet, key=_ipkey)):
         rows = sorted(by_subnet[subnet], key=lambda x: _ipkey(x.ip))
         out.append(f'  subgraph seg{si}["{_label(subnet, 22)} '
                    f'({len(rows)} host{"s" if len(rows) != 1 else ""})"]')
-        for h in rows:
-            node = f"h{i}"
-            nid[h.ip] = node
-            i += 1
-            role = role_with_ad(h, dc_names)
-            parts = [_label(h.ip, 18)]
-            if h.hostname:
-                parts.append(_label(h.hostname, 20))
-            parts.append(role + ("  ✓ access" if has_access(h) else ""))
-            if h.os_name:
-                parts.append(_label(h.os_name, 22))
-            out.append(f'    {node}["{"<br/>".join(parts)}"]:::{_ROLE_CLASS[role]}')
+        if aggregate:
+            counts, acc = _role_counts(rows, dc_names)
+            for role in _ROLE_ORDER:
+                if role not in counts:
+                    continue
+                node = f"a{si}{_ROLE_CLASS[role]}"
+                agg_node[(subnet, role)] = node
+                lbl = f"{role} ×{counts[role]}"
+                if acc.get(role):
+                    lbl += f"  ✓{acc[role]}"
+                out.append(f'    {node}["{lbl}"]:::{_ROLE_CLASS[role]}')
+        else:
+            for h in rows:
+                node = f"h{i}"
+                nid[h.ip] = node
+                i += 1
+                role = role_with_ad(h, dc_names)
+                parts = [_label(h.ip, 18)]
+                if h.hostname:
+                    parts.append(_label(h.hostname, 20))
+                parts.append(role + ("  ✓ access" if has_access(h) else ""))
+                if h.os_name:
+                    parts.append(_label(h.os_name, 22))
+                out.append(f'    {node}["{"<br/>".join(parts)}"]:::{_ROLE_CLASS[role]}')
         out.append("  end")
+
+    def _dc_src(ip: str):
+        """The node an AD 'DC of' edge should start from, in either mode."""
+        if aggregate:
+            return agg_node.get((subnet_of.get(ip), "DC"))
+        return nid.get(ip)
 
     # AD domains: a node per domain, an edge from each in-scope DC to it, and trust
     # edges between domains (all observed, never inferred).
     doms = domains or ad.derive_domains(up)
     dom_node: dict[str, str] = {}
+    seen_edges: set = set()
     for di, d in enumerate(doms or []):
         dn = f"dom{di}"
         dom_node[(d.name or "").lower()] = dn
         out.append(f'  {dn}(["AD domain<br/>{_label(d.name, 24)}"]):::domain')
         for ip in getattr(d, "dc_ips", []) or []:
-            if ip in nid:
-                out.append(f"  {nid[ip]} -->|DC of| {dn}")
+            src = _dc_src(ip)
+            if src and (src, dn) not in seen_edges:
+                seen_edges.add((src, dn))
+                out.append(f"  {src} -->|DC of| {dn}")
     for d in doms or []:
         src = dom_node.get((d.name or "").lower())
         for t in getattr(d, "trusts", []) or []:
@@ -244,15 +290,18 @@ _SEV_DOT = {"critical": "#C00000", "high": "#E8863D"}
 _ACCESS_STROKE = "#2E7D32"        # green outline for a host we hold access to
 
 
-def svg(hosts: list[Host], domains=None, ad_data=None) -> str:
+def svg(hosts: list[Host], domains=None, ad_data=None, aggregate=None) -> str:
     """A directly-viewable inline SVG of the network map — renders in any browser
     with no tools or JavaScript (and prints to PDF). Subnet columns of role-coloured
     host cards, AD domain nodes below with edges to their DCs, and a legend. Enriched
     from other findings: hosts recce **gained access** to get a green outline + ✓, and
     each card carries a **risk dot** for its worst confirmed finding; SharpHound
     ground-truth **confirms Domain Controllers** (a DC that only had 445 open is still
-    marked). For a large estate (>50 live hosts) it aggregates each subnet to role
-    counts instead of drawing every host, so it stays readable."""
+    marked).
+
+    `aggregate`: None (default) auto-picks — a large estate (>50 live hosts) collapses
+    each subnet to role counts so it stays readable; True/False force the aggregated
+    overview or the full per-host map regardless of size."""
     from html import escape as _e
     up = [h for h in hosts if h.is_up]
     if not up:
@@ -265,7 +314,7 @@ def svg(hosts: list[Host], domains=None, ad_data=None) -> str:
         by_subnet.setdefault(h.subnet or "unknown", []).append(h)
     subnets = sorted(by_subnet, key=_ipkey)
     doms = domains or ad.derive_domains(up)
-    aggregate = len(up) > 50
+    aggregate = (len(up) > 50) if aggregate is None else aggregate
     any_access = any(has_access(h) for h in up)
     any_risk = any(worst_severity(h) in _SEV_DOT for h in up)
 
@@ -615,36 +664,55 @@ def ad_svg(arch: dict, owned_labels=None) -> str:
             + "".join(els) + "</svg>")
 
 
-def dot(hosts: list[Host], domains=None, ad_data=None) -> str:
+def dot(hosts: list[Host], domains=None, ad_data=None, aggregate: bool = False) -> str:
     """Graphviz DOT of the same map (render: dot -Tpng architecture.dot -o arch.png).
-    DCs are confirmed from SharpHound and accessed hosts are marked."""
+    DCs are confirmed from SharpHound and accessed hosts are marked. `aggregate=False`
+    (default) draws every host; `aggregate=True` collapses each subnet to per-role
+    counts for a readable overview of a large estate."""
     up = [h for h in hosts if h.is_up]
     lines = ["digraph architecture {", "  rankdir=TB; node [shape=box, style=rounded];"]
     if not up:
         return lines[0] + '\n  empty [label="No hosts enumerated yet"];\n}\n'
     dc_names = ad_dc_names(ad_data)
     by_subnet: dict[str, list[Host]] = {}
+    subnet_of: dict[str, str] = {}
     for h in up:
-        by_subnet.setdefault(h.subnet or "unknown", []).append(h)
+        sub = h.subnet or "unknown"
+        by_subnet.setdefault(sub, []).append(h)
+        subnet_of[h.ip] = sub
     nid: dict[str, str] = {}
+    agg_node: dict[tuple, str] = {}
     i = 0
     for si, subnet in enumerate(sorted(by_subnet, key=_ipkey)):
         lines.append(f'  subgraph cluster_{si} {{ label="{subnet}"; style=dashed;')
-        for h in sorted(by_subnet[subnet], key=lambda x: _ipkey(x.ip)):
-            node = f"h{i}"
-            nid[h.ip] = node
-            i += 1
-            role = role_with_ad(h, dc_names) + ("  [ACCESS]" if has_access(h) else "")
-            label = "\\n".join(
-                [h.ip] + ([h.hostname] if h.hostname else [])
-                + [role] + ([h.os_name] if h.os_name else []))
-            lines.append(f'    {node} [label="{label}"];')
+        if aggregate:
+            counts, acc = _role_counts(by_subnet[subnet], dc_names)
+            for role in _ROLE_ORDER:
+                if role not in counts:
+                    continue
+                node = f"a{si}_{_ROLE_CLASS[role]}"
+                agg_node[(subnet, role)] = node
+                lbl = f"{role} x{counts[role]}" + (f"  ({acc[role]} access)" if acc.get(role) else "")
+                lines.append(f'    {node} [label="{lbl}"];')
+        else:
+            for h in sorted(by_subnet[subnet], key=lambda x: _ipkey(x.ip)):
+                node = f"h{i}"
+                nid[h.ip] = node
+                i += 1
+                role = role_with_ad(h, dc_names) + ("  [ACCESS]" if has_access(h) else "")
+                label = "\\n".join(
+                    [h.ip] + ([h.hostname] if h.hostname else [])
+                    + [role] + ([h.os_name] if h.os_name else []))
+                lines.append(f'    {node} [label="{label}"];')
         lines.append("  }")
+    seen_edges: set = set()
     for di, d in enumerate(domains or ad.derive_domains(up) or []):
         dn = f"dom{di}"
         lines.append(f'  {dn} [label="AD domain\\n{d.name}", shape=oval];')
         for ip in getattr(d, "dc_ips", []) or []:
-            if ip in nid:
-                lines.append(f'  {nid[ip]} -> {dn} [label="DC of"];')
+            src = agg_node.get((subnet_of.get(ip), "DC")) if aggregate else nid.get(ip)
+            if src and (src, dn) not in seen_edges:
+                seen_edges.add((src, dn))
+                lines.append(f'  {src} -> {dn} [label="DC of"];')
     lines.append("}")
     return "\n".join(lines) + "\n"
