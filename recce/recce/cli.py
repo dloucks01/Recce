@@ -372,6 +372,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
         # Two directly-viewable SVG network maps (open in any browser, no tools):
         #   * FULL     - every host as its own card (the detailed map)
         #   * OVERVIEW - each subnet collapsed to per-role counts (readable at scale)
+        _write("network-architecture.svg",
+               _standalone_svg(netmap.architecture_svg(hosts, domains, ad_blob)))
         _write("network-map-full.svg",
                _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=False)))
         _write("network-map-overview.svg",
@@ -403,7 +405,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
         print(f"[+] Reports written ({cov['done']}/{cov['total']} items reviewed, "
               f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}"
               f"\n    {paths['html']}\n    {paths['assets']} (architecture & assets)"
-              f"\n    network map: network-map-full.svg (every host) + "
+              f"\n    network map: network-architecture.svg (infra + segments) + "
+              f"network-map-full.svg (every host) + "
               f"network-map-overview.svg (by role) + network-map-tiered.svg "
               f"(DC→servers→hosts) — open in any browser, no tools")
         counts = store.count_issues()
