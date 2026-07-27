@@ -598,6 +598,26 @@ warning page for a bad-cert HTTPS target (still useful evidence). Non-web
 findings are evidenced by their captured tool output. Disable with
 `--no-screenshots`; filter with `--min-severity high`.
 
+## Sköll-Fieldkit integration (`skoll-export` / `skoll-import`)
+
+recce round-trips with the [**Sköll-Fieldkit**](https://github.com/dloucks01/skoll-fieldkit)
+exploitation kit, so enumeration seeds exploitation and proven findings flow back into the sheet:
+
+```bash
+recce skoll-export -o eng                     # -> eng/skoll/ : an attack plan Sköll consumes
+#   (in the Sköll checkout)
+#   python3 access/network/sweep.py triage --recce eng/skoll/recce-bridge.json
+#   ... exploit, then write up findings.json and:
+#   python3 report/gen_report.py findings.json --export-recce   # -> recce_findings.json
+recce skoll-import recce_findings.json -o eng  # proven findings -> Vulnerabilities sheet + report
+```
+
+`skoll-export` writes a severity-ranked `SKOLL.md` plan plus machine feeds (`recce-bridge.json`,
+`ports.gnmap`, `smb-null.txt`) that name the exact Sköll generator to run per host, weighting the
+hosts recce already confirmed vulnerable. `skoll-import` folds Sköll's proven findings back in as
+**confirmed** vulnerabilities (source `skoll`) and marks each host *access-gained* — idempotent, so
+run it as you go. Both stay stdlib-only / airgap-safe. Full guide: **[INTEGRATION.md](INTEGRATION.md)**.
+
 ## Coverage tracking
 
 The goal: know **at any moment** which systems/services you've looked at and
