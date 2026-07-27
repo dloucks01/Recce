@@ -71,6 +71,12 @@ All notable changes to recce are documented here. Dates are UTC.
   reachable from the assessment host, gateway IPs are real, and a switch is the standard
   L2-segment symbol (recce does not fingerprint physical switches). It's the headline of
   the report's Network map, with the per-host segment grid as the drill-down inventory.
+  **Topology-driven pass:** once an on-target enum's routes/interfaces are folded in via
+  `ingest`, the generic core is replaced by the **real gateway devices** (their IPs from
+  `NET-ROUTE default via …`), each segment connects to its actual gateway on the routed
+  backbone, and a **dual-homed pivot draws a direct segment-to-segment link** (observed
+  ground truth). Segments with no ingested route show "gateway not observed" rather than
+  guessing; it gets more accurate the more footholds you feed it.
 - **Tiered lateral map (`network-map-tiered.svg`).** A third network-map view that
   groups the estate into trust tiers — **Domain Controllers → servers → workstations &
   hosts** — with the AD domain, per-role counts and access (✓ owned) overlay, upward
