@@ -5443,8 +5443,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ing = sub.add_parser("ingest",
                          help="fold on-target recce-enum.sh/.ps1 output into Priv-Esc")
     ing.add_argument("loot", help="path to saved recce-enum output (-o / -OutFile file)")
-    ing.add_argument("--host", help="attach findings to this IP (default: match the "
-                                    "loot's hostname, else a 'local:<host>' entry)")
+    ing.add_argument("--host", help="attach findings to this IP (default: auto-resolve "
+                                    "from the enum's own NET-IFACE interface IPs, then "
+                                    "its hostname, else a 'local:<host>' entry)")
     ing.add_argument("-o", "--output-dir", default="engagement")
     ing.add_argument("--title", default="Recce Engagement")
     ing.set_defaults(func=cmd_ingest)

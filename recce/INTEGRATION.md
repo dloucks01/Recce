@@ -73,7 +73,8 @@ Sköll's on-target triage scripts (`linpriv/enum.sh`, `winpriv/enum.bat`) emit a
 block (interfaces, routes, ARP neighbours, live peers). Fold it in with the normal loot path:
 
 ```bash
-recce ingest enum-output.txt --host <ip> -o eng
+recce ingest enum-output.txt -o eng          # host auto-resolved from the enum's own
+                                              # interface IPs; add --host <ip> to force
 ```
 
 recce stores it on the host and draws a **ground-truth** host-to-host reachability map
