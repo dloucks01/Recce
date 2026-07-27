@@ -347,13 +347,25 @@ class ReachabilityTest(unittest.TestCase):
 class HostTileLayoutTest(unittest.TestCase):
     """Full map + reachability draw each system as a vertical tile: icon over IP."""
 
-    def test_full_map_tile_has_icon_and_centered_ip(self):
+    def test_full_map_tile_is_identity_rich(self):
         import xml.dom.minidom as md
         dc = _h("10.0.10.10", ports=[(389, "ldap"), (445, "microsoft-ds")],
                 roles=["Domain Controller"], hostname="dc01",
                 os_name="Windows Server 2019")
         s = netmap.svg([dc], aggregate=False)
         md.parseString(s)
-        self.assertIn('text-anchor="middle"', s)          # IP is centered under the icon
+        self.assertIn('text-anchor="middle"', s)          # IP centered under the icon
         self.assertIn("10.0.10.10", s)
-        self.assertIn("<g ", s)                            # a device glyph group is drawn
+        self.assertIn("<g ", s)                            # a device glyph
+        self.assertIn("dc01", s)                           # hostname
+        self.assertIn("Windows Server 2019", s)            # OS hint
+
+    def test_ip_derived_hostname_is_not_shown_twice(self):
+        self.assertEqual(netmap.real_hostname(
+            _h("10.0.10.10", hostname="10-0-10-10")), "")   # suppressed
+        self.assertEqual(netmap.real_hostname(
+            _h("10.0.10.10", hostname="dc01")), "dc01")     # real name kept
+        s = netmap.svg([_h("10.0.10.10", hostname="10-0-10-10",
+                           ports=[(445, "microsoft-ds")])], aggregate=False)
+        self.assertEqual(s.count("10.0.10.10"), 1)          # IP printed once
+        self.assertNotIn("10-0-10-10", s)
