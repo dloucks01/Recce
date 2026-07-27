@@ -4248,28 +4248,39 @@ def cmd_skoll_export(args: argparse.Namespace) -> int:
         store.close()
         return 1
     title = store.get_meta("engagement") or args.title
+    creds = store.all_credentials()
     out_dir = os.path.join(args.output_dir, "skoll")
     os.makedirs(out_dir, exist_ok=True)
-    bridge = skoll.build_bridge(hosts, engagement=title, generated=_now())
+    bridge = skoll.build_bridge(hosts, engagement=title, generated=_now(), creds=creds)
 
+    users = skoll.collect_users(hosts, creds)
+    cred_lines = skoll.collect_creds(creds)
     files = {
         "ports.gnmap": skoll.build_gnmap(hosts),
         "smb-null.txt": skoll.build_smb_null(hosts),
         "recce-bridge.json": json.dumps(bridge, indent=2) + "\n",
         "SKOLL.md": skoll.build_plan_md(bridge),
+        "users.txt": ("\n".join(users) + "\n") if users
+                     else "# (recce enumerated no usernames yet — run credenum / ldap)\n",
+        "creds.txt": ("# known credentials (reference for gen_shell.py) — "
+                      "domain/user:secret\n" + "\n".join(cred_lines) + "\n") if cred_lines
+                     else "# (recce holds no captured credentials yet)\n",
     }
     for name, content in files.items():
         with open(os.path.join(out_dir, name), "w") as fh:
             fh.write(content)
     _relax_perms(out_dir)
 
-    actionable = sum(1 for h in bridge["hosts"] if h["suggested"] or h["findings"])
+    actionable = sum(1 for h in bridge["hosts"]
+                     if h["suggested"] or h["findings"] or h["exploit_cmds"])
     print(f"[+] Sköll seed written to {out_dir}/ "
-          f"({len(bridge['hosts'])} live host(s), {actionable} with a Sköll route):")
+          f"({len(bridge['hosts'])} live host(s), {actionable} with a Sköll route, "
+          f"{len(users)} user(s), {len(creds)} cred(s)):")
     print(f"    ports.gnmap        -> sweep.py triage --nmap ports.gnmap")
     print(f"    smb-null.txt       -> sweep.py triage --nxc smb-null.txt")
     print(f"    recce-bridge.json  -> sweep.py triage --recce recce-bridge.json  (richest)")
     print(f"    SKOLL.md           -> human, severity-ranked attack plan")
+    print(f"    users.txt/creds.txt-> gen_spray.py --users / gen_shell.py")
     print(f"    Next (in the Sköll checkout): "
           f"python3 access/network/sweep.py triage --recce {out_dir}/recce-bridge.json")
     store.close()

@@ -29,11 +29,18 @@ recce skoll-export -o eng          # -> eng/skoll/{recce-bridge.json, ports.gnma
 ```
 
 - **`SKOLL.md`** — a human, severity-ranked "run **this** generator on **that** host, because …"
-  plan. Read this first.
+  plan. Read this first. Per host it lists the port→generator route, recce's confirmed findings, and
+  **ready-to-paste generator commands**:
+  - **version→CVE**: `gen_exploit.py find --service <p> --version <v>` for each identifiable service
+    recce fingerprinted (with any confirmed CVEs attached);
+  - **credential→shell / spray**: `gen_shell.py …` for each known credential that applies to the host,
+    plus a `gen_spray.py --users users.txt …` line per shell-capable service.
 - **`recce-bridge.json`** — the rich machine feed: each host's open ports, service/version, recce's
-  **confirmed** findings, and the suggested Sköll generator. In the Sköll checkout:
-  `python3 access/network/sweep.py triage --recce recce-bridge.json` ranks every host and floats
-  proven quick-wins to the top.
+  **confirmed** findings, the suggested Sköll generator, and the same `exploit_cmds` / `access_cmds`.
+  In the Sköll checkout: `python3 access/network/sweep.py triage --recce recce-bridge.json` ranks every
+  host, floats proven quick-wins to the top, and prints those commands under each host.
+- **`users.txt`** / **`creds.txt`** — the usernames recce enumerated (machine accounts dropped) and the
+  credentials it captured, in the form `gen_spray.py --users` and `gen_shell.py` expect.
 - **`ports.gnmap`** / **`smb-null.txt`** — an nmap-greppable + netexec-style handoff for Sköll's
   classic `sweep.py triage --nmap … --nxc …` path (works with an unmodified Sköll).
 

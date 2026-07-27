@@ -19,7 +19,11 @@ All notable changes to recce are documented here. Dates are UTC.
     findings and the suggested Sköll generator) for `sweep.py triage --recce`, plus a
     synthesized **`ports.gnmap`** and **`smb-null.txt`** for Sköll's unmodified
     `sweep.py triage --nmap/--nxc` path. Respects target selection (IPs / ranges / CIDR /
-    `@file`).
+    `@file`). The plan and bridge also carry **ready-to-paste generator commands** derived
+    from what recce enumerated: `gen_exploit.py find --service <p> --version <v>` per
+    fingerprinted service (with confirmed CVEs attached), and `gen_shell.py` /
+    `gen_spray.py` lines per host from recce's captured credentials and enumerated users —
+    exported alongside as **`users.txt`** and **`creds.txt`**.
   - **`recce skoll-import <findings.json> -o eng`** folds a Sköll findings file back in —
     the KB-enriched `recce_findings.json` (from `gen_report.py --export-recce`) or a raw
     `findings.json`. Each proven finding becomes a **confirmed** vulnerability (source

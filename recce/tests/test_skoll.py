@@ -14,7 +14,7 @@ import unittest
 
 from recce import cli
 from recce import skoll
-from recce.models import Host, Port, Vuln
+from recce.models import Account, Credential, Host, Port, Vuln
 from recce.store import Store
 
 
@@ -101,6 +101,71 @@ class ExportTest(unittest.TestCase):
         self.assertIn("CVE-2017-0143", md)
 
 
+class GeneratorWiringTest(unittest.TestCase):
+
+    def test_exploit_cmds_only_for_real_versions(self):
+        h = Host(ip="10.0.20.5", enumerated=True)
+        h.ports = [
+            Port(portid=22, state="open", service="ssh", product="OpenSSH", version="8.2p1"),
+            Port(portid=445, state="open", service="microsoft-ds",
+                 product="Microsoft Windows Server 2019", version=""),   # no version
+            Port(portid=389, state="open", service="ldap",
+                 product="Microsoft Windows Active Directory LDAP",
+                 version="Domain: corp.local"),                          # banner, not a version
+        ]
+        cmds = skoll._exploit_cmds(h)
+        svcs = {c["service"] for c in cmds}
+        self.assertEqual(svcs, {"openssh"})                # only the real-version, non-generic one
+        self.assertIn('--service openssh --version "8.2p1"', cmds[0]["cmd"])
+
+    def test_exploit_cmds_attach_confirmed_cves(self):
+        h = Host(ip="10.0.20.5", enumerated=True)
+        h.ports = [Port(portid=80, state="open", service="http",
+                        product="Apache httpd", version="2.4.41")]
+        h.vulns = [Vuln(ip="10.0.20.5", port=80, protocol="tcp", script_id="vulners",
+                        title="Apache vulns", severity="critical", confidence="confirmed",
+                        ids=["CVE-2021-41773"])]
+        cmds = skoll._exploit_cmds(h)
+        self.assertEqual(cmds[0]["service"], "apache")
+        self.assertIn("CVE-2021-41773", cmds[0]["cves"])
+
+    def test_collect_users_dedupes_and_drops_machine_accounts(self):
+        h = Host(ip="10.0.10.10", enumerated=True)
+        h.accounts = [Account(ip="10.0.10.10", source="ldap", kind="user", name="jdoe"),
+                      Account(ip="10.0.10.10", source="ldap", kind="user", name="WS01$"),
+                      Account(ip="10.0.10.10", source="ldap", kind="group", name="Admins")]
+        creds = [Credential(username="JDOE", secret="x"),          # dup (case-insensitive)
+                 Credential(username="svc", secret="y", domain="corp.local")]
+        users = skoll.collect_users([h], creds)
+        self.assertIn("jdoe", users)
+        self.assertIn("svc", users)
+        self.assertNotIn("WS01$", users)                           # machine account dropped
+        self.assertEqual(len([u for u in users if u.lower() == "jdoe"]), 1)
+
+    def test_collect_creds_formats_password_and_hash(self):
+        lines = skoll.collect_creds([
+            Credential(username="svc", secret="P@ss", domain="corp.local", source="secretsdump"),
+            Credential(username="adm", secret="31d6...", kind="nthash", source="secretsdump"),
+        ])
+        self.assertTrue(any("corp.local/svc:P@ss" in ln for ln in lines))
+        self.assertTrue(any("hash:31d6" in ln for ln in lines))
+
+    def test_access_cmds_domain_cred_yields_shell_and_spray(self):
+        h = Host(ip="10.0.10.10", enumerated=True)
+        h.ports = [Port(portid=445, state="open", service="microsoft-ds")]
+        creds = [Credential(username="svc", secret="P@ss", domain="corp.local")]
+        cmds = skoll._access_cmds(h, creds)
+        self.assertTrue(any("gen_shell.py --target 10.0.10.10 --user svc --pass 'P@ss'"
+                            in c and "--proto smb" in c for c in cmds))
+        self.assertTrue(any("gen_spray.py --proto smb --users users.txt" in c for c in cmds))
+
+    def test_access_cmds_empty_without_shell_proto(self):
+        h = Host(ip="10.0.20.5", enumerated=True)
+        h.ports = [Port(portid=80, state="open", service="http")]   # no shell proto
+        self.assertEqual(skoll._access_cmds(h, [Credential(username="x", secret="y",
+                                                           domain="d")]), [])
+
+
 class ImportTest(unittest.TestCase):
 
     def test_parse_affected_host(self):
@@ -168,7 +233,8 @@ class RoundTripCliTest(unittest.TestCase):
         rc = cli.cmd_skoll_export(self._args())
         self.assertEqual(rc, 0)
         sk = os.path.join(self.eng, "skoll")
-        for name in ("ports.gnmap", "smb-null.txt", "recce-bridge.json", "SKOLL.md"):
+        for name in ("ports.gnmap", "smb-null.txt", "recce-bridge.json", "SKOLL.md",
+                     "users.txt", "creds.txt"):
             self.assertTrue(os.path.exists(os.path.join(sk, name)), name)
         bridge = json.load(open(os.path.join(sk, "recce-bridge.json")))
         self.assertEqual(len(bridge["hosts"]), 2)
