@@ -543,3 +543,143 @@ def ad_svg(arch: dict, owned_labels=None) -> str:
             f'height="{int(height)}" role="img" aria-label="AD tier-0 architecture" '
             f'font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'
             + "".join(els) + "</svg>")
+
+
+# --- tiered lateral / reachability view -----------------------------------------
+
+# Role -> trust tier. Tier 0 = Domain Controllers, tier 1 = servers, tier 2 = clients.
+_TIER_OF = {"DC": 0, "DB": 1, "Web": 1, "Mail": 1, "File/SMB": 1,
+            "Workstation": 2, "Host": 2}
+_TIER_LABEL = {0: "Tier 0 · Domain Controllers", 1: "Tier 1 · Servers",
+               2: "Tier 2 · Workstations & hosts"}
+# Remote-auth protocols an attacker pivots over once holding a credential/hash. This is
+# the *credentialed pivot surface* recce can justify from open ports — NOT a claim that
+# any two hosts can route to each other (recce never tests host-to-host reachability).
+_REACH = [("SMB", (445, 139)), ("WinRM", (5985, 5986)), ("RDP", (3389,)),
+          ("SSH", (22,)), ("MSSQL", (1433,))]
+
+
+def reach_counts(hosts: list[Host]) -> list[tuple]:
+    """[(proto, host-count)] for the remote-auth pivot surface, present protocols only."""
+    up = [h for h in hosts if h.is_up]
+    out = []
+    for name, ports in _REACH:
+        n = sum(1 for h in up if {p.portid for p in h.open_ports} & set(ports))
+        if n:
+            out.append((name, n))
+    return out
+
+
+def tiered_svg(hosts: list[Host], domains=None, ad_data=None) -> str:
+    """A directly-viewable inline SVG of the estate as trust tiers — Domain Controllers
+    (tier 0) above servers (tier 1) above workstations/hosts (tier 2) — with the
+    credentialed lateral-movement surface overlaid.
+
+    Honest by construction: recce enumerates each host independently and does NOT test
+    which hosts can route to which. So the tiers are a *logical* grouping by role, the
+    upward arrows show the direction an attacker escalates (client → server → DC), and
+    the pivot legend lists the services that accept remote authentication (how you move
+    once you hold a credential) — none of it asserts physical/firewall reachability."""
+    from html import escape as _e
+    up = [h for h in hosts if h.is_up]
+    if not up:
+        return ('<svg viewBox="0 0 340 60" width="340" height="60" role="img" '
+                'aria-label="Tiered network map"><text x="12" y="34" font-size="14" '
+                'fill="#5f6f6e">No hosts enumerated yet.</text></svg>')
+    dc_names = ad_dc_names(ad_data)
+    tiers: dict[int, dict[str, list]] = {0: {}, 1: {}, 2: {}}
+    for h in up:
+        role = role_with_ad(h, dc_names)
+        t = _TIER_OF.get(role, 2)
+        cell = tiers[t].setdefault(role, [0, 0])
+        cell[0] += 1
+        if has_access(h):
+            cell[1] += 1
+    doms = domains or ad.derive_domains(up)
+    reach = reach_counts(up)
+    footholds = sum(1 for h in up if has_access(h))
+
+    W, m = 900, 18
+    bandH, gap, top = 108, 52, 46
+    chipW, chipH, chipGap = 138, 42, 12
+    band_y = {t: top + t * (bandH + gap) for t in (0, 1, 2)}
+    H = band_y[2] + bandH + 74               # room for the pivot legend + caption
+    cx = W / 2
+    els = [
+        '<defs><marker id="tup" markerWidth="10" markerHeight="10" refX="5" refY="8" '
+        'orient="auto"><path d="M5,0 L10,8 L0,8 Z" fill="#6b4fa0"/></marker></defs>',
+        f'<rect x="0" y="0" width="{W}" height="{H}" fill="#ffffff"/>',
+        f'<text x="{m}" y="26" font-size="15" font-weight="700" fill="#115e59">'
+        'Tiered view — DC → servers → workstations</text>',
+    ]
+
+    # upward escalation arrows first (behind the bands), client -> server -> DC
+    for t in (2, 1):
+        y1 = band_y[t]
+        y2 = band_y[t - 1] + bandH
+        els.append(f'<line x1="{cx:.0f}" y1="{y1}" x2="{cx:.0f}" y2="{y2 + 4}" '
+                   f'stroke="#b08cc0" stroke-width="2" stroke-dasharray="5 4" '
+                   f'marker-end="url(#tup)"/>')
+        els.append(f'<rect x="{cx + 8:.0f}" y="{(y1 + y2) / 2 - 9:.0f}" width="132" '
+                   f'height="18" rx="9" fill="#f3eefb" stroke="#6b4fa0"/>')
+        els.append(f'<text x="{cx + 74:.0f}" y="{(y1 + y2) / 2 + 4:.0f}" '
+                   f'text-anchor="middle" font-size="10.5" fill="#6b4fa0">'
+                   f'lateral / escalate</text>')
+
+    for t in (0, 1, 2):
+        y = band_y[t]
+        pop = sum(c[0] for c in tiers[t].values())
+        els.append(f'<rect x="{m}" y="{y}" width="{W - 2 * m}" height="{bandH}" rx="10" '
+                   f'fill="#fafcfb" stroke="#e3e8e7"/>')
+        els.append(f'<text x="{m + 14}" y="{y + 22}" font-size="12.5" font-weight="700" '
+                   f'fill="#115e59">{_e(_TIER_LABEL[t])} '
+                   f'<tspan fill="#5f6f6e" font-weight="400">({pop} host'
+                   f'{"s" if pop != 1 else ""})</tspan></text>')
+        if not tiers[t]:
+            els.append(f'<text x="{m + 14}" y="{y + 64}" font-size="11.5" '
+                       f'fill="#b7c0be">— none observed —</text>')
+        cxp = m + 14
+        for role in _ROLE_ORDER:
+            if role not in tiers[t]:
+                continue
+            cnt, acc = tiers[t][role]
+            fill, stroke = _ROLE_COLOR.get(role, ("#ffffff", "#8a9997"))
+            cy = y + 34
+            els.append(f'<rect x="{cxp}" y="{cy}" width="{chipW}" height="{chipH}" rx="8" '
+                       f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>')
+            els.append(f'<text x="{cxp + 10}" y="{cy + 18}" font-size="12" '
+                       f'font-weight="700" fill="#1a2422">{_e(role)} ×{cnt}</text>')
+            sub = f"{acc} owned ✓" if acc else "&#8203;"
+            els.append(f'<text x="{cxp + 10}" y="{cy + 33}" font-size="10.5" '
+                       f'fill="#2E7D32">{sub}</text>')
+            cxp += chipW + chipGap
+        # AD domain pill in the tier-0 band, linked to it
+        if t == 0 and doms:
+            dn = ", ".join(d.name for d in doms if d.name)[:40] or "AD"
+            dx = W - m - 210
+            els.append(f'<rect x="{dx}" y="{y + 30}" width="196" height="46" rx="10" '
+                       f'fill="{_DOMAIN_COLOR[0]}" stroke="{_DOMAIN_COLOR[1]}" '
+                       f'stroke-width="2"/>')
+            els.append(f'<text x="{dx + 12}" y="{y + 50}" font-size="11.5" '
+                       f'font-weight="700" fill="#1a2422">AD domain</text>')
+            els.append(f'<text x="{dx + 12}" y="{y + 67}" font-size="11" '
+                       f'fill="#3a4644">{_e(dn)}</text>')
+
+    # pivot legend
+    ly = band_y[2] + bandH + 24
+    parts = " · ".join(f"{p} ×{n}" for p, n in reach) or "none observed"
+    els.append(f'<text x="{m}" y="{ly}" font-size="12" font-weight="700" '
+               f'fill="#1a2422">Credentialed pivot surface: '
+               f'<tspan font-weight="400">{_e(parts)}</tspan>'
+               f'<tspan fill="#2E7D32">   ·   {footholds} foothold'
+               f'{"s" if footholds != 1 else ""} held</tspan></text>')
+    els.append(f'<text x="{m}" y="{ly + 20}" font-size="10.5" fill="#5f6f6e">'
+               'Logical view: tiers group hosts by role and the arrows show the '
+               'escalation direction. The pivot surface lists services that accept '
+               'remote auth — recce does not test host-to-host network reachability.'
+               '</text>')
+
+    return (f'<svg viewBox="0 0 {W} {int(H)}" width="{W}" height="{int(H)}" role="img" '
+            f'aria-label="Tiered network map" '
+            f'font-family="system-ui,Segoe UI,Arial,sans-serif">'
+            + "".join(els) + "</svg>")
