@@ -274,3 +274,22 @@ class TieredMapTest(unittest.TestCase):
         self.assertTrue(s.startswith("<svg"))
         md.parseString(s)
         self.assertIn("No hosts", s)
+
+
+class RoleGlyphTest(unittest.TestCase):
+
+    def test_role_kind_maps_to_three_device_classes(self):
+        self.assertEqual(netmap.role_kind("DC"), "dc")
+        for r in ("DB", "Web", "Mail", "File/SMB"):
+            self.assertEqual(netmap.role_kind(r), "server")
+        for r in ("Workstation", "Host"):
+            self.assertEqual(netmap.role_kind(r), "workstation")
+
+    def test_glyphs_are_well_formed_svg_fragments(self):
+        import xml.dom.minidom as md
+        for kind in ("dc", "server", "workstation"):
+            g = netmap.glyph(kind, 10, 10, 18, "#1f4e9c")
+            md.parseString(f"<svg xmlns='http://www.w3.org/2000/svg'>{g}</svg>")
+        leg = netmap.glyph_legend(0, 0)
+        md.parseString(f"<svg xmlns='http://www.w3.org/2000/svg'>{leg}</svg>")
+        self.assertIn("Domain Controller", leg)
