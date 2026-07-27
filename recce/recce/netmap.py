@@ -1059,8 +1059,9 @@ def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> st
 
 
 # --- logical architecture (infrastructure + segments) ----------------------------
-
 _TIER_SEG = {0: "Edge / DMZ", 1: "Servers", 2: "Workstations"}
+_SEG_W = 250
+_ZONE_H = 30 + 4 * 17 + 22          # header + up to 4 role rows + a badge row
 
 
 def _segment_gateway(rows: list[Host]) -> str:
@@ -1083,26 +1084,10 @@ def _segment_tier(sub: str, counts: dict) -> int:
     return 2
 
 
-def architecture_svg(hosts: list[Host], domains=None, ad_data=None) -> str:
-    """A directly-viewable inline SVG of the *logical network architecture*: an AD-domain
-    node over a routed core, with each segment hung off the core through its gateway
-    (a router, or a firewall for an edge/DMZ segment — IP from ingested host routes) and
-    an L2 switch, then the segment's role make-up and owned/severity badges. Segments are
-    stacked by tier (edge/DMZ → servers → workstations).
-
-    Honest by construction: every segment shown was reachable from the assessment host
-    (hence the core); gateway IPs are real (from `NET-ROUTE default via …` folded in by
-    `ingest`); a switch is the standard symbol for the L2 segment, not a fingerprinted
-    device — recce does not enumerate physical switches."""
-    from html import escape as _e
-    up = [h for h in hosts if h.is_up]
-    if not up:
-        return ('<svg viewBox="0 0 360 60" width="360" height="60" role="img" '
-                'aria-label="Network architecture"><text x="12" y="34" font-size="14" '
-                'fill="#5f6f6e">No hosts enumerated yet.</text></svg>')
-    dc_names = ad_dc_names(ad_data)
+def _segments(hosts: list[Host], dc_names: set) -> list[dict]:
+    """Per-subnet summary rows (role counts, gateway, tier, owned/risk) for the map."""
     by_subnet: dict[str, list[Host]] = {}
-    for h in up:
+    for h in hosts:
         by_subnet.setdefault(h.subnet or "unknown", []).append(h)
     segs = []
     for sub, rows in by_subnet.items():
@@ -1112,27 +1097,58 @@ def architecture_svg(hosts: list[Host], domains=None, ad_data=None) -> str:
         worst = next((s for s in ("critical", "high", "medium", "low")
                       if any(worst_severity(h) == s for h in rows)), "")
         segs.append({
-            "sub": sub, "n": len(rows), "counts": counts,
-            "gw": _segment_gateway(rows),
-            "owned": sum(1 for h in rows if has_access(h)),
-            "worst": worst, "dc": any(role_with_ad(h, dc_names) == "DC" for h in rows),
+            "sub": sub, "n": len(rows), "counts": counts, "gw": _segment_gateway(rows),
+            "owned": sum(1 for h in rows if has_access(h)), "worst": worst,
+            "dc": any(role_with_ad(h, dc_names) == "DC" for h in rows),
             "tier": _segment_tier(sub, counts),
         })
     segs.sort(key=lambda z: (z["tier"], _ipkey(z["sub"].split()[0])))
-    doms = domains or ad.derive_domains(up)
+    return segs
 
-    m, segW, segGap, PER = 26, 250, 28, 4
-    chain = 48                                 # core -> gateway -> zone connector height
-    ncol = min(PER, len(segs))
-    nrow = -(-len(segs) // ncol)
-    W = m * 2 + ncol * segW + (ncol - 1) * segGap
-    els = [f'<text x="{m}" y="24" font-size="16" font-weight="700" fill="#0f766e">'
-           'Network architecture <tspan font-size="11" font-weight="400" fill="#5f6f6e">'
-           '· logical — infrastructure &amp; segments</tspan></text>']
-    y = 40
-    # AD domain node(s)
-    ad_anchor = []
-    adx = m
+
+def _draw_zone(zx: float, zy: float, z: dict) -> list:
+    """SVG for one segment zone box (switch header + role make-up + owned/severity)."""
+    from html import escape as _e
+    els = []
+    acc = "#C00000" if z["dc"] else "#cdd8d6"
+    els.append(f'<rect x="{zx}" y="{zy}" width="{_SEG_W}" height="{_ZONE_H}" rx="10" '
+               f'fill="#ffffff" stroke="{acc}" stroke-width="{2 if z["dc"] else 1.3}"/>')
+    els.append(f'<rect x="{zx}" y="{zy}" width="{_SEG_W}" height="26" rx="10" '
+               f'fill="#f2f6f5"/><rect x="{zx}" y="{zy + 16}" width="{_SEG_W}" '
+               f'height="10" fill="#f2f6f5"/>')
+    els.append(net_glyph("switch", zx + 8, zy + 4, 17, "#5f6f6e"))
+    els.append(f'<text x="{zx + 32}" y="{zy + 17}" font-size="11.5" font-weight="700" '
+               f'fill="#115e59">{_x(z["sub"], 18)}</text>')
+    els.append(f'<text x="{zx + _SEG_W - 10}" y="{zy + 17}" text-anchor="end" '
+               f'font-size="9.5" fill="#5f6f6e">{_TIER_SEG[z["tier"]]} · {z["n"]}</text>')
+    ry, shown = zy + 42, 0
+    for role in _ROLE_ORDER:
+        if role not in z["counts"] or shown >= 4:
+            continue
+        els.append(glyph(role_kind(role), zx + 14, ry - 11, 15, _ROLE_COLOR[role][1]))
+        els.append(f'<text x="{zx + 36}" y="{ry}" font-size="11" fill="#3a4644">'
+                   f'{z["counts"][role]} {_e(role)}</text>')
+        ry += 17
+        shown += 1
+    by, bx = zy + _ZONE_H - 12, zx + 12
+    if z["owned"]:
+        els.append(f'<circle cx="{bx + 6}" cy="{by - 4}" r="7" fill="{_ACCESS_STROKE}"/>'
+                   f'<text x="{bx + 6}" y="{by - 1}" text-anchor="middle" font-size="9" '
+                   f'font-weight="700" fill="#fff">✓</text>')
+        els.append(f'<text x="{bx + 18}" y="{by - 1}" font-size="10" fill="#3a4644">'
+                   f'{z["owned"]} owned</text>')
+    if z["worst"] in _SEV_CHIP:
+        col, lab = _SEV_CHIP[z["worst"]]
+        els.append(f'<rect x="{zx + _SEG_W - 46}" y="{by - 15}" width="34" height="14" '
+                   f'rx="7" fill="#fff" stroke="{col}" stroke-width="1.2"/>'
+                   f'<text x="{zx + _SEG_W - 29}" y="{by - 5}" text-anchor="middle" '
+                   f'font-size="9" font-weight="700" fill="{col}">{lab}</text>')
+    return els
+
+
+def _ad_nodes(doms, y, m):
+    """Draw AD domain node(s) at row y; returns (svg list, [anchor_x], bottom_y)."""
+    els, anchors, adx = [], [], m
     for d in doms or []:
         w = 250
         els.append(f'<rect x="{adx}" y="{y}" width="{w}" height="34" rx="8" '
@@ -1142,84 +1158,197 @@ def architecture_svg(hosts: list[Host], domains=None, ad_data=None) -> str:
         dcs = ", ".join(d.dc_ips) if getattr(d, "dc_ips", None) else "no DC seen"
         els.append(f'<text x="{adx + 12}" y="{y + 28}" font-size="10" fill="#7a3a3a">'
                    f'DCs: {_x(dcs, 32)}</text>')
-        ad_anchor.append(adx + w / 2)
+        anchors.append(adx + w / 2)
         adx += w + 20
-    if doms:
-        y += 48
-    # routed core bar
+    return els, anchors, (y + 34 if doms else y)
+
+
+def architecture_svg(hosts: list[Host], domains=None, ad_data=None) -> str:
+    """A directly-viewable inline SVG of the *logical network architecture*.
+
+    Without ingested topology: an AD-domain node over a routed core, each segment hung
+    off the core through its gateway (router, or firewall for an edge/DMZ segment) and an
+    L2 switch, stacked by tier. Every segment shown was reachable from the assessment
+    host; a switch is the standard L2-segment symbol (recce does not fingerprint physical
+    switches).
+
+    **With topology ingested** (an on-target enum's routes/interfaces folded in via
+    `ingest`): the generic core is replaced by the **real gateway devices** (their IPs
+    from `NET-ROUTE default via …`), segments connect to their actual gateway, and
+    **dual-homed pivots draw a direct segment-to-segment link** — the observed way those
+    segments connect. It gets more accurate the more footholds you feed it."""
+    up = [h for h in hosts if h.is_up]
+    if not up:
+        return ('<svg viewBox="0 0 360 60" width="360" height="60" role="img" '
+                'aria-label="Network architecture"><text x="12" y="34" font-size="14" '
+                'fill="#5f6f6e">No hosts enumerated yet.</text></svg>')
+    dc_names = ad_dc_names(ad_data)
+    segs = _segments(up, dc_names)
+    doms = domains or ad.derive_domains(up)
+    has_topo = any((getattr(h, "topology", None) or {}) for h in up)
+    if has_topo:
+        return _arch_topology(up, segs, doms)
+    return _arch_logical(up, segs, doms)
+
+
+def _svg_wrap(W, H, els, label="Network architecture"):
+    return (f'<svg viewBox="0 0 {int(W)} {int(H)}" width="{int(W)}" height="{int(H)}" '
+            f'role="img" aria-label="{label}" '
+            f'font-family="system-ui,Segoe UI,Arial,sans-serif">'
+            f'<rect width="{int(W)}" height="{int(H)}" fill="#ffffff"/>'
+            + "".join(els) + "</svg>")
+
+
+def _arch_logical(up, segs, doms):
+    """Core-based layout used when no host topology has been ingested."""
+    m, segGap, PER, chain = 26, 28, 4, 48
+    ncol = min(PER, len(segs))
+    nrow = -(-len(segs) // ncol)
+    W = m * 2 + ncol * _SEG_W + (ncol - 1) * segGap
+    els = ['<text x="26" y="24" font-size="16" font-weight="700" fill="#0f766e">'
+           'Network architecture <tspan font-size="11" font-weight="400" fill="#5f6f6e">'
+           '· logical — infrastructure &amp; segments</tspan></text>']
+    ad_els, ad_anchors, ady = _ad_nodes(doms, 40, m)
+    els += ad_els
+    y = ady + (14 if doms else 0)
     coreY, coreH = y + 6, 30
     els.append(f'<rect x="{m}" y="{coreY}" width="{W - 2 * m}" height="{coreH}" rx="15" '
                f'fill="#e7efee" stroke="#0f766e" stroke-width="1.6"/>')
-    els.append(f'<text x="{W / 2:.0f}" y="{coreY + 20}" text-anchor="middle" '
-               f'font-size="12" font-weight="700" fill="#0f766e">Routed core — all '
-               f'{len(up)} host(s) reachable from the assessment host</text>')
-    for ax in ad_anchor:
-        els.append(f'<line x1="{ax:.0f}" y1="{y}" x2="{ax:.0f}" y2="{coreY}" '
+    els.append(f'<text x="{W / 2:.0f}" y="{coreY + 20}" text-anchor="middle" font-size="12" '
+               f'font-weight="700" fill="#0f766e">Routed core — all {len(up)} host(s) '
+               f'reachable from the assessment host</text>')
+    for ax in ad_anchors:
+        els.append(f'<line x1="{ax:.0f}" y1="{ady}" x2="{ax:.0f}" y2="{coreY}" '
                    f'stroke="{_DOMAIN_COLOR[1]}" stroke-width="1.4" stroke-dasharray="4 3"/>')
-
-    zoneH = 30 + 4 * 17 + 22
     gy0 = coreY + coreH
     for i, z in enumerate(segs):
         r, c = divmod(i, ncol)
-        zx = m + c * (segW + segGap)
-        chainTop = gy0 + r * (chain + zoneH + 26)
-        cx = zx + segW / 2
+        zx = m + c * (_SEG_W + segGap)
+        chainTop = gy0 + r * (chain + _ZONE_H + 26)
+        cx = zx + _SEG_W / 2
         zy = chainTop + chain
-        # connector: core -> gateway icon -> zone
-        els.append(f'<line x1="{cx:.0f}" y1="{chainTop}" x2="{cx:.0f}" '
-                   f'y2="{zy}" stroke="#9fb3b0" stroke-width="1.4"/>')
+        els.append(f'<line x1="{cx:.0f}" y1="{chainTop}" x2="{cx:.0f}" y2="{zy}" '
+                   f'stroke="#9fb3b0" stroke-width="1.4"/>')
         gwkind = "firewall" if z["tier"] == 0 else "router"
         gcol = "#C15A11" if gwkind == "firewall" else "#1f4e9c"
         els.append(f'<rect x="{cx - 15:.0f}" y="{chainTop + 12}" width="30" height="24" '
                    f'rx="6" fill="#ffffff" stroke="{gcol}" stroke-width="1.2"/>')
         els.append(net_glyph(gwkind, cx - 11, chainTop + 14, 20, gcol))
-        gwlab = (gwkind + (f" · {z['gw']}" if z["gw"] else " (gateway)"))
+        gwlab = gwkind + (f" · {z['gw']}" if z["gw"] else " (gateway)")
         els.append(f'<text x="{cx + 20:.0f}" y="{chainTop + 28}" font-size="9.5" '
                    f'fill="#6f7a78">{_x(gwlab, 22)}</text>')
-        # zone box (DC segments get a red accent)
-        acc = "#C00000" if z["dc"] else "#cdd8d6"
-        els.append(f'<rect x="{zx}" y="{zy}" width="{segW}" height="{zoneH}" rx="10" '
-                   f'fill="#ffffff" stroke="{acc}" stroke-width="{2 if z["dc"] else 1.3}"/>')
-        els.append(f'<rect x="{zx}" y="{zy}" width="{segW}" height="26" rx="10" '
-                   f'fill="#f2f6f5"/><rect x="{zx}" y="{zy + 16}" width="{segW}" '
-                   f'height="10" fill="#f2f6f5"/>')
-        els.append(net_glyph("switch", zx + 8, zy + 4, 17, "#5f6f6e"))
-        els.append(f'<text x="{zx + 32}" y="{zy + 17}" font-size="11.5" font-weight="700" '
-                   f'fill="#115e59">{_x(z["sub"], 18)}</text>')
-        els.append(f'<text x="{zx + segW - 10}" y="{zy + 17}" text-anchor="end" '
-                   f'font-size="9.5" fill="#5f6f6e">{_TIER_SEG[z["tier"]]} · {z["n"]}</text>')
-        ry = zy + 42
-        shown = 0
-        for role in _ROLE_ORDER:
-            if role not in z["counts"] or shown >= 4:
-                continue
-            els.append(glyph(role_kind(role), zx + 14, ry - 11, 15, _ROLE_COLOR[role][1]))
-            els.append(f'<text x="{zx + 36}" y="{ry}" font-size="11" fill="#3a4644">'
-                       f'{z["counts"][role]} {_e(role)}</text>')
-            ry += 17
-            shown += 1
-        by = zy + zoneH - 12
-        bx = zx + 12
-        if z["owned"]:
-            els.append(f'<circle cx="{bx + 6}" cy="{by - 4}" r="7" fill="{_ACCESS_STROKE}"/>'
-                       f'<text x="{bx + 6}" y="{by - 1}" text-anchor="middle" font-size="9" '
-                       f'font-weight="700" fill="#fff">✓</text>')
-            els.append(f'<text x="{bx + 18}" y="{by - 1}" font-size="10" fill="#3a4644">'
-                       f'{z["owned"]} owned</text>')
-        if z["worst"] in _SEV_CHIP:
-            col, lab = _SEV_CHIP[z["worst"]]
-            els.append(f'<rect x="{zx + segW - 46}" y="{by - 15}" width="34" height="14" '
-                       f'rx="7" fill="#fff" stroke="{col}" stroke-width="1.2"/>'
-                       f'<text x="{zx + segW - 29}" y="{by - 5}" text-anchor="middle" '
-                       f'font-size="9" font-weight="700" fill="{col}">{lab}</text>')
-
-    H = gy0 + nrow * (chain + zoneH + 26) + 40
+        els += _draw_zone(zx, zy, z)
+    H = gy0 + nrow * (chain + _ZONE_H + 26) + 40
     els.append(f'<text x="{m}" y="{H - 14:.0f}" font-size="9.5" fill="#8a9997">'
-               'Logical view: a switch = one L2 segment; router/firewall gateways and their '
-               'IPs come from ingested host routes — recce does not fingerprint physical '
-               'switches. Every segment was reachable from the assessment host.</text>')
-    return (f'<svg viewBox="0 0 {W} {int(H)}" width="{W}" '
-            f'height="{int(H)}" role="img" aria-label="Network architecture" '
-            f'font-family="system-ui,Segoe UI,Arial,sans-serif">'
-            f'<rect width="{W}" height="{int(H)}" fill="#ffffff"/>'
-            + "".join(els) + "</svg>")
+               'Logical view: a switch = one L2 segment; gateways are shown per segment '
+               '(feed an on-target enum\'s routes via `ingest` for real gateway IPs and '
+               'inter-segment links). Every segment was reachable from the assessment host.'
+               '</text>')
+    return _svg_wrap(W, H, els)
+
+
+def _arch_topology(up, segs, doms):
+    """Topology-driven layout: real gateway devices (from ingested routes) with segments
+    hung off their actual gateway, plus direct pivot links between dual-homed segments."""
+    m, segGap = 26, 28
+    ncol = min(5, len(segs))
+    nrow = -(-len(segs) // ncol)
+    W = m * 2 + ncol * _SEG_W + (ncol - 1) * segGap
+    sub_index = {z["sub"]: i for i, z in enumerate(segs)}
+
+    els = ['<text x="26" y="24" font-size="16" font-weight="700" fill="#0f766e">'
+           'Network architecture <tspan font-size="11" font-weight="400" fill="#5f6f6e">'
+           '· topology-driven — real gateways &amp; inter-segment links</tspan></text>']
+    ad_els, ad_anchors, ady = _ad_nodes(doms, 40, m)
+    els += ad_els
+    backboneY = ady + (24 if doms else 6) + 18
+    # zone positions
+    rowGap = 84
+    zoneY0 = backboneY + 58
+    pos = {}
+    for i, z in enumerate(segs):
+        r, c = divmod(i, ncol)
+        zx = m + c * (_SEG_W + segGap)
+        zy = zoneY0 + r * (_ZONE_H + rowGap)
+        pos[i] = (zx, zy)
+
+    # gateways: gw_ip -> segment indices it serves (from default routes)
+    gw_segs: dict[str, list[int]] = {}
+    for i, z in enumerate(segs):
+        if z["gw"]:
+            gw_segs.setdefault(z["gw"], []).append(i)
+    # backbone line + core label
+    els.append(f'<line x1="{m + 30}" y1="{backboneY + 12}" x2="{W - m - 30}" '
+               f'y2="{backboneY + 12}" stroke="#0f766e" stroke-width="2"/>')
+    els.append(f'<text x="{m}" y="{backboneY - 4}" font-size="10.5" font-weight="700" '
+               f'fill="#0f766e">Routed backbone</text>')
+    # gateway nodes, centred over the zones they serve
+    gw_x = {}
+    for gw, idxs in gw_segs.items():
+        gx = sum(pos[i][0] + _SEG_W / 2 for i in idxs) / len(idxs)
+        gx = min(max(gx, m + 40), W - m - 40)
+        gw_x[gw] = gx
+        # firewall if it fronts any edge/DMZ segment, else router
+        fw = any(segs[i]["tier"] == 0 for i in idxs)
+        gcol = "#C15A11" if fw else "#1f4e9c"
+        els.append(f'<line x1="{gx:.0f}" y1="{backboneY + 12}" x2="{gx:.0f}" '
+                   f'y2="{backboneY + 36}" stroke="#9fb3b0" stroke-width="1.2"/>')
+        els.append(f'<rect x="{gx - 15:.0f}" y="{backboneY}" width="30" height="24" rx="6" '
+                   f'fill="#fff" stroke="{gcol}" stroke-width="1.3"/>')
+        els.append(net_glyph("firewall" if fw else "router", gx - 11, backboneY + 2, 20, gcol))
+        els.append(f'<text x="{gx:.0f}" y="{backboneY + 48}" text-anchor="middle" '
+                   f'font-size="9.5" font-weight="700" fill="{gcol}">'
+                   f'{"firewall" if fw else "router"} {gw}</text>')
+    for ax in ad_anchors:
+        els.append(f'<line x1="{ax:.0f}" y1="{ady}" x2="{ax:.0f}" y2="{backboneY + 12}" '
+                   f'stroke="{_DOMAIN_COLOR[1]}" stroke-width="1.4" stroke-dasharray="4 3"/>')
+
+    # segment -> its gateway (solid) or -> backbone if gateway unknown (dashed)
+    for i, z in enumerate(segs):
+        zx, zy = pos[i]
+        cx = zx + _SEG_W / 2
+        if z["gw"] and z["gw"] in gw_x:
+            els.append(f'<path d="M{cx:.0f},{zy} C{cx:.0f},{zy - 24} '
+                       f'{gw_x[z["gw"]]:.0f},{backboneY + 60} {gw_x[z["gw"]]:.0f},'
+                       f'{backboneY + 36}" fill="none" stroke="#9fb3b0" stroke-width="1.4"/>')
+        else:
+            els.append(f'<line x1="{cx:.0f}" y1="{zy}" x2="{cx:.0f}" y2="{backboneY + 12}" '
+                       f'stroke="#c3ccca" stroke-width="1.2" stroke-dasharray="3 3"/>')
+            els.append(f'<text x="{cx:.0f}" y="{zy - 6}" text-anchor="middle" font-size="9" '
+                       f'fill="#a3adab">gateway not observed</text>')
+        els += _draw_zone(zx, zy, z)
+
+    # pivot links: a dual-homed host bridges two segments directly (observed, ground truth)
+    adj = adjacency(up)
+    pivot_edges = []
+    seen = set()
+    for pip, subs in adj["pivots"].items():
+        idxs = [sub_index[s] for s in subs if s in sub_index]
+        for a in range(len(idxs)):
+            for b in range(a + 1, len(idxs)):
+                key = tuple(sorted((idxs[a], idxs[b])))
+                if key in seen:
+                    continue
+                seen.add(key)
+                pivot_edges.append((key[0], key[1], pip))
+    for ia, ib, pip in pivot_edges:
+        (xa, ya), (xb, yb) = pos[ia], pos[ib]
+        cxa, cxb = xa + _SEG_W / 2, xb + _SEG_W / 2
+        y1, y2 = ya + _ZONE_H, yb + _ZONE_H
+        midx, midy = (cxa + cxb) / 2, max(y1, y2) + 34
+        els.append(f'<path d="M{cxa:.0f},{y1} Q{midx:.0f},{midy:.0f} {cxb:.0f},{y2}" '
+                   f'fill="none" stroke="#C15A11" stroke-width="1.8" stroke-dasharray="5 3"/>')
+        els.append(f'<rect x="{midx - 58:.0f}" y="{midy - 20:.0f}" width="116" height="16" '
+                   f'rx="8" fill="#fff6e6" stroke="#C15A11" stroke-width="1"/>')
+        els.append(f'<text x="{midx:.0f}" y="{midy - 8:.0f}" text-anchor="middle" '
+                   f'font-size="9.5" font-weight="700" fill="#7a3a0a">pivot · {pip}</text>')
+
+    extra = 60 if pivot_edges else 0
+    H = zoneY0 + nrow * (_ZONE_H + rowGap) + extra
+    npivot = len(pivot_edges)
+    els.append(f'<text x="{m}" y="{H - 14:.0f}" font-size="9.5" fill="#8a9997">'
+               f'Topology-driven: gateway devices &amp; IPs are real (ingested host routes); '
+               f'dashed orange = a dual-homed host bridging two segments '
+               f'({npivot} observed). A switch = one L2 segment (not a fingerprinted device).'
+               f'</text>')
+    return _svg_wrap(W, H, els)

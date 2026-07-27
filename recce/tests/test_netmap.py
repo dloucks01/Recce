@@ -385,10 +385,10 @@ class ArchitectureViewTest(unittest.TestCase):
     """Logical architecture: AD -> core -> gateway(router/firewall) -> switch -> segment."""
 
     def _hosts(self):
+        # no topology -> logical/core mode
         dc = _h("10.0.10.10", ports=[(389, "ldap"), (445, "microsoft-ds")],
                 roles=["Domain Controller"], hostname="dc01", access=True,
                 vulns=[("critical", "confirmed")])
-        dc.topology = {"routes": [{"dest": "default", "gw": "10.0.10.1", "iface": "eth0"}]}
         web = _h("10.0.40.10", subnet="10.0.40.0/24 (DMZ)", ports=[(80, "http"), (443, "https")],
                  hostname="web01")
         ws = _h("10.0.20.11", subnet="10.0.20.0/24", ports=[(3389, "ms-wbt-server")],
@@ -401,19 +401,41 @@ class ArchitectureViewTest(unittest.TestCase):
             md.parseString(f"<svg xmlns='http://www.w3.org/2000/svg'>"
                            f"{netmap.net_glyph(kind, 4, 4, 22, '#1f4e9c')}</svg>")
 
-    def test_architecture_svg_shows_infra_and_gateway(self):
+    def test_architecture_logical_mode(self):
         import xml.dom.minidom as md
         doms = [Domain(name="corp.local", dc_ips=["10.0.10.10"])]
-        s = netmap.architecture_svg(self._hosts(), doms)
+        s = netmap.architecture_svg(self._hosts(), doms)   # no topology -> core mode
         self.assertTrue(s.startswith("<svg"))
         md.parseString(s)
         self.assertIn("Routed core", s)
         self.assertIn("AD domain", s)
-        self.assertIn("10.0.10.1", s)                  # real gateway from ingested route
-        self.assertIn("router", s)
         self.assertIn("firewall", s)                   # the DMZ segment gateway
         self.assertIn("Edge / DMZ", s)                 # tier label
-        self.assertIn("does not fingerprint physical switches", s)  # honesty note
+        self.assertIn("a switch = one L2 segment", s)  # honesty note
+
+    def test_architecture_topology_mode_real_gw_and_pivot(self):
+        import xml.dom.minidom as md
+        # DC with a real gateway; a dual-homed pivot bridging 10.0.10 and 10.0.20
+        dc = _h("10.0.10.10", ports=[(445, "microsoft-ds")], roles=["Domain Controller"],
+                hostname="dc01", access=True)
+        dc.topology = {"interfaces": [{"name": "eth0", "ip": "10.0.10.10", "prefix": 24,
+                                       "subnet": "10.0.10.0/24"}],
+                       "routes": [{"dest": "default", "gw": "10.0.10.1", "iface": "eth0"}],
+                       "neighbors": ["10.0.10.20"], "peers": []}
+        piv = _h("10.0.20.11", subnet="10.0.20.0/24", ports=[(3389, "ms-wbt-server")],
+                 os_name="Windows 10 Pro", access=True)
+        piv.topology = {"interfaces": [
+            {"name": "eth0", "ip": "10.0.20.11", "prefix": 24, "subnet": "10.0.20.0/24"},
+            {"name": "eth1", "ip": "10.0.10.9", "prefix": 24, "subnet": "10.0.10.0/24"}],
+            "routes": [{"dest": "default", "gw": "10.0.20.1", "iface": "eth0"}],
+            "neighbors": ["10.0.10.10"], "peers": [{"ip": "10.0.10.10", "port": 445, "state": "E"}]}
+        s = netmap.architecture_svg([dc, piv],
+                                    [Domain(name="corp.local", dc_ips=["10.0.10.10"])])
+        md.parseString(s)
+        self.assertIn("topology-driven", s)
+        self.assertIn("Routed backbone", s)
+        self.assertIn("router 10.0.10.1", s)          # real gateway device + IP
+        self.assertIn("pivot · 10.0.20.11", s)        # dual-homed inter-segment link
 
     def test_architecture_empty_is_graceful(self):
         s = netmap.architecture_svg([])
