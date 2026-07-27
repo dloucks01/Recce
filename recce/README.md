@@ -451,6 +451,23 @@ powershell -ep bypass -File recce-enum.ps1 -OutFile loot.txt # Windows (-SelfTes
 recce ingest loot.txt -o eng          # auto-resolves the host (see below); --host IP to force
 ```
 
+**Running the Windows script when `-File` isn't an option.** `recce-enum.ps1` takes
+its params and runs its sweep on invocation — there's no separate entry method to
+call, so pick the form that fits your channel:
+
+```powershell
+# 1) Standard — run the script file directly:
+powershell -ep bypass -File .\recce-enum.ps1 -OutFile loot.txt
+
+# 2) Dot-source — load it into an interactive session (its helper functions become
+#    available too), then it runs with the params you pass:
+. .\recce-enum.ps1 -OutFile loot.txt
+
+# 3) Limited / semi-interactive channel (webshell, no -File) — read the script text
+#    and invoke it as a scriptblock, passing params, nothing extra written to disk:
+powershell -ep bypass -c "& ([scriptblock]::Create((Get-Content .\recce-enum.ps1 -Raw))) -OutFile loot.txt"
+```
+
 `ingest` needs no tools or network — it parses text recce itself produced. Findings
 land as rows tagged **on-target finding** at the top of the host's Priv-Esc section.
 
