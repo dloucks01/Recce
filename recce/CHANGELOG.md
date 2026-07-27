@@ -7,15 +7,14 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.4.0] - 2026-07-27
 
 ### Changed
-- **Network map now ships in two forms — full and overview.** Previously the embedded
-  SVG auto-collapsed a large estate to per-subnet role counts, while the standalone
-  `architecture.mmd`/`.dot` drew every host (unbounded — a 400-host mermaid is ~400
-  nodes). Every report now writes both, clearly named: **`network-map-full.svg`** +
-  **`architecture.mmd`**/**`.dot`** draw every host broken out, and
-  **`network-map-overview.svg`** + **`architecture-overview.mmd`**/**`.dot`** give the
-  aggregated by-role view. `netmap.svg/mermaid/dot` take an `aggregate` flag (the SVG
-  embedded in `report.html`/`assets.html` still auto-picks by size). Scale-tested at 400
-  hosts.
+- **Network map is now SVG only, in two forms — full and overview.** Every report writes
+  **`network-map-full.svg`** (every host broken out) and **`network-map-overview.svg`**
+  (per-subnet role counts); both open in any browser with no tools and print to PDF —
+  airgap-native. `netmap.svg` takes an `aggregate` flag (the copy embedded in
+  `report.html`/`assets.html` still auto-picks by size, collapsing a >50-host estate for
+  readability). Scale-tested at 400 hosts. The Mermaid (`architecture.mmd`) and Graphviz
+  (`architecture.dot`) exports are **removed** — they required a renderer recce users on
+  an air-gapped box don't have, and the SVG needs none.
 - **Role labelling:** a Windows *client* OS (Windows 10/11/7/8/XP/Vista) with SMB open
   is now classed as **Workstation**, not **File/SMB**. 445 is open on every domain-joined
   workstation, so the old rule mislabelled essentially every workstation as a file
