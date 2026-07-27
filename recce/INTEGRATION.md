@@ -67,5 +67,20 @@ recce also imports a **raw** `findings.json` (without the `--export-recce` enric
 finding's own `severity` and parses the host from `affected_host`; the enriched export just adds the
 accurate CWE/remediation from Sköll's knowledge base.
 
+### Host topology → observed reachability map
+
+Sköll's on-target triage scripts (`linpriv/enum.sh`, `winpriv/enum.bat`) emit a machine `NETWORK`
+block (interfaces, routes, ARP neighbours, live peers). Fold it in with the normal loot path:
+
+```bash
+recce ingest enum-output.txt --host <ip> -o eng
+```
+
+recce stores it on the host and draws a **ground-truth** host-to-host reachability map
+(`network-reachability.svg`) — a link only where a foothold actually reached the other end (ARP =
+same-segment L2 contact, live connection = an established peer) — and flags dual-homed **pivots**.
+Unlike the tiered map's *credentialed pivot surface* (what you could reach with a cred), these edges
+are observed. `ingest` accepts a topology-only block, so you can feed it even before any finding.
+
 > One source of truth: recce's workbook now tracks both coverage (what was enumerated) and outcomes
 > (what Sköll proved). See the full round-trip guide in the Sköll repo's `INTEGRATION.md`.

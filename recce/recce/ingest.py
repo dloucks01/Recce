@@ -441,6 +441,79 @@ def backfill_ports(host, listeners: list[dict]) -> tuple[int, int]:
     return added, enriched
 
 
+import ipaddress as _ipaddr
+
+_NET_IFACE = re.compile(r"^NET-IFACE\s+(\S+)\s+(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})", re.I)
+_NET_ROUTE = re.compile(r"^NET-ROUTE\s+(\S+)(?:\s+via\s+(\S+))?(?:\s+dev\s+(\S+))?", re.I)
+_NET_NEIGH = re.compile(r"^NET-NEIGH\s+(\d{1,3}(?:\.\d{1,3}){3})(?:\s+(\S+))?", re.I)
+_NET_PEER = re.compile(r"^NET-PEER\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)(?:\s+(\S+))?", re.I)
+
+
+def _routable(ip: str) -> bool:
+    try:
+        a = _ipaddr.ip_address(ip)
+    except ValueError:
+        return False
+    return not (a.is_loopback or a.is_link_local or a.is_multicast or a.is_unspecified)
+
+
+def parse_topology(text: str) -> dict:
+    """Parse the machine-readable NETWORK block an on-target enum emits (recce-enum or
+    the Sköll linpriv/winpriv enum) into observed topology:
+
+        NET-IFACE <name> <ip>/<prefix>          this box's own interface (-> subnet)
+        NET-ROUTE <dest|default> [via gw] [dev]  a route it holds
+        NET-NEIGH <ip> [mac]                     an ARP neighbour it actually talked to
+        NET-PEER  <ip>:<port> [state]            a live/known connection to another host
+
+    Returns {interfaces, routes, neighbors, peers} (empty dict when the loot has no
+    such block). ARP neighbours and peers are GROUND TRUTH for host-to-host
+    reachability — the box demonstrably reached those addresses."""
+    ifaces, routes, neigh, peers = [], [], [], []
+    nseen, pseen = set(), set()
+    for raw in text.splitlines():
+        line = _ANSI.sub("", raw).strip()
+        m = _NET_IFACE.match(line)
+        if m:
+            name, ip, prefix = m.group(1), m.group(2), int(m.group(3))
+            if not _routable(ip):
+                continue
+            try:
+                subnet = str(_ipaddr.ip_network(f"{ip}/{prefix}", strict=False))
+            except ValueError:
+                subnet = ""
+            ifaces.append({"name": name, "ip": ip, "prefix": prefix, "subnet": subnet})
+            continue
+        m = _NET_ROUTE.match(line)
+        if m:
+            routes.append({"dest": m.group(1), "gw": m.group(2) or "",
+                           "iface": m.group(3) or ""})
+            continue
+        m = _NET_NEIGH.match(line)
+        if m:
+            ip = m.group(1)
+            if _routable(ip) and ip not in nseen:
+                nseen.add(ip)
+                neigh.append(ip)
+            continue
+        m = _NET_PEER.match(line)
+        if m:
+            ip, port = m.group(1), int(m.group(2))
+            if _routable(ip) and (ip, port) not in pseen:
+                pseen.add((ip, port))
+                peers.append({"ip": ip, "port": port, "state": m.group(3) or ""})
+    out = {}
+    if ifaces:
+        out["interfaces"] = ifaces
+    if routes:
+        out["routes"] = routes
+    if neigh:
+        out["neighbors"] = neigh
+    if peers:
+        out["peers"] = peers
+    return out
+
+
 def promote_to_vulns(ip: str, findings: list[dict]) -> list[Vuln]:
     """Turn the high-signal on-target findings into first-class Vulns (confirmed
     local observations), so they show up in severity totals and get write-ups.

@@ -28,6 +28,16 @@ All notable changes to recce are documented here. Dates are UTC.
   server; File/SMB is now reserved for server OSes.
 
 ### Added
+- **Observed-reachability map from on-target topology (`network-reachability.svg`).** The
+  on-target enums (recce's own, and the Sköll linpriv/winpriv enum) now emit a machine
+  `NET-IFACE / NET-ROUTE / NET-NEIGH / NET-PEER` block; `recce ingest` folds it onto the
+  host (`Host.topology`) and the report draws a **ground-truth** host-to-host map — a
+  link only where a foothold actually reached the other end (ARP neighbour = same-segment
+  L2 contact; live connection = an established peer). Dual-homed **pivots** that bridge
+  segments are flagged. This is the honest counterpart to the tiered map's credentialed
+  pivot *surface*: here the edges are observed, not inferred. `ingest` now also accepts a
+  topology-only block (no `[!]` findings required). `netmap.adjacency()` exposes the
+  edges/pivots.
 - **Device icons on the diagrams.** Role-based glyphs — Domain Controller (server tower
   + star), Server (rack), Workstation/host (monitor) — now mark each card on the attack
   path and each chip on the tiered map, with a shared legend. The attack path also got a

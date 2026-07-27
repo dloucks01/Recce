@@ -441,7 +441,24 @@ def _network_map(hosts, domains, ad_data=None):
         'which hosts can reach which over the network. Standalone copy: '
         '<b>network-map-tiered.svg</b>.</p>'
         f'<div class="netmap">{nm.tiered_svg(hosts, domains, ad_data)}</div>'
+        + _reachability_block(hosts, ad_data) +
         '</section>')
+
+
+def _reachability_block(hosts, ad_data):
+    """Observed host-to-host reachability, shown only once an on-target enum has fed
+    topology back in (ARP neighbours + live connections = ground truth)."""
+    if not any((h.topology or {}) for h in hosts):
+        return ""
+    return (
+        '<h3>Observed reachability <span class="tag">from on-target enum</span></h3>'
+        '<p class="basis">Built from the interfaces, routes, ARP caches and live '
+        'connections that compromised hosts reported (folded in via <b>ingest</b>). '
+        'Unlike the rest of this page these edges are <b>ground truth</b> — a link is '
+        'drawn only because a foothold actually contacted the other end — and '
+        'dual-homed <b>pivots</b> that bridge segments are flagged. Standalone copy: '
+        '<b>network-reachability.svg</b>.</p>'
+        f'<div class="netmap">{nm.reachability_svg(hosts, ad_data)}</div>')
 
 
 def _owned_labels(hosts, credentials):

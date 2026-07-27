@@ -201,6 +201,9 @@ class Store:
         if new.smb_signing and new.smb_signing != "unknown":
             merged.smb_signing = new.smb_signing
         merged.defenses = list(dict.fromkeys(old.defenses + new.defenses))
+        # Observed topology is a fresh snapshot from the latest on-target enum; the
+        # newest non-empty one wins (an older capture never overwrites a newer).
+        merged.topology = new.topology or old.topology
 
         # Vulns / exploits / accounts: dedup by natural key, accumulating the
         # seen-set so duplicates WITHIN one scan are collapsed too, not just

@@ -1785,6 +1785,30 @@ class IngestCommandTest(unittest.TestCase):
             rc = args.func(args)
         return rc
 
+    def test_ingest_folds_network_topology_and_survives_merge(self):
+        from recce.store import Store
+        loot = ("recce-enum host=web01 user=root now\n"
+                "==== NETWORK ====\n"
+                "NET-IFACE eth0 10.0.20.5/24\nNET-IFACE eth1 10.0.10.9/24\n"
+                "NET-NEIGH 10.0.10.10 aa:bb:cc:00:00:10\n"
+                "NET-PEER 10.0.10.10:445 ESTAB\n==== END NETWORK ====\n")
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.20.5", hostnames=["web01"], enumerated=True))
+            # topology-only loot (no [!] findings) must still ingest
+            self.assertEqual(self._ingest(d, loot, ["--host", "10.0.20.5"]), 0)
+            db = os.path.join(d, "results.sqlite")
+            h = Store(db).get_host("10.0.20.5")
+            self.assertEqual(len(h.topology["interfaces"]), 2)
+            self.assertIn("10.0.10.10", h.topology["neighbors"])
+            # a later, unrelated upsert (merge=True) must not drop the topology
+            s = Store(db)
+            again = s.get_host("10.0.20.5")
+            again.vulns = []                          # simulate a re-scan touch
+            s.upsert_host(again)                      # merge path
+            s.close()
+            h2 = Store(db).get_host("10.0.20.5")
+            self.assertEqual(len(h2.topology.get("interfaces", [])), 2)
+
     def test_ingest_matches_host_by_hostname(self):
         from recce.store import Store
         with tempfile.TemporaryDirectory() as d:
