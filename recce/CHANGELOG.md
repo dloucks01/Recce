@@ -28,6 +28,15 @@ All notable changes to recce are documented here. Dates are UTC.
   server; File/SMB is now reserved for server OSes.
 
 ### Added
+- **Tiered lateral map (`network-map-tiered.svg`).** A third network-map view that
+  groups the estate into trust tiers — **Domain Controllers → servers → workstations &
+  hosts** — with the AD domain, per-role counts and access (✓ owned) overlay, upward
+  escalation arrows (client → server → DC), and a **credentialed pivot-surface** legend
+  (SMB/WinRM/RDP/SSH/MSSQL host counts + footholds held). It answers "how does this look
+  from the DC down" and "what can move where laterally" honestly: it is a *logical*
+  tiering — recce enumerates hosts independently and does not test host-to-host network
+  reachability, so the pivot surface lists services that accept remote auth, not routing.
+  Written on every report and embedded in `assets.html`.
 - **Sköll-Fieldkit integration (`skoll-export` / `skoll-import`).** recce now
   round-trips with the [Sköll-Fieldkit](https://github.com/dloucks01/skoll-fieldkit)
   exploitation kit, so enumeration seeds exploitation and proven findings flow back

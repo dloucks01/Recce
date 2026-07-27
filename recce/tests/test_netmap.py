@@ -225,3 +225,52 @@ class ReportEmbedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TieredMapTest(unittest.TestCase):
+    """DC → servers → workstations trust-tier view + credentialed pivot surface."""
+
+    def _estate(self):
+        return [
+            _h("10.0.10.10", ports=[(389, "ldap"), (445, "microsoft-ds")],
+               roles=["Domain Controller"], hostname="dc01",
+               os_name="Windows Server 2019"),
+            _h("10.0.10.20", ports=[(445, "microsoft-ds"), (1433, "ms-sql-s")],
+               os_name="Windows Server 2016", hostname="sql01"),
+            _h("10.0.10.40", ports=[(80, "http"), (443, "https")],
+               os_name="Ubuntu 22.04", hostname="web01"),
+            _h("10.0.20.5", ports=[(445, "microsoft-ds"), (3389, "ms-wbt-server")],
+               os_name="Windows 10 Pro", hostname="ws01", access=True),
+        ]
+
+    def test_reach_counts_are_present_protocols_only(self):
+        reach = dict(netmap.reach_counts(self._estate()))
+        self.assertEqual(reach["SMB"], 3)          # DC + sql + ws
+        self.assertEqual(reach["MSSQL"], 1)
+        self.assertEqual(reach["RDP"], 1)
+        self.assertNotIn("WinRM", reach)           # none open -> omitted
+
+    def test_tiered_svg_renders_and_is_self_contained(self):
+        import xml.dom.minidom as md
+        s = netmap.tiered_svg(self._estate(),
+                              [Domain(name="corp.local", dc_ips=["10.0.10.10"])])
+        self.assertTrue(s.startswith("<svg"))
+        md.parseString(s)                          # well-formed XML, renders anywhere
+        self.assertNotIn("xmlns", s)               # inline / self-contained
+        self.assertIn("Tier 0", s)
+        self.assertIn("Tier 1", s)
+        self.assertIn("Tier 2", s)
+        self.assertIn("DC ×1", s)                  # tier-0 chip
+        self.assertIn("Workstation ×1", s)         # tier-2 chip
+        self.assertIn("AD domain", s)
+        self.assertIn("pivot surface", s.lower())
+        self.assertIn("1 foothold", s)             # the ws01 access overlay
+        # honesty: it must not claim network reachability
+        self.assertIn("does not test host-to-host", s)
+
+    def test_tiered_svg_empty_is_graceful(self):
+        import xml.dom.minidom as md
+        s = netmap.tiered_svg([])
+        self.assertTrue(s.startswith("<svg"))
+        md.parseString(s)
+        self.assertIn("No hosts", s)

@@ -376,6 +376,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
                _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=False)))
         _write("network-map-overview.svg",
                _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=True)))
+        _write("network-map-tiered.svg",
+               _standalone_svg(netmap.tiered_svg(hosts, domains, ad_blob)))
         # Attack path as a standalone SVG too (only when there's a confirmed path).
         from . import attackpath as _ap
         _ap_steps = _ap.build(hosts)
@@ -398,7 +400,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
               f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}"
               f"\n    {paths['html']}\n    {paths['assets']} (architecture & assets)"
               f"\n    network map: network-map-full.svg (every host) + "
-              f"network-map-overview.svg (by role) — open in any browser, no tools")
+              f"network-map-overview.svg (by role) + network-map-tiered.svg "
+              f"(DC→servers→hosts) — open in any browser, no tools")
         counts = store.count_issues()
         if counts.get("total"):
             print(f"[!] {counts['total']} scan issue(s) logged "

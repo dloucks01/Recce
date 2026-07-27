@@ -95,6 +95,15 @@ class MapScaleTest(unittest.TestCase):
         auto = netmap.svg(self.hosts)
         self.assertLess(auto.count("<rect"), _TOTAL // 5)
 
+    def test_tiered_svg_stays_bounded_at_scale(self):
+        import xml.dom.minidom as md
+        s = netmap.tiered_svg(self.hosts)
+        md.parseString(s)                                            # well-formed
+        # role chips are aggregate (bounded by 3 tiers x roles), never per-host
+        self.assertLess(s.count("<rect"), 3 * len(netmap._ROLE_ORDER) + 10)
+        self.assertIn("Tier 0", s)
+        self.assertIn("pivot surface", s.lower())
+
     def test_both_svg_maps_build_quickly(self):
         t0 = time.monotonic()
         for agg in (False, True, None):
@@ -122,8 +131,9 @@ class ReportWritesBothMapsTest(unittest.TestCase):
             rc = cli.main(["report", "-o", self.dir])
         self.assertEqual(rc, 0)
 
-        # SVG only — the two maps are written ...
-        for name in ("network-map-full.svg", "network-map-overview.svg"):
+        # SVG only — the three maps are written ...
+        for name in ("network-map-full.svg", "network-map-overview.svg",
+                     "network-map-tiered.svg"):
             self.assertTrue(os.path.exists(os.path.join(self.dir, name)), name)
         # ... and no Mermaid / Graphviz sidecars are produced.
         for name in ("architecture.mmd", "architecture-overview.mmd",

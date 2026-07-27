@@ -433,6 +433,14 @@ def _network_map(hosts, domains, ad_data=None):
         '<b>network-map-full.svg</b> (every host broken out) and '
         '<b>network-map-overview.svg</b> (by role) — each opens in any browser with no '
         'tools.</p>'
+        '<h3>Tiered view — DC → servers → workstations</h3>'
+        '<p class="basis">The same estate grouped into trust tiers, with the '
+        '<b>credentialed lateral-movement surface</b> (services that accept remote auth) '
+        'and any footholds recce holds. The arrows show the escalation direction '
+        '(client → server → DC); this is a <b>logical</b> tiering — recce does not test '
+        'which hosts can reach which over the network. Standalone copy: '
+        '<b>network-map-tiered.svg</b>.</p>'
+        f'<div class="netmap">{nm.tiered_svg(hosts, domains, ad_data)}</div>'
         '</section>')
 
 
