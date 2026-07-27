@@ -133,9 +133,10 @@ _STAGE_COLOR = {
 def svg(hosts: list[Host], steps: list[dict] | None = None) -> str:
     """A directly-viewable inline SVG of the attack path — renders in any browser with
     no tools or JavaScript (and prints to PDF). Left-to-right stage columns of step
-    cards (host + finding), stage-to-stage arrows, and dashed same-host connectors
-    showing one box being walked through the stages."""
+    cards (a device icon by role + host + finding), stage-to-stage arrows, and dashed
+    same-host connectors showing one box being walked through the stages."""
     from html import escape as _e
+    from . import netmap as _nm
     steps = steps if steps is not None else build(hosts)
     used = [st for st in STAGE_ORDER if any(s["stage"] == st for s in steps)]
     if not steps:
@@ -143,46 +144,58 @@ def svg(hosts: list[Host], steps: list[dict] | None = None) -> str:
                 'aria-label="Attack path"><text x="12" y="34" font-size="14" '
                 'fill="#5f6f6e">No confirmed attack path yet.</text></svg>')
 
-    m, headerH, cardW, cardH, vgap, colGap = 16, 30, 236, 56, 12, 40
+    ip_role = {h.ip: _nm.role_with_ad(h, set()) for h in (hosts or [])}
+    m, headerH, cardW, cardH, vgap, colGap = 18, 34, 250, 60, 14, 46
+    legendH = 26
     by_stage = {st: [s for s in steps if s["stage"] == st] for st in used}
     rows = max(len(v) for v in by_stage.values())
     W = m * 2 + len(used) * cardW + (len(used) - 1) * colGap
-    H = m * 2 + headerH + 8 + rows * (cardH + vgap) + 8
+    H = m * 2 + headerH + 10 + rows * (cardH + vgap) + legendH
     geom: dict[tuple, tuple] = {}          # (ip, stage) -> (x, y, w, h)
 
     els = [
-        '<defs><marker id="apar" markerWidth="9" markerHeight="9" refX="7" refY="3" '
-        'orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#8a9997"/></marker>'
-        '<marker id="apho" markerWidth="9" markerHeight="9" refX="7" refY="3" '
-        'orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#b08cc0"/></marker></defs>',
+        '<defs>'
+        '<filter id="apsh" x="-8%" y="-8%" width="116%" height="130%">'
+        '<feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#0b1f1c" '
+        'flood-opacity="0.14"/></filter>'
+        '<marker id="apar" markerWidth="10" markerHeight="10" refX="7" refY="3.5" '
+        'orient="auto"><path d="M0,0 L8,3.5 L0,7 Z" fill="#8a9997"/></marker>'
+        '<marker id="apho" markerWidth="10" markerHeight="10" refX="7" refY="3.5" '
+        'orient="auto"><path d="M0,0 L8,3.5 L0,7 Z" fill="#a273c2"/></marker></defs>',
         f'<rect x="0" y="0" width="{W}" height="{H}" fill="#ffffff"/>',
     ]
 
     for ci, st in enumerate(used):
         x = m + ci * (cardW + colGap)
         fill, stroke = _STAGE_COLOR.get(st, ("#eef1f1", "#5f6f6e"))
-        els.append(f'<rect x="{x}" y="{m}" width="{cardW}" height="{headerH - 6}" rx="6" '
+        els.append(f'<rect x="{x}" y="{m}" width="{cardW}" height="{headerH - 8}" rx="7" '
                    f'fill="{stroke}"/>')
-        els.append(f'<text x="{x + cardW / 2:.0f}" y="{m + 16}" text-anchor="middle" '
-                   f'font-size="12.5" font-weight="700" fill="#ffffff">{_e(st)}</text>')
+        els.append(f'<text x="{x + cardW / 2:.0f}" y="{m + 17}" text-anchor="middle" '
+                   f'font-size="12.5" font-weight="700" fill="#ffffff" '
+                   f'letter-spacing="0.3">{_e(st)}</text>')
         for ri, s in enumerate(by_stage[st]):
-            y = m + headerH + 8 + ri * (cardH + vgap)
+            y = m + headerH + 10 + ri * (cardH + vgap)
             geom[(s["ip"], st)] = (x, y, cardW, cardH)
             host = s["ip"] + (f" ({s['hostname']})" if s["hostname"] else "")
-            els.append(f'<rect x="{x}" y="{y}" width="{cardW}" height="{cardH}" rx="7" '
-                       f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>')
-            els.append(f'<text x="{x + 10}" y="{y + 20}" font-size="11.5" '
-                       f'font-weight="700" fill="#1a2422">{_e(_label(host, 30))}</text>')
-            els.append(f'<text x="{x + 10}" y="{y + 38}" font-size="11" '
-                       f'fill="#3a4644">{_e(_label(s["title"], 34))}</text>')
+            kind = _nm.role_kind(ip_role.get(s["ip"], "Host"))
+            els.append(f'<rect x="{x}" y="{y}" width="{cardW}" height="{cardH}" rx="9" '
+                       f'fill="{fill}" stroke="{stroke}" stroke-width="1.5" '
+                       f'filter="url(#apsh)"/>')
+            els.append(f'<rect x="{x}" y="{y}" width="4" height="{cardH}" rx="2" '
+                       f'fill="{stroke}"/>')            # stage accent bar
+            els.append(_nm.glyph(kind, x + 12, y + cardH / 2 - 9, 18, stroke))
+            els.append(f'<text x="{x + 38}" y="{y + 22}" font-size="11.5" '
+                       f'font-weight="700" fill="#1a2422">{_e(_label(host, 26))}</text>')
+            els.append(f'<text x="{x + 38}" y="{y + 40}" font-size="11" '
+                       f'fill="#3a4644">{_e(_label(s["title"], 30))}</text>')
 
     # stage-to-stage flow arrows (header to header)
     for a, b in zip(range(len(used)), range(1, len(used))):
         xa = m + a * (cardW + colGap) + cardW
         xb = m + b * (cardW + colGap)
-        yc = m + (headerH - 6) / 2
-        els.append(f'<line x1="{xa + 4}" y1="{yc:.0f}" x2="{xb - 6}" y2="{yc:.0f}" '
-                   f'stroke="#8a9997" stroke-width="2" marker-end="url(#apar)"/>')
+        yc = m + (headerH - 8) / 2
+        els.append(f'<line x1="{xa + 6}" y1="{yc:.0f}" x2="{xb - 8}" y2="{yc:.0f}" '
+                   f'stroke="#8a9997" stroke-width="2.2" marker-end="url(#apar)"/>')
 
     # same-host continuity across consecutive stages (dashed), right edge -> left edge
     for h in {s["ip"] for s in steps}:
@@ -191,12 +204,18 @@ def svg(hosts: list[Host], steps: list[dict] | None = None) -> str:
             xa, ya, wa, ha = geom[(h, sa)]
             xb, yb, _wb, hb = geom[(h, sb)]
             els.append(f'<path d="M{xa + wa},{ya + ha / 2:.0f} '
-                       f'C{xa + wa + 20},{ya + ha / 2:.0f} {xb - 20},{yb + hb / 2:.0f} '
-                       f'{xb - 4},{yb + hb / 2:.0f}" fill="none" stroke="#b08cc0" '
-                       f'stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#apho)"/>')
+                       f'C{xa + wa + 24},{ya + ha / 2:.0f} {xb - 24},{yb + hb / 2:.0f} '
+                       f'{xb - 6},{yb + hb / 2:.0f}" fill="none" stroke="#a273c2" '
+                       f'stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#apho)"/>')
+
+    # device-icon legend + same-host key
+    ly = H - 9
+    els.append(_nm.glyph_legend(m, ly - 13))
+    els.append(f'<text x="{W - m:.0f}" y="{ly:.0f}" text-anchor="end" font-size="10.5" '
+               f'fill="#a273c2">– – ▸ same host walked across stages</text>')
 
     body = "".join(els)
-    return (f'<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" '
+    return (f'<svg viewBox="0 0 {W} {int(H)}" width="{W}" height="{int(H)}" role="img" '
             f'aria-label="Attack path" font-family="system-ui,Segoe UI,Arial,sans-serif">'
             f'{body}</svg>')
 

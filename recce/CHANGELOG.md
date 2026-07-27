@@ -28,6 +28,11 @@ All notable changes to recce are documented here. Dates are UTC.
   server; File/SMB is now reserved for server OSes.
 
 ### Added
+- **Device icons on the diagrams.** Role-based glyphs — Domain Controller (server tower
+  + star), Server (rack), Workstation/host (monitor) — now mark each card on the attack
+  path and each chip on the tiered map, with a shared legend. The attack path also got a
+  visual pass (stage accent bars, soft shadows, device + same-host keys). All still pure
+  inline SVG, no tools.
 - **Tiered lateral map (`network-map-tiered.svg`).** A third network-map view that
   groups the estate into trust tiers — **Domain Controllers → servers → workstations &
   hosts** — with the AD domain, per-role counts and access (✓ owned) overlay, upward

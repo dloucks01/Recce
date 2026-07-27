@@ -647,10 +647,11 @@ def tiered_svg(hosts: list[Host], domains=None, ad_data=None) -> str:
             cy = y + 34
             els.append(f'<rect x="{cxp}" y="{cy}" width="{chipW}" height="{chipH}" rx="8" '
                        f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>')
-            els.append(f'<text x="{cxp + 10}" y="{cy + 18}" font-size="12" '
+            els.append(glyph(role_kind(role), cxp + 8, cy + chipH / 2 - 8, 16, stroke))
+            els.append(f'<text x="{cxp + 30}" y="{cy + 18}" font-size="12" '
                        f'font-weight="700" fill="#1a2422">{_e(role)} ×{cnt}</text>')
             sub = f"{acc} owned ✓" if acc else "&#8203;"
-            els.append(f'<text x="{cxp + 10}" y="{cy + 33}" font-size="10.5" '
+            els.append(f'<text x="{cxp + 30}" y="{cy + 33}" font-size="10.5" '
                        f'fill="#2E7D32">{sub}</text>')
             cxp += chipW + chipGap
         # AD domain pill in the tier-0 band, linked to it
@@ -683,3 +684,65 @@ def tiered_svg(hosts: list[Host], domains=None, ad_data=None) -> str:
             f'aria-label="Tiered network map" '
             f'font-family="system-ui,Segoe UI,Arial,sans-serif">'
             + "".join(els) + "</svg>")
+
+
+# --- role glyphs (small inline-SVG computer icons) -------------------------------
+# Three device classes, stroke-drawn so they read at ~18px and print cleanly:
+#   dc          - a server tower with a star (the domain's authority)
+#   server      - a rack unit with drive slots
+#   workstation - a desktop monitor on a stand
+def role_kind(role: str) -> str:
+    if role == "DC":
+        return "dc"
+    if role in ("DB", "Web", "Mail", "File/SMB"):
+        return "server"
+    return "workstation"                      # Workstation, Host
+
+
+def glyph(kind: str, x: float, y: float, s: float = 18, color: str = "#3a4644") -> str:
+    """An inline-SVG device icon of size s at top-left (x, y). No fills that fight the
+    card colour — thin strokes only, plus one accent for the DC star."""
+    u = s / 18.0
+    def P(*pts):
+        return " ".join(f"{x + a * u:.1f},{y + b * u:.1f}" for a, b in pts)
+    st = f'stroke="{color}" stroke-width="1.4" fill="none" ' \
+         'stroke-linejoin="round" stroke-linecap="round"'
+    if kind == "workstation":
+        return (f'<g {st}>'
+                f'<rect x="{x + 1 * u:.1f}" y="{y + 1 * u:.1f}" width="{16 * u:.1f}" '
+                f'height="{11 * u:.1f}" rx="{1.5 * u:.1f}"/>'
+                f'<line x1="{x + 6 * u:.1f}" y1="{y + 12 * u:.1f}" x2="{x + 6 * u:.1f}" '
+                f'y2="{y + 15 * u:.1f}"/>'
+                f'<line x1="{x + 12 * u:.1f}" y1="{y + 12 * u:.1f}" x2="{x + 12 * u:.1f}" '
+                f'y2="{y + 15 * u:.1f}"/>'
+                f'<line x1="{x + 4 * u:.1f}" y1="{y + 15.5 * u:.1f}" x2="{x + 14 * u:.1f}" '
+                f'y2="{y + 15.5 * u:.1f}"/></g>')
+    # dc + server share the tower body; dc adds a star accent
+    body = (f'<rect x="{x + 3 * u:.1f}" y="{y + 1 * u:.1f}" width="{12 * u:.1f}" '
+            f'height="{16 * u:.1f}" rx="{1.5 * u:.1f}"/>'
+            f'<line x1="{x + 5.5 * u:.1f}" y1="{y + 4.5 * u:.1f}" x2="{x + 12.5 * u:.1f}" '
+            f'y2="{y + 4.5 * u:.1f}"/>'
+            f'<line x1="{x + 5.5 * u:.1f}" y1="{y + 7.5 * u:.1f}" x2="{x + 12.5 * u:.1f}" '
+            f'y2="{y + 7.5 * u:.1f}"/>'
+            f'<circle cx="{x + 6.2 * u:.1f}" cy="{y + 13 * u:.1f}" r="{1 * u:.1f}"/>')
+    if kind == "dc":
+        star = (f'<path d="M{x + 9 * u:.1f},{y + 9.5 * u:.1f} l{1.1 * u:.1f},{2.2 * u:.1f} '
+                f'l{2.4 * u:.1f},{0.3 * u:.1f} l{-1.8 * u:.1f},{1.7 * u:.1f} '
+                f'l{0.5 * u:.1f},{2.4 * u:.1f} l{-2.2 * u:.1f},{-1.2 * u:.1f} '
+                f'l{-2.2 * u:.1f},{1.2 * u:.1f} l{0.5 * u:.1f},{-2.4 * u:.1f} '
+                f'l{-1.8 * u:.1f},{-1.7 * u:.1f} l{2.4 * u:.1f},{-0.3 * u:.1f} z" '
+                f'fill="{color}" stroke="none"/>')
+        return f'<g {st}>{body}</g>{star}'
+    return f'<g {st}>{body}</g>'
+
+
+def glyph_legend(x: float, y: float, color: str = "#5f6f6e") -> str:
+    """A one-row key for the three device glyphs, starting at (x, y)."""
+    out, cx = [], x
+    for kind, label in (("dc", "Domain Controller"), ("server", "Server"),
+                        ("workstation", "Workstation / host")):
+        out.append(glyph(kind, cx, y, 16, color))
+        out.append(f'<text x="{cx + 22:.0f}" y="{y + 13:.0f}" font-size="10.5" '
+                   f'fill="{color}">{label}</text>')
+        cx += 40 + len(label) * 6.4
+    return "".join(out)
