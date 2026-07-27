@@ -2405,7 +2405,7 @@ def _fold_host(ip, parsed_list, subnet_map):
 
 # --- report / status / review ---------------------------------------------------
 
-def _resolve_ingest_host(store, parsed, args):
+def _resolve_ingest_host(store, parsed, args, topo=None):
     """Pick (or create) the Host that on-target loot belongs to.
 
     Priority: an explicit --host, else an IP parsed from the loot that already
@@ -2422,13 +2422,30 @@ def _resolve_ingest_host(store, parsed, args):
             host.hostnames.append(hn)
         _tag_host_os(host, parsed)
         return host, (ip in hosts)
-    # No --host: try the hostname against known hostnames, else synthesize.
+    # No --host: resolve from the host's OWN interface IPs in the ingested NETWORK
+    # block (so `recce ingest enum.txt` lands on the real enumerated host with no
+    # --host needed), then by hostname, else synthesize.
+    iface_ips = [i.get("ip") for i in (topo or {}).get("interfaces", []) if i.get("ip")]
+    for ip in iface_ips:
+        if ip in hosts:
+            if hn and hn not in hosts[ip].hostnames:
+                hosts[ip].hostnames.append(hn)
+            _tag_host_os(hosts[ip], parsed)
+            return hosts[ip], True
     if hn:
         for h in hosts.values():
             if hn.lower() in [x.lower() for x in h.hostnames] or \
                hn.lower() == (h.hostname or "").lower():
                 _tag_host_os(h, parsed)
                 return h, True
+    if iface_ips:                              # a real IP from the enum, just not in scope yet
+        host = hosts.get(iface_ips[0]) or Host(
+            ip=iface_ips[0],
+            subnet=".".join(iface_ips[0].split(".")[:3]) + ".0/24", enumerated=True)
+        if hn and hn not in host.hostnames:
+            host.hostnames.append(hn)
+        _tag_host_os(host, parsed)
+        return host, (iface_ips[0] in hosts)
     key = hn or os.path.splitext(os.path.basename(args.loot))[0]
     host = hosts.get(f"local:{key}") or Host(ip=f"local:{key}")
     if hn and hn not in host.hostnames:
@@ -2554,7 +2571,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     if store is None:
         return 1
     _import_excel_tracking(store, paths)
-    host, existed = _resolve_ingest_host(store, parsed, args)
+    host, existed = _resolve_ingest_host(store, parsed, args, topo)
     added, total, promoted = _fold_loot(host, text, source)
     store.upsert_host(host)
     where = "existing host" if existed else "new host entry"

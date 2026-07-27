@@ -4,6 +4,15 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+### Changed
+- **`recce ingest` auto-resolves the target host from the enum's own interface IPs.**
+  Running `recce ingest enum.txt` with no `--host` now lands the loot on the real
+  enumerated host in scope by matching the box's own `NET-IFACE` IP(s) from the ingested
+  network block (then by banner hostname, else synthesizing as before). So an on-target
+  enum that carries its own topology attaches to the host it came from without the
+  operator having to name it — the topology feeds straight into the architecture and
+  reachability maps.
+
 ## [0.4.0] - 2026-07-27
 
 ### Changed

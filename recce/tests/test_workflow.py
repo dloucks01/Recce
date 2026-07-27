@@ -1809,6 +1809,25 @@ class IngestCommandTest(unittest.TestCase):
             h2 = Store(db).get_host("10.0.20.5")
             self.assertEqual(len(h2.topology.get("interfaces", [])), 2)
 
+    def test_ingest_auto_resolves_host_from_own_interface_ip(self):
+        # No --host: the box's own NET-IFACE IP must land the loot on the real
+        # enumerated host in scope, not synthesize a local: entry.
+        from recce.store import Store
+        loot = ("recce-enum host=web01 user=root now\n"
+                "==== NETWORK ====\n"
+                "NET-IFACE eth0 10.0.20.5/24\n"
+                "NET-NEIGH 10.0.10.10 aa:bb:cc:00:00:10\n"
+                "==== END NETWORK ====\n")
+        with tempfile.TemporaryDirectory() as d:
+            self._eng(d, Host(ip="10.0.20.5", enumerated=True))   # in scope, no hostname
+            self.assertEqual(self._ingest(d, loot), 0)            # no --host
+            s = Store(os.path.join(d, "results.sqlite"))
+            h = s.get_host("10.0.20.5")
+            self.assertIsNotNone(h)
+            self.assertEqual(len(h.topology["interfaces"]), 1)    # folded onto the real host
+            self.assertIn("web01", h.hostnames)                   # banner hostname recorded
+            self.assertIsNone(s.get_host("local:web01"))          # nothing synthesized
+
     def test_ingest_matches_host_by_hostname(self):
         from recce.store import Store
         with tempfile.TemporaryDirectory() as d:
