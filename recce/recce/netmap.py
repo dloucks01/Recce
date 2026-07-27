@@ -984,8 +984,10 @@ def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> st
     top = 52
     rowsL, rowsR = len(foot), max(1, len(others))
     H = top + max(rowsL, rowsR) * (cardH + vgap) + 54
-    W = m * 2 + cardW * 2 + colGap
     xL, xR = m, m + cardW + colGap
+    # W spans the two card columns, but the reachability legend ("… live connection")
+    # runs past the right column — widen so it never clips.
+    W = max(m * 2 + cardW * 2 + colGap, xR + 178 + 96 + m)
     posL = {ip: top + i * (cardH + vgap) for i, ip in enumerate(foot)}
     posR = {ip: top + i * (cardH + vgap) for i, ip in enumerate(others)}
 
