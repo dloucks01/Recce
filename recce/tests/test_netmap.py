@@ -50,30 +50,7 @@ class MermaidTest(unittest.TestCase):
                hostname="web01", os_name="Linux 5.4"),
         ]
 
-    def test_mermaid_has_segments_roles_and_domain_edges(self):
-        doms = [Domain(name="corp.local", dc_ips=["10.0.10.10"])]
-        mm = netmap.mermaid(self._hosts(), doms)
-        self.assertTrue(mm.startswith("flowchart TB"))
-        self.assertIn('subgraph seg0["10.0.10.0/24', mm)
-        self.assertIn('subgraph seg1["10.0.20.0/24', mm)
-        self.assertIn(":::dc", mm)                     # DC node styled
-        self.assertIn(":::web", mm)
-        self.assertIn("AD domain", mm)
-        self.assertIn("-->|DC of|", mm)                # DC edge to its domain
-        self.assertIn("classDef dc", mm)               # legend/colours present
-
-    def test_trust_edges_only_when_observed(self):
-        # A trust to another in-scope domain draws an edge; nothing invented.
-        doms = [Domain(name="corp.local", dc_ips=["10.0.10.10"],
-                       trusts=[{"name": "child.corp.local", "direction": "Bidirectional"}]),
-                Domain(name="child.corp.local", dc_ips=[])]
-        mm = netmap.mermaid(self._hosts(), doms)
-        self.assertIn("-.->", mm)                       # a trust edge
-        self.assertIn("trust", mm)
-
     def test_empty_is_graceful(self):
-        self.assertIn("No hosts enumerated", netmap.mermaid([]))
-        self.assertIn("No hosts enumerated", netmap.dot([]))
         self.assertIn("No hosts", netmap.svg([]))
 
     def test_svg_renders_directly_and_is_self_contained(self):
@@ -95,12 +72,6 @@ class MermaidTest(unittest.TestCase):
         md.parseString(s)
         self.assertIn("×", s)                          # "N× Web" aggregate labels
 
-    def test_dot_renders(self):
-        d = netmap.dot(self._hosts(), [Domain(name="corp.local", dc_ips=["10.0.10.10"])])
-        self.assertIn("digraph architecture", d)
-        self.assertIn("cluster_", d)
-        self.assertIn("DC of", d)
-
     def test_summary_is_grounded(self):
         lines = netmap.summary(self._hosts(),
                                [Domain(name="corp.local", dc_ips=["10.0.10.10"])])
@@ -109,11 +80,11 @@ class MermaidTest(unittest.TestCase):
         self.assertIn("2 network segment(s)", joined)
         self.assertIn("corp.local", joined)
 
-    def test_label_is_mermaid_safe(self):
-        # Quotes/brackets in a hostname must not break the node syntax.
-        h = _h("10.0.0.1", hostname='we"ird[name]', ports=[(80, "http")])
-        mm = netmap.mermaid([h])
-        self.assertNotIn('"we"ird', mm)                # inner quote neutralised
+    def test_svg_label_escapes_special_chars(self):
+        # Quotes/brackets in a hostname must not break the SVG text.
+        import xml.dom.minidom as md
+        h = _h("10.0.0.1", hostname='we"ird<name>', ports=[(80, "http")])
+        md.parseString(netmap.svg([h]))               # stays well-formed XML
 
 
 class NetworkMapEnrichmentTest(unittest.TestCase):

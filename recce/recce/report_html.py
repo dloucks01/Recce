@@ -429,11 +429,10 @@ def _network_map(hosts, domains, ad_data=None):
         f'<div class="netmap">{nm.svg(hosts, domains, ad_data)}</div>'
         '<p class="basis">This diagram renders here directly (and prints to PDF); a '
         'large estate (&gt;50 hosts) is shown collapsed to per-role counts per subnet '
-        'to stay readable. Two standalone copies are written next to this report: '
+        'to stay readable. Two standalone SVG copies are written next to this report — '
         '<b>network-map-full.svg</b> (every host broken out) and '
-        '<b>network-map-overview.svg</b> (by role) — plus <b>architecture.mmd</b>/'
-        '<b>.dot</b> and <b>architecture-overview.mmd</b>/<b>.dot</b> for Mermaid / '
-        'Graphviz.</p>'
+        '<b>network-map-overview.svg</b> (by role) — each opens in any browser with no '
+        'tools.</p>'
         '</section>')
 
 

@@ -369,15 +369,9 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
             # the embedded copy omits xmlns; a file needs it to render on its own
             return text.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
 
-        # Two network maps, each in Mermaid + DOT + a directly-viewable SVG:
-        #   * FULL     - every host as its own node (the detailed map)
+        # Two directly-viewable SVG network maps (open in any browser, no tools):
+        #   * FULL     - every host as its own card (the detailed map)
         #   * OVERVIEW - each subnet collapsed to per-role counts (readable at scale)
-        _write("architecture.mmd", netmap.mermaid(hosts, domains, ad_blob))
-        _write("architecture.dot", netmap.dot(hosts, domains, ad_blob))
-        _write("architecture-overview.mmd",
-               netmap.mermaid(hosts, domains, ad_blob, aggregate=True))
-        _write("architecture-overview.dot",
-               netmap.dot(hosts, domains, ad_blob, aggregate=True))
         _write("network-map-full.svg",
                _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=False)))
         _write("network-map-overview.svg",
@@ -399,7 +393,7 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
               f"{cov['pct']}%):\n    {paths['xlsx']}\n    {paths['md']}\n    {paths['csv']}"
               f"\n    {paths['html']}\n    {paths['assets']} (architecture & assets)"
               f"\n    network map: network-map-full.svg (every host) + "
-              f"network-map-overview.svg (by role) · architecture[-overview].mmd/.dot")
+              f"network-map-overview.svg (by role) — open in any browser, no tools")
         counts = store.count_issues()
         if counts.get("total"):
             print(f"[!] {counts['total']} scan issue(s) logged "
