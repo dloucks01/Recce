@@ -360,6 +360,16 @@ class HostTileLayoutTest(unittest.TestCase):
         self.assertIn("dc01", s)                           # hostname
         self.assertIn("Windows Server 2019", s)            # OS hint
 
+    def test_tile_has_header_wash_and_severity_chip(self):
+        # A confirmed critical finding shows the outline CRIT chip; owned shows the checkmark.
+        dc = _h("10.0.10.10", ports=[(445, "microsoft-ds")], roles=["Domain Controller"],
+                hostname="dc01", os_name="Windows Server 2019", access=True,
+                vulns=[("critical", "confirmed")])
+        s = netmap.svg([dc], aggregate=False)
+        self.assertIn("fill-opacity=\"0.20\"", s)     # role-wash header band
+        self.assertIn("CRIT", s)                       # outline severity chip
+        self.assertIn("\u2713", s)                        # owned check
+
     def test_ip_derived_hostname_is_not_shown_twice(self):
         self.assertEqual(netmap.real_hostname(
             _h("10.0.10.10", hostname="10-0-10-10")), "")   # suppressed
