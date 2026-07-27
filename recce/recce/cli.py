@@ -378,6 +378,10 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
                _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=True)))
         _write("network-map-tiered.svg",
                _standalone_svg(netmap.tiered_svg(hosts, domains, ad_blob)))
+        # Observed reachability — only when an on-target enum brought topology back.
+        if any((h.topology or {}) for h in hosts):
+            _write("network-reachability.svg",
+                   _standalone_svg(netmap.reachability_svg(hosts, ad_blob)))
         # Attack path as a standalone SVG too (only when there's a confirmed path).
         from . import attackpath as _ap
         _ap_steps = _ap.build(hosts)
@@ -2503,6 +2507,10 @@ def _fold_loot(host, text: str, source: str) -> tuple[int, int, int]:
     # Backfill listening-service ground truth (binary path, owning service,
     # loopback-only listeners) from the on-target scripts onto the host's ports.
     ingest.backfill_ports(host, ingest.parse_listeners(text))
+    # Observed network topology (own interfaces/routes/ARP/peers) -> reachability map.
+    topo = ingest.parse_topology(text)
+    if topo:
+        host.topology = topo
     host.privesc_checked = True
     return len(added), len(new_rows), len(promoted)
 
@@ -2527,8 +2535,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             return _ingest_service_output(svc, paths, args)
         print("[!] This doesn't look like recce-enum.sh/.ps1 output (no "
               "'recce-enum host=...' banner). Parsing [!] lines anyway.")
-    if not parsed["findings"]:
-        print("[!] No [!] findings in that loot - nothing to ingest.")
+    topo = ingest.parse_topology(text)
+    if not parsed["findings"] and not topo:
+        print("[!] No [!] findings or NETWORK block in that loot - nothing to ingest.")
         return 0
 
     source = os.path.basename(args.loot)
@@ -2545,6 +2554,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
           f"{host.ip}{hn}"
           + (f"; {total - added} already present" if total != added else "")
           + ".")
+    if topo:
+        nn = len(topo.get("neighbors", [])); npeers = len(topo.get("peers", []))
+        nif = len(topo.get("interfaces", []))
+        print(f"    Folded on-target topology: {nif} interface(s), {nn} ARP "
+              f"neighbour(s), {npeers} live peer(s) -> observed-reachability map.")
     if promoted:
         print(f"    Promoted {promoted} high-signal finding(s) to the "
               "Vulnerabilities sheet.")

@@ -293,3 +293,52 @@ class RoleGlyphTest(unittest.TestCase):
         leg = netmap.glyph_legend(0, 0)
         md.parseString(f"<svg xmlns='http://www.w3.org/2000/svg'>{leg}</svg>")
         self.assertIn("Domain Controller", leg)
+
+
+class ReachabilityTest(unittest.TestCase):
+    """Observed host-to-host reachability from on-target topology (ground truth)."""
+
+    def _hosts(self):
+        from recce import ingest
+        foot = _h("10.0.20.5", subnet="10.0.20.0/24",
+                  ports=[(445, "microsoft-ds")], os_name="Windows 10 Pro",
+                  hostname="ws01", access=True)
+        foot.topology = ingest.parse_topology(
+            "==== NETWORK ====\n"
+            "NET-IFACE eth0 10.0.20.5/24\nNET-IFACE eth1 10.0.10.9/24\n"
+            "NET-NEIGH 10.0.10.10 aa:bb:cc:00:00:10\nNET-NEIGH 127.0.0.1 x\n"
+            "NET-PEER 10.0.10.10:445 ESTAB\nNET-PEER 8.8.8.8:443 ESTAB\n")
+        dc = _h("10.0.10.10", ports=[(445, "microsoft-ds")],
+                roles=["Domain Controller"], hostname="dc01",
+                os_name="Windows Server 2019")
+        return [foot, dc]
+
+    def test_parse_topology_drops_loopback_and_computes_subnet(self):
+        from recce import ingest
+        t = ingest.parse_topology("NET-IFACE eth0 10.0.20.5/24\nNET-NEIGH 127.0.0.1 x\n"
+                                  "NET-NEIGH 10.0.10.10 aa\nNET-PEER 10.0.10.10:445 E")
+        self.assertEqual(t["interfaces"][0]["subnet"], "10.0.20.0/24")
+        self.assertEqual(t["neighbors"], ["10.0.10.10"])       # loopback dropped
+        self.assertEqual(t["peers"][0]["port"], 445)
+
+    def test_adjacency_edges_and_pivot(self):
+        adj = netmap.adjacency(self._hosts())
+        self.assertIn("10.0.20.5", adj["footholds"])
+        self.assertIn("10.0.20.5", adj["pivots"])              # dual-homed
+        self.assertEqual(set(adj["pivots"]["10.0.20.5"]),
+                         {"10.0.10.0/24", "10.0.20.0/24"})
+        kinds = {(e["dst"], e["kind"]) for e in adj["edges"]}
+        self.assertIn(("10.0.10.10", "arp"), kinds)            # ARP neighbour edge
+        self.assertIn(("10.0.10.10", "conn"), kinds)           # live connection edge
+        ext = [e for e in adj["edges"] if e["dst"] == "8.8.8.8"]
+        self.assertTrue(ext and not ext[0]["dst_known"])       # off-scope peer flagged
+
+    def test_reachability_svg_renders_or_placeholder(self):
+        import xml.dom.minidom as md
+        s = netmap.reachability_svg(self._hosts())
+        self.assertTrue(s.startswith("<svg"))
+        md.parseString(s)
+        self.assertIn("PIVOT", s)                              # dual-homed foothold flagged
+        self.assertIn("ARP", s)                                # legend
+        empty = netmap.reachability_svg([_h("10.0.0.1", ports=[(22, "ssh")])])
+        self.assertIn("No on-target topology", empty)          # graceful when none

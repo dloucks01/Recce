@@ -746,3 +746,177 @@ def glyph_legend(x: float, y: float, color: str = "#5f6f6e") -> str:
                    f'fill="{color}">{label}</text>')
         cx += 40 + len(label) * 6.4
     return "".join(out)
+
+
+# --- observed reachability (from on-target topology) -----------------------------
+
+def adjacency(hosts: list[Host]) -> dict:
+    """Host-to-host links OBSERVED from compromised hosts' own topology (folded in by
+    `ingest`): ARP neighbours (the box demonstrably reached that L2 address) and live
+    connection peers. This is ground truth, unlike the outside-in scan — recce only
+    draws a link because a foothold actually contacted the other end.
+
+    Returns {footholds:[ip], edges:[{src,dst,kind,label,dst_known}], pivots:{ip:[subnet]}}.
+    `kind` is 'arp' (same-segment L2 contact) or 'conn' (a live/known connection)."""
+    up = [h for h in hosts if h.is_up]
+    ip_host = {h.ip: h for h in up}
+    iface_ip = {}
+    for h in up:
+        for iface in (h.topology or {}).get("interfaces", []):
+            if iface.get("ip"):
+                iface_ip[iface["ip"]] = h.ip
+
+    def resolve(ip):
+        return ip_host.get(ip) and ip or iface_ip.get(ip) or (ip if ip in ip_host else "")
+
+    footholds, edges, pivots = [], [], {}
+    seen = set()
+    for h in up:
+        topo = h.topology or {}
+        if not topo:
+            continue
+        footholds.append(h.ip)
+        subs = sorted({i["subnet"] for i in topo.get("interfaces", []) if i.get("subnet")})
+        if len(subs) > 1:
+            pivots[h.ip] = subs
+        for n in topo.get("neighbors", []):
+            dst = resolve(n) or n
+            if dst == h.ip:
+                continue
+            k = (h.ip, dst, "arp")
+            if k in seen:
+                continue
+            seen.add(k)
+            edges.append({"src": h.ip, "dst": dst, "kind": "arp", "label": "",
+                          "dst_known": dst in ip_host})
+        for p in topo.get("peers", []):
+            dst = resolve(p["ip"]) or p["ip"]
+            if dst == h.ip:
+                continue
+            k = (h.ip, dst, "conn")
+            if k in seen:
+                continue
+            seen.add(k)
+            edges.append({"src": h.ip, "dst": dst, "kind": "conn",
+                          "label": str(p.get("port", "")), "dst_known": dst in ip_host})
+    return {"footholds": footholds, "edges": edges, "pivots": pivots}
+
+
+def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> str:
+    """A directly-viewable inline SVG of OBSERVED host-to-host reachability, from the
+    topology on-target enums brought back. Footholds (left) with solid edges to the
+    ARP neighbours they reached and dashed edges to live connection peers (right).
+    Pivots (dual-homed hosts bridging segments) are flagged. Renders with no tools."""
+    from html import escape as _e
+    adj = adjacency(hosts)
+    if not adj["footholds"]:
+        return ('<svg viewBox="0 0 560 60" width="560" height="60" role="img" '
+                'aria-label="Observed reachability"><text x="12" y="34" font-size="13" '
+                'fill="#5f6f6e">No on-target topology yet — run the enum NETWORK block '
+                'and `recce ingest` its output.</text></svg>')
+    up = {h.ip: h for h in hosts if h.is_up}
+    dc_names = ad_dc_names(ad_data)
+
+    def label(ip):
+        h = up.get(ip)
+        hn = h.hostname if h else ""
+        return ip + (f"  {hn}" if hn else "")
+
+    def kind_of(ip):
+        h = up.get(ip)
+        return role_kind(role_with_ad(h, dc_names)) if h else "workstation"
+
+    foot = list(dict.fromkeys(adj["footholds"]))
+    others, oseen = [], set(adj["footholds"])
+    truncated = 0
+    for e in adj["edges"]:
+        if e["dst"] not in oseen:
+            if len(others) >= max_nodes:
+                truncated += 1
+                continue
+            oseen.add(e["dst"])
+            others.append(e["dst"])
+    drawn = {e for e in range(len(adj["edges"]))}
+
+    cardW, cardH, vgap, m, colGap = 214, 46, 14, 18, 150
+    top = 52
+    rowsL, rowsR = len(foot), max(1, len(others))
+    H = top + max(rowsL, rowsR) * (cardH + vgap) + 54
+    W = m * 2 + cardW * 2 + colGap
+    xL, xR = m, m + cardW + colGap
+    posL = {ip: top + i * (cardH + vgap) for i, ip in enumerate(foot)}
+    posR = {ip: top + i * (cardH + vgap) for i, ip in enumerate(others)}
+
+    els = [
+        '<defs><marker id="rar" markerWidth="9" markerHeight="9" refX="7" refY="3" '
+        'orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5f6f6e"/></marker></defs>',
+        f'<rect x="0" y="0" width="{W}" height="{int(H)}" fill="#ffffff"/>',
+        f'<text x="{m}" y="26" font-size="15" font-weight="700" fill="#115e59">'
+        'Observed reachability <tspan font-weight="400" fill="#5f6f6e">'
+        '(from compromised hosts’ ARP + live connections)</tspan></text>',
+        f'<text x="{xL}" y="{top - 12}" font-size="11" font-weight="700" '
+        f'fill="#5f6f6e">FOOTHOLDS</text>',
+        f'<text x="{xR}" y="{top - 12}" font-size="11" font-weight="700" '
+        f'fill="#5f6f6e">REACHED</text>',
+    ]
+
+    # edges first (behind cards)
+    for e in adj["edges"]:
+        if e["src"] not in posL:
+            continue
+        y1 = posL[e["src"]] + cardH / 2
+        if e["dst"] in posR:
+            y2 = posR[e["dst"]] + cardH / 2
+        elif e["dst"] in posL:
+            y2 = posL[e["dst"]] + cardH / 2
+        else:
+            continue
+        x1, x2 = xL + cardW, xR
+        dash = 'stroke-dasharray="5 4" ' if e["kind"] == "conn" else ""
+        col = "#1f4e9c" if e["kind"] == "conn" else "#5f6f6e"
+        els.append(f'<path d="M{x1},{y1:.0f} C{x1 + 40},{y1:.0f} {x2 - 40},{y2:.0f} '
+                   f'{x2 - 6},{y2:.0f}" fill="none" stroke="{col}" stroke-width="1.5" '
+                   f'{dash}marker-end="url(#rar)"/>')
+
+    def card(x, y, ip, foothold):
+        h = up.get(ip)
+        role = role_with_ad(h, dc_names) if h else ""
+        fill, stroke = (_ROLE_COLOR.get(role, ("#ffffff", "#8a9997")) if h
+                        else ("#f7faf9", "#b7c0be"))
+        out = [f'<rect x="{x}" y="{y}" width="{cardW}" height="{cardH}" rx="8" '
+               f'fill="{fill}" stroke="{stroke}" stroke-width="{2 if foothold else 1.3}"/>']
+        out.append(glyph(kind_of(ip), x + 10, y + cardH / 2 - 9, 18, stroke))
+        out.append(f'<text x="{x + 36}" y="{y + 20}" font-size="11.5" font-weight="700" '
+                   f'fill="#1a2422">{_e(_x(label(ip), 24))}</text>')
+        note = ""
+        if ip in adj["pivots"]:
+            note = "PIVOT · " + ", ".join(adj["pivots"][ip][:2])
+        elif not h:
+            note = "(not in scan)"
+        if note:
+            out.append(f'<text x="{x + 36}" y="{y + 37}" font-size="10" '
+                       f'fill="#C15A11">{_e(_x(note, 30))}</text>')
+        return "".join(out)
+
+    for ip in foot:
+        els.append(card(xL, posL[ip], ip, True))
+    for ip in others:
+        els.append(card(xR, posR[ip], ip, False))
+
+    ly = H - 30
+    els.append(glyph_legend(m, ly - 10))
+    els.append(f'<line x1="{xR}" y1="{ly + 2:.0f}" x2="{xR + 22}" y2="{ly + 2:.0f}" '
+               f'stroke="#5f6f6e" stroke-width="1.5"/>'
+               f'<text x="{xR + 28}" y="{ly + 6:.0f}" font-size="10.5" fill="#5f6f6e">'
+               f'ARP (same segment)</text>'
+               f'<line x1="{xR + 150}" y1="{ly + 2:.0f}" x2="{xR + 172}" y2="{ly + 2:.0f}" '
+               f'stroke="#1f4e9c" stroke-width="1.5" stroke-dasharray="5 4"/>'
+               f'<text x="{xR + 178}" y="{ly + 6:.0f}" font-size="10.5" fill="#5f6f6e">'
+               f'live connection</text>')
+    if truncated:
+        els.append(f'<text x="{m}" y="{H - 8:.0f}" font-size="10" fill="#5f6f6e">'
+                   f'+{truncated} more reached host(s) not shown (capped for legibility).'
+                   '</text>')
+    return (f'<svg viewBox="0 0 {W} {int(H)}" width="{W}" height="{int(H)}" role="img" '
+            f'aria-label="Observed reachability" '
+            f'font-family="system-ui,Segoe UI,Arial,sans-serif">' + "".join(els) + "</svg>")
