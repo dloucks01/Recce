@@ -7,6 +7,13 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.4.0] - 2026-07-27
 
 ### Changed
+- **Attack path is now a directly-viewable SVG, not Mermaid/Graphviz.** `recce
+  attackpath` writes **`attack-path.svg`** (staged left-to-right kill chain — Initial
+  Access → Priv-Esc → Credential Access → Lateral Movement → Domain Dominance — with
+  stage arrows and dashed same-host continuity), and `report.html` embeds the same
+  diagram inline. It opens in any browser with no tools and prints to PDF. The
+  `attack_path.mmd`/`.dot` exports and `attackpath.mermaid()`/`.dot()` are removed
+  (same airgap reasoning as the network map).
 - **Network map is now SVG only, in two forms — full and overview.** Every report writes
   **`network-map-full.svg`** (every host broken out) and **`network-map-overview.svg`**
   (per-subnet role counts); both open in any browser with no tools and print to PDF —

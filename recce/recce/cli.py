@@ -354,8 +354,8 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
                       credentials=credentials, generated=gen,
                       ad_bloodhound=meta.get("ad_bloodhound"),
                       report_link=os.path.basename(paths["html"]))
-    # Standalone architecture diagram sources (render with any Mermaid viewer, or
-    # `dot -Tpng architecture.dot`). Best-effort - never block a report on these.
+    # Standalone, directly-viewable diagrams (open the .svg in any browser — no tools).
+    # Best-effort - never block a report on these.
     try:
         from . import netmap
         eng_dir = os.path.dirname(paths["html"])
@@ -376,6 +376,11 @@ def _generate_reports(store: Store, paths: dict[str, str], title: str,
                _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=False)))
         _write("network-map-overview.svg",
                _standalone_svg(netmap.svg(hosts, domains, ad_blob, aggregate=True)))
+        # Attack path as a standalone SVG too (only when there's a confirmed path).
+        from . import attackpath as _ap
+        _ap_steps = _ap.build(hosts)
+        if _ap_steps:
+            _write("attack-path.svg", _standalone_svg(_ap.svg(hosts, _ap_steps)))
         # Standalone, directly-viewable AD tier-0 diagram (open the .svg in any
         # browser). It needs the xmlns the embedded copy omits to render as a file.
         arch = (meta.get("ad_bloodhound") or {}).get("architecture")
@@ -2082,18 +2087,16 @@ def cmd_attackpath(args: argparse.Namespace) -> int:
         print(f"  [{tgt}] {s['title']}")
         print(f"       {s['tool']}:  {s['cmd']}")
     # Graph artifacts - Mermaid (paste anywhere) + Graphviz DOT (render to PNG).
-    mmd_path = os.path.join(args.output_dir, "attack_path.mmd")
-    dot_path = os.path.join(args.output_dir, "attack_path.dot")
+    svg_path = os.path.join(args.output_dir, "attack-path.svg")
     try:
         os.makedirs(args.output_dir, exist_ok=True)
-        with open(mmd_path, "w", encoding="utf-8") as fh:
-            fh.write(ap.mermaid(hosts, steps))
-        with open(dot_path, "w", encoding="utf-8") as fh:
-            fh.write(ap.dot(hosts, steps))
-        print(f"\n  Graph: {mmd_path}  (paste into mermaid.live / GitHub)")
-        print(f"  Graph: {dot_path}  (render: dot -Tpng {dot_path} -o attack_path.png)")
+        svg = ap.svg(hosts, steps).replace(
+            "<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+        with open(svg_path, "w", encoding="utf-8") as fh:
+            fh.write(svg)
+        print(f"\n  Diagram: {svg_path}  (open in any browser — no tools, prints to PDF)")
     except OSError as exc:
-        print(f"  [!] Could not write graph files: {exc}")
+        print(f"  [!] Could not write the diagram: {exc}")
     print("\n  Full table on the Attack Path sheet; runnable artifacts via "
           "`recce exploitplan`.")
     return 0
