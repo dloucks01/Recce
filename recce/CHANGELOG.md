@@ -4,6 +4,30 @@ All notable changes to recce are documented here. Dates are UTC.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-27
+
+### Added
+- **Sköll-Fieldkit integration (`skoll-export` / `skoll-import`).** recce now
+  round-trips with the [Sköll-Fieldkit](https://github.com/dloucks01/skoll-fieldkit)
+  exploitation kit, so enumeration seeds exploitation and proven findings flow back
+  into the workbook + report. Both directions are file-based and stdlib-only — neither
+  tool imports the other, so each runs standalone on an airgapped box and only the
+  handoff files travel between them.
+  - **`recce skoll-export -o eng`** writes `eng/skoll/`: a severity-ranked **`SKOLL.md`**
+    attack plan ("run *this* generator on *that* host, because …"), a rich
+    **`recce-bridge.json`** (each host's open ports, service/version, recce's **confirmed**
+    findings and the suggested Sköll generator) for `sweep.py triage --recce`, plus a
+    synthesized **`ports.gnmap`** and **`smb-null.txt`** for Sköll's unmodified
+    `sweep.py triage --nmap/--nxc` path. Respects target selection (IPs / ranges / CIDR /
+    `@file`).
+  - **`recce skoll-import <findings.json> -o eng`** folds a Sköll findings file back in —
+    the KB-enriched `recce_findings.json` (from `gen_report.py --export-recce`) or a raw
+    `findings.json`. Each proven finding becomes a **confirmed** vulnerability (source
+    `skoll`) on its host, landing in the Vulnerabilities sheet, the report and the DOCX
+    write-ups; the host is marked *access-gained* (ticks the Checklist **Access** step).
+    Idempotent — deduped by title + host, so re-import as you prove each finding.
+  - Full round-trip guide in **`INTEGRATION.md`** (now shipped in the burn package).
+
 ## [0.3.0] - 2026-07-26
 
 ### Added
