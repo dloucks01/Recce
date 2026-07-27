@@ -48,8 +48,9 @@ All notable changes to recce are documented here. Dates are UTC.
 - **Device icons on the diagrams.** Role-based glyphs — Domain Controller (server tower
   + star), Server (rack), Workstation/host (monitor) — now mark each card on the attack
   path and each chip on the tiered map, with a shared legend. Per-system cards on the
-  **full network map** and the **reachability map** are now vertical tiles — the device
-  icon on top with the **IP directly underneath** — instead of a row of text. The attack
+  **full network map** and the **reachability map** are now vertical tiles — device icon
+  on top, then **IP**, then hostname (only when it's a real name — an IP-derived hostname
+  like `10-0-10-10` is suppressed so the IP never prints twice), then role · OS. The attack
   path also got a visual pass (stage accent bars, soft shadows, device + same-host keys).
   All still pure inline SVG, no tools.
 - **Tiered lateral map (`network-map-tiered.svg`).** A third network-map view that
