@@ -7,6 +7,13 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [0.4.0] - 2026-07-27
 
 ### Changed
+- **Full network map rebuilt as subnet panels + a host grid.** Each network segment is
+  now a bordered panel with a header (subnet · host count · per-role summary · owned
+  count) and its hosts laid out in a multi-column **grid** instead of one tall column, so
+  a large segment no longer scrolls forever (a 400-host estate roughly halved in height)
+  and the page reads as a structured map rather than hosts stacked down the page. Added a
+  title, an AD-domain strip and a role/severity/owned legend. The >50-host overview
+  (per-role counts) is unchanged.
 - **Attack path is now a directly-viewable SVG, not Mermaid/Graphviz.** `recce
   attackpath` writes **`attack-path.svg`** (staged left-to-right kill chain — Initial
   Access → Priv-Esc → Credential Access → Lateral Movement → Domain Dominance — with
