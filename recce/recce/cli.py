@@ -1421,6 +1421,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
     finally:
         _final_report(store, paths, args.title)
         store.close()
+    if getattr(args, "deep", False):
+        # One kickoff: continue straight into the full credential-free deep sweep over
+        # everything enum just discovered (each module self-skips where nothing matches).
+        print("\n[*] --deep: running the credential-free deep sweep across all "
+              "discovered hosts ...")
+        return _run_sweep(args, authenticated=False)
     print("\n[+] Done.")
     return 0
 
@@ -5355,11 +5361,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cd.set_defaults(func=cmd_creds)
 
     # Convenience: enum + vulns in one shot.
-    s = sub.add_parser("scan", help="run enum then vulns in one shot")
+    s = sub.add_parser("scan", help="run enum then vulns in one shot "
+                                     "(add --deep for the full credential-free sweep)")
     _add_discovery(s)
     _add_common(s)
     _add_vuln_opts(s)
     _add_creds(s)
+    s.add_argument("--deep", action="store_true",
+                   help="one kickoff, whole credential-free mass surface across ALL "
+                        "targets: discovery -> ports -> service/version -> vulns -> "
+                        "every applicable deep module (web/smb/ftp/snmp/db/nfs/...). "
+                        "Runs `sweep` right after enum+vulns.")
+    s.add_argument("--skip", nargs="*", metavar="MOD",
+                   help="with --deep: deep modules to skip (e.g. --skip mssql docker)")
+    s.add_argument("--only-modules", nargs="*", metavar="MOD",
+                   help="with --deep: run only these deep modules")
     s.set_defaults(func=cmd_scan)
 
     # One command instead of ~9: run every applicable credential-free deep module.

@@ -28,6 +28,13 @@ All notable changes to recce are documented here. Dates are UTC.
   server; File/SMB is now reserved for server OSes.
 
 ### Added
+- **One-command deep mass scan (`recce scan --deep`).** A single kickoff runs the whole
+  credential-free mass surface across every target in one invocation: host discovery →
+  port scan → service/version → vuln scan → **every applicable deep module**
+  (web/smb/ftp/snmp/db/nfs/rsync/…, each self-skipping where nothing matches). Equivalent
+  to `scan` immediately followed by `sweep`; `--skip`/`--only-modules` narrow the deep
+  pass. (Companion, Sköll side: `sweep.py plan --oneshot` emits a single runnable
+  `mass-scan.sh` that hits the whole scope in one go.)
 - **Observed-reachability map from on-target topology (`network-reachability.svg`).** The
   on-target enums (recce's own, and the Sköll linpriv/winpriv enum) now emit a machine
   `NET-IFACE / NET-ROUTE / NET-NEIGH / NET-PEER` block; `recce ingest` folds it onto the
@@ -40,9 +47,11 @@ All notable changes to recce are documented here. Dates are UTC.
   edges/pivots.
 - **Device icons on the diagrams.** Role-based glyphs — Domain Controller (server tower
   + star), Server (rack), Workstation/host (monitor) — now mark each card on the attack
-  path and each chip on the tiered map, with a shared legend. The attack path also got a
-  visual pass (stage accent bars, soft shadows, device + same-host keys). All still pure
-  inline SVG, no tools.
+  path and each chip on the tiered map, with a shared legend. Per-system cards on the
+  **full network map** and the **reachability map** are now vertical tiles — the device
+  icon on top with the **IP directly underneath** — instead of a row of text. The attack
+  path also got a visual pass (stage accent bars, soft shadows, device + same-host keys).
+  All still pure inline SVG, no tools.
 - **Tiered lateral map (`network-map-tiered.svg`).** A third network-map view that
   groups the estate into trust tiers — **Domain Controllers → servers → workstations &
   hosts** — with the AD domain, per-role counts and access (✓ owned) overlay, upward

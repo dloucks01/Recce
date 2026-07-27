@@ -342,3 +342,18 @@ class ReachabilityTest(unittest.TestCase):
         self.assertIn("ARP", s)                                # legend
         empty = netmap.reachability_svg([_h("10.0.0.1", ports=[(22, "ssh")])])
         self.assertIn("No on-target topology", empty)          # graceful when none
+
+
+class HostTileLayoutTest(unittest.TestCase):
+    """Full map + reachability draw each system as a vertical tile: icon over IP."""
+
+    def test_full_map_tile_has_icon_and_centered_ip(self):
+        import xml.dom.minidom as md
+        dc = _h("10.0.10.10", ports=[(389, "ldap"), (445, "microsoft-ds")],
+                roles=["Domain Controller"], hostname="dc01",
+                os_name="Windows Server 2019")
+        s = netmap.svg([dc], aggregate=False)
+        md.parseString(s)
+        self.assertIn('text-anchor="middle"', s)          # IP is centered under the icon
+        self.assertIn("10.0.10.10", s)
+        self.assertIn("<g ", s)                            # a device glyph group is drawn

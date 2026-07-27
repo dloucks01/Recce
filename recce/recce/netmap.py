@@ -199,7 +199,7 @@ def svg(hosts: list[Host], domains=None, ad_data=None, aggregate=None) -> str:
     any_access = any(has_access(h) for h in up)
     any_risk = any(worst_severity(h) in _SEV_DOT for h in up)
 
-    colW, cardW, cardH, cardGap, colGap = 210, 196, 50, 10, 26
+    colW, cardW, cardH, cardGap, colGap = 210, 196, 66, 10, 26
     m, headerH = 18, 30
     x0 = m
     els, dc_anchor = [], {}          # dc_anchor[ip] = (x, y_bottom) of its card
@@ -249,18 +249,20 @@ def svg(hosts: list[Host], domains=None, ad_data=None, aggregate=None) -> str:
                 role = role_with_ad(h, dc_names)
                 fill, stroke = _ROLE_COLOR[role]
                 accessed = has_access(h)
-                l1 = _x(h.ip, 22)
-                # Keep hostname and role visibly separate (a bare concat read as
-                # "dc01.corp.localDC"). The role keeps its own colour via l2b below.
-                hn = _x(h.hostname, 18) if h.hostname else ""
-                l2 = (hn + " · " if hn else "") + _e(role)
-                l3 = _x(h.os_name, 30) if h.os_name else ""
-                lines = [(l1, True), (l2, False)] + ([(l3, False)] if l3 else [])
-                # Access = a bold border in the host's own role colour (never a
-                # colour swap — the old green outline collided with the Web role).
-                els.append(card(x, y, fill, stroke, lines, sw=3 if accessed else 1.5))
-                # Overlays (top-right, white-ringed for contrast on any card): risk
-                # dot for the worst confirmed finding, then a ✓ when access is held.
+                cxm = x + cardW / 2
+                # Vertical tile: device icon on top, IP directly under it, then a small
+                # hostname · role line. Access = a bold border in the role colour.
+                els.append(f'<rect x="{x}" y="{y}" width="{cardW}" height="{cardH}" rx="7" '
+                           f'fill="{fill}" stroke="{stroke}" '
+                           f'stroke-width="{3 if accessed else 1.5}"/>')
+                els.append(glyph(role_kind(role), cxm - 9, y + 7, 18, stroke))
+                els.append(f'<text x="{cxm:.0f}" y="{y + 41}" text-anchor="middle" '
+                           f'font-size="12" font-weight="700" fill="#1a2422">'
+                           f'{_x(h.ip, 22)}</text>')
+                sub = ((_x(h.hostname, 16) + " · ") if h.hostname else "") + _e(role)
+                els.append(f'<text x="{cxm:.0f}" y="{y + 56}" text-anchor="middle" '
+                           f'font-size="10.5" fill="#3a4644">{sub}</text>')
+                # Overlays (top-right, white-ringed): risk dot then a ✓ when owned.
                 bx = x + cardW - 12
                 sev = worst_severity(h)
                 if sev in _SEV_DOT:
@@ -273,7 +275,7 @@ def svg(hosts: list[Host], domains=None, ad_data=None, aggregate=None) -> str:
                     els.append(f'<text x="{bx:.0f}" y="{y + 17}" text-anchor="middle" '
                                f'font-size="10" font-weight="700" fill="#fff">✓</text>')
                 if role == "DC":
-                    dc_anchor[h.ip] = (x + cardW / 2, y + cardH)
+                    dc_anchor[h.ip] = (cxm, y + cardH)
                 y += cardH + cardGap
             max_rows = max(max_rows, len(rows))
 
@@ -838,7 +840,7 @@ def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> st
             others.append(e["dst"])
     drawn = {e for e in range(len(adj["edges"]))}
 
-    cardW, cardH, vgap, m, colGap = 214, 46, 14, 18, 150
+    cardW, cardH, vgap, m, colGap = 214, 62, 14, 18, 150
     top = 52
     rowsL, rowsR = len(foot), max(1, len(others))
     H = top + max(rowsL, rowsR) * (cardH + vgap) + 54
@@ -883,19 +885,26 @@ def reachability_svg(hosts: list[Host], ad_data=None, max_nodes: int = 60) -> st
         role = role_with_ad(h, dc_names) if h else ""
         fill, stroke = (_ROLE_COLOR.get(role, ("#ffffff", "#8a9997")) if h
                         else ("#f7faf9", "#b7c0be"))
+        cxm = x + cardW / 2
+        # Vertical tile: device icon on top, IP directly under it, then a small note.
         out = [f'<rect x="{x}" y="{y}" width="{cardW}" height="{cardH}" rx="8" '
                f'fill="{fill}" stroke="{stroke}" stroke-width="{2 if foothold else 1.3}"/>']
-        out.append(glyph(kind_of(ip), x + 10, y + cardH / 2 - 9, 18, stroke))
-        out.append(f'<text x="{x + 36}" y="{y + 20}" font-size="11.5" font-weight="700" '
-                   f'fill="#1a2422">{_e(_x(label(ip), 24))}</text>')
+        out.append(glyph(kind_of(ip), cxm - 9, y + 7, 18, stroke))
+        hn = h.hostname if h else ""
+        out.append(f'<text x="{cxm:.0f}" y="{y + 40}" text-anchor="middle" '
+                   f'font-size="11.5" font-weight="700" fill="#1a2422">'
+                   f'{_e(_x(ip, 22))}</text>')
         note = ""
         if ip in adj["pivots"]:
             note = "PIVOT · " + ", ".join(adj["pivots"][ip][:2])
+        elif hn:
+            note = hn
         elif not h:
             note = "(not in scan)"
         if note:
-            out.append(f'<text x="{x + 36}" y="{y + 37}" font-size="10" '
-                       f'fill="#C15A11">{_e(_x(note, 30))}</text>')
+            col = "#C15A11" if (ip in adj["pivots"] or not h) else "#3a4644"
+            out.append(f'<text x="{cxm:.0f}" y="{y + 55}" text-anchor="middle" '
+                       f'font-size="10" fill="{col}">{_e(_x(note, 28))}</text>')
         return "".join(out)
 
     for ip in foot:
