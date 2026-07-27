@@ -1,7 +1,7 @@
-"""Sköll-Fieldkit bridge: export (recce -> Sköll) and import (Sköll -> recce).
+"""fieldkit bridge: export (recce -> fieldkit) and import (fieldkit -> recce).
 
 Covers the round-trip contract: recce synthesizes an nmap-greppable + a rich bridge
-JSON + a plan Sköll consumes, and folds a Sköll findings.json (raw or the enriched
+JSON + a plan fieldkit consumes, and folds a fieldkit findings.json (raw or the enriched
 recce_findings.json) back into confirmed Vulns that reach the workbook + report.
 No network, no tools - pure data transforms, so it runs airgapped like the tool.
 """
@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 from recce import cli
-from recce import skoll
+from recce import fieldkit
 from recce.models import Account, Credential, Host, Port, Vuln
 from recce.store import Store
 
@@ -58,7 +58,7 @@ def _web_host():
 class ExportTest(unittest.TestCase):
 
     def test_gnmap_is_valid_greppable_sweep_can_parse(self):
-        gn = skoll.build_gnmap([_win_host(), _web_host()])
+        gn = fieldkit.build_gnmap([_win_host(), _web_host()])
         # Re-parse with the exact regexes sweep.py triage uses.
         hosts = {}
         for line in gn.splitlines():
@@ -73,8 +73,8 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(hosts["10.0.20.5"][1], {80, 443})
 
     def test_bridge_has_ports_and_confirmed_findings(self):
-        b = skoll.build_bridge([_win_host(), _web_host()], engagement="Eng")
-        self.assertEqual(b["_recce_bridge"], skoll.BRIDGE_VERSION)
+        b = fieldkit.build_bridge([_win_host(), _web_host()], engagement="Eng")
+        self.assertEqual(b["_recce_bridge"], fieldkit.BRIDGE_VERSION)
         by_ip = {h["ip"]: h for h in b["hosts"]}
         dc = by_ip["10.0.10.10"]
         self.assertEqual(dc["findings"][0]["severity"], "critical")
@@ -83,19 +83,19 @@ class ExportTest(unittest.TestCase):
         self.assertTrue(any("gen_smb" in r["module"] for r in dc["suggested"]))
 
     def test_bridge_collapses_same_finding_across_ports(self):
-        b = skoll.build_bridge([_web_host()])
+        b = fieldkit.build_bridge([_web_host()])
         web = b["hosts"][0]
         apache = [f for f in web["findings"] if f["title"] == "Apache httpd multiple vulns"]
         self.assertEqual(len(apache), 1)                       # deduped by title
         self.assertEqual(set(apache[0]["ports"]), {80, 443})   # ports unioned
         self.assertEqual(set(apache[0]["cves"]), {"CVE-2022-22720", "CVE-2023-25690"})
-        # the 'potential' finding is excluded (only confirmed reach Sköll)
+        # the 'potential' finding is excluded (only confirmed reach fieldkit)
         self.assertFalse(any(f["title"] == "Risky HTTP methods" for f in web["findings"]))
 
     def test_plan_md_ranks_and_names_generators(self):
-        b = skoll.build_bridge([_win_host(), _web_host()], engagement="Eng")
-        md = skoll.build_plan_md(b)
-        self.assertIn("Sköll attack plan", md)
+        b = fieldkit.build_bridge([_win_host(), _web_host()], engagement="Eng")
+        md = fieldkit.build_plan_md(b)
+        self.assertIn("fieldkit attack plan", md)
         self.assertIn("dc01.corp.local", md)
         self.assertIn("gen_smb", md)
         self.assertIn("CVE-2017-0143", md)
@@ -113,7 +113,7 @@ class GeneratorWiringTest(unittest.TestCase):
                  product="Microsoft Windows Active Directory LDAP",
                  version="Domain: corp.local"),                          # banner, not a version
         ]
-        cmds = skoll._exploit_cmds(h)
+        cmds = fieldkit._exploit_cmds(h)
         svcs = {c["service"] for c in cmds}
         self.assertEqual(svcs, {"openssh"})                # only the real-version, non-generic one
         self.assertIn('--service openssh --version "8.2p1"', cmds[0]["cmd"])
@@ -125,7 +125,7 @@ class GeneratorWiringTest(unittest.TestCase):
         h.vulns = [Vuln(ip="10.0.20.5", port=80, protocol="tcp", script_id="vulners",
                         title="Apache vulns", severity="critical", confidence="confirmed",
                         ids=["CVE-2021-41773"])]
-        cmds = skoll._exploit_cmds(h)
+        cmds = fieldkit._exploit_cmds(h)
         self.assertEqual(cmds[0]["service"], "apache")
         self.assertIn("CVE-2021-41773", cmds[0]["cves"])
 
@@ -136,14 +136,14 @@ class GeneratorWiringTest(unittest.TestCase):
                       Account(ip="10.0.10.10", source="ldap", kind="group", name="Admins")]
         creds = [Credential(username="JDOE", secret="x"),          # dup (case-insensitive)
                  Credential(username="svc", secret="y", domain="corp.local")]
-        users = skoll.collect_users([h], creds)
+        users = fieldkit.collect_users([h], creds)
         self.assertIn("jdoe", users)
         self.assertIn("svc", users)
         self.assertNotIn("WS01$", users)                           # machine account dropped
         self.assertEqual(len([u for u in users if u.lower() == "jdoe"]), 1)
 
     def test_collect_creds_formats_password_and_hash(self):
-        lines = skoll.collect_creds([
+        lines = fieldkit.collect_creds([
             Credential(username="svc", secret="P@ss", domain="corp.local", source="secretsdump"),
             Credential(username="adm", secret="31d6...", kind="nthash", source="secretsdump"),
         ])
@@ -154,7 +154,7 @@ class GeneratorWiringTest(unittest.TestCase):
         h = Host(ip="10.0.10.10", enumerated=True)
         h.ports = [Port(portid=445, state="open", service="microsoft-ds")]
         creds = [Credential(username="svc", secret="P@ss", domain="corp.local")]
-        cmds = skoll._access_cmds(h, creds)
+        cmds = fieldkit._access_cmds(h, creds)
         self.assertTrue(any("gen_shell.py --target 10.0.10.10 --user svc --pass 'P@ss'"
                             in c and "--proto smb" in c for c in cmds))
         self.assertTrue(any("gen_spray.py --proto smb --users users.txt" in c for c in cmds))
@@ -162,18 +162,18 @@ class GeneratorWiringTest(unittest.TestCase):
     def test_access_cmds_empty_without_shell_proto(self):
         h = Host(ip="10.0.20.5", enumerated=True)
         h.ports = [Port(portid=80, state="open", service="http")]   # no shell proto
-        self.assertEqual(skoll._access_cmds(h, [Credential(username="x", secret="y",
+        self.assertEqual(fieldkit._access_cmds(h, [Credential(username="x", secret="y",
                                                            domain="d")]), [])
 
 
 class ImportTest(unittest.TestCase):
 
     def test_parse_affected_host(self):
-        self.assertEqual(skoll.parse_affected_host("10.0.0.5 (WIN-SQL01)"),
+        self.assertEqual(fieldkit.parse_affected_host("10.0.0.5 (WIN-SQL01)"),
                          ("10.0.0.5", "WIN-SQL01"))
-        self.assertEqual(skoll.parse_affected_host("10.0.0.6 (web01, Ubuntu 22.04)"),
+        self.assertEqual(fieldkit.parse_affected_host("10.0.0.6 (web01, Ubuntu 22.04)"),
                          ("10.0.0.6", "web01"))
-        self.assertEqual(skoll.parse_affected_host("justahost")[0], "")
+        self.assertEqual(fieldkit.parse_affected_host("justahost")[0], "")
 
     def test_raw_findings_json_folds_with_fallback_severity(self):
         data = {"findings": [{
@@ -183,11 +183,11 @@ class ImportTest(unittest.TestCase):
             "steps": [{"cmd": "sudo -l", "output": "(root) NOPASSWD: /usr/bin/find"}],
             "references": "CVE-2020-0000",
         }]}
-        hosts = skoll.findings_to_hosts(data)
+        hosts = fieldkit.findings_to_hosts(data)
         self.assertIn("10.0.0.6", hosts)
         v = hosts["10.0.0.6"]["vulns"][0]
         self.assertEqual(v.severity, "high")             # lowercased for recce
-        self.assertEqual(v.source, "skoll")
+        self.assertEqual(v.source, "fieldkit")
         self.assertEqual(v.confidence, "confirmed")
         self.assertIn("CVE-2020-0000", v.ids)
         self.assertIn("sudo -l", v.output)               # PoC step captured
@@ -200,7 +200,7 @@ class ImportTest(unittest.TestCase):
                        "severity": "high", "cwes": ["CWE-428"],
                        "remediation": "Quote the ImagePath.", "ids": ["CVE-1"]},
         }]}
-        hosts = skoll.findings_to_hosts(data)
+        hosts = fieldkit.findings_to_hosts(data)
         v = hosts["10.0.0.5"]["vulns"][0]
         self.assertEqual(hosts["10.0.0.5"]["hostname"], "WIN-SQL01")
         self.assertEqual(v.cwes, ["CWE-428"])
@@ -230,10 +230,10 @@ class RoundTripCliTest(unittest.TestCase):
         return ns
 
     def test_export_writes_seed_files(self):
-        rc = cli.cmd_skoll_export(self._args())
+        rc = cli.cmd_fieldkit_export(self._args())
         self.assertEqual(rc, 0)
-        sk = os.path.join(self.eng, "skoll")
-        for name in ("ports.gnmap", "smb-null.txt", "recce-bridge.json", "SKOLL.md",
+        sk = os.path.join(self.eng, "fieldkit")
+        for name in ("ports.gnmap", "smb-null.txt", "recce-bridge.json", "FIELDKIT.md",
                      "users.txt", "creds.txt"):
             self.assertTrue(os.path.exists(os.path.join(sk, name)), name)
         bridge = json.load(open(os.path.join(sk, "recce-bridge.json")))
@@ -241,7 +241,7 @@ class RoundTripCliTest(unittest.TestCase):
 
     def test_import_lands_in_store_and_marks_access(self):
         ff = os.path.join(self.dir, "recce_findings.json")
-        json.dump({"source": "skoll", "findings": [{
+        json.dump({"source": "fieldkit", "findings": [{
             "title": "vsftpd 2.3.4 backdoor", "vector_type": "exposed_service_cve",
             "affected_host": "10.0.20.5 (web01)",
             "steps": [{"cmd": "nc host 21", "output": "230 Login successful"}],
@@ -250,21 +250,21 @@ class RoundTripCliTest(unittest.TestCase):
                        "remediation": "Reinstall vsftpd from a trusted source.",
                        "ids": ["CVE-2011-2523"]},
         }]}, open(ff, "w"))
-        rc = cli.cmd_skoll_import(self._args(findings=ff))
+        rc = cli.cmd_fieldkit_import(self._args(findings=ff))
         self.assertEqual(rc, 0)
         store = Store(cli._open_paths(self.eng)["db"])
         h = store.get_host("10.0.20.5")
         store.close()
         self.assertTrue(h.access_gained)
-        skolls = [v for v in h.vulns if v.source == "skoll"]
-        self.assertEqual(len(skolls), 1)
-        self.assertEqual(skolls[0].severity, "critical")
-        self.assertEqual(skolls[0].port, 21)
-        self.assertIn("CVE-2011-2523", skolls[0].ids)
+        fieldkits = [v for v in h.vulns if v.source == "fieldkit"]
+        self.assertEqual(len(fieldkits), 1)
+        self.assertEqual(fieldkits[0].severity, "critical")
+        self.assertEqual(fieldkits[0].port, 21)
+        self.assertIn("CVE-2011-2523", fieldkits[0].ids)
 
     def test_hostname_only_finding_merges_onto_enumerated_host(self):
         # affected_host with no IP ("WIN-SQL01") must fold onto the enumerated host
-        # of that name, not fork a synthetic skoll:WIN-SQL01 entry.
+        # of that name, not fork a synthetic fieldkit:WIN-SQL01 entry.
         store = Store(cli._open_paths(self.eng)["db"])
         store.upsert_host(Host(ip="10.0.10.10", subnet="10.0.10.0/24",
                                enumerated=True, hostnames=["WIN-SQL01"]))
@@ -276,14 +276,14 @@ class RoundTripCliTest(unittest.TestCase):
                 "affected_host": "WIN-SQL01",
                 "steps": [{"cmd": "sc", "output": "ok"}],
             }]}, fh)
-        cli.cmd_skoll_import(self._args(findings=ff))
+        cli.cmd_fieldkit_import(self._args(findings=ff))
         store = Store(cli._open_paths(self.eng)["db"])
         try:
-            self.assertIsNone(store.get_host("skoll:WIN-SQL01"))   # no synthetic fork
+            self.assertIsNone(store.get_host("fieldkit:WIN-SQL01"))   # no synthetic fork
             h = store.get_host("10.0.10.10")
         finally:
             store.close()
-        sk = [v for v in h.vulns if v.source == "skoll"]
+        sk = [v for v in h.vulns if v.source == "fieldkit"]
         self.assertEqual(len(sk), 1)
         self.assertEqual(sk[0].ip, "10.0.10.10")                  # ip realigned
         self.assertTrue(h.access_gained)
@@ -295,8 +295,8 @@ class RoundTripCliTest(unittest.TestCase):
             "affected_host": "10.0.20.5 (web01)",
             "steps": [{"cmd": "sudo -l", "output": "ok"}],
         }]}, open(ff, "w"))
-        cli.cmd_skoll_import(self._args(findings=ff))
-        cli.cmd_skoll_import(self._args(findings=ff))
+        cli.cmd_fieldkit_import(self._args(findings=ff))
+        cli.cmd_fieldkit_import(self._args(findings=ff))
         store = Store(cli._open_paths(self.eng)["db"])
         h = store.get_host("10.0.20.5")
         store.close()

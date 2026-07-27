@@ -1,27 +1,27 @@
-"""Sköll-Fieldkit bridge — round-trip recce <-> Sköll.
+"""fieldkit bridge — round-trip recce <-> fieldkit.
 
 Two directions, both stdlib-only so this stays airgap-safe like the rest of recce:
 
-  recce -> Sköll  (seed exploitation from enumeration)
-    `skoll_export` writes a small handoff folder the Sköll kit consumes:
+  recce -> fieldkit  (seed exploitation from enumeration)
+    `fieldkit_export` writes a small handoff folder the fieldkit kit consumes:
       * ports.gnmap      - synthesized nmap-greppable; drops straight into
-                           `sweep.py triage --nmap ports.gnmap` with no Sköll change.
+                           `sweep.py triage --nmap ports.gnmap` with no fieldkit change.
       * smb-null.txt     - netexec-style lines for hosts where recce saw a null
-                           session / anonymous SMB (Sköll's `triage --nxc` bumps them).
+                           session / anonymous SMB (fieldkit's `triage --nxc` bumps them).
       * recce-bridge.json- the RICH feed: per-host ports+service+version, recce's
-                           CONFIRMED findings, and the exact Sköll generator to run,
+                           CONFIRMED findings, and the exact fieldkit generator to run,
                            read by `sweep.py triage --recce`.
-      * SKOLL.md         - a human, severity-ranked "run THIS on THAT host, because ..."
+      * FIELDKIT.md         - a human, severity-ranked "run THIS on THAT host, because ..."
                            plan an operator can work top-down.
 
-  Sköll -> recce  (fold proven exploitation back into the workbook + report)
-    `findings_to_vulns` parses a Sköll findings.json (raw, or the enriched
+  fieldkit -> recce  (fold proven exploitation back into the workbook + report)
+    `findings_to_vulns` parses a fieldkit findings.json (raw, or the enriched
     `recce_findings.json` that `gen_report.py --export-recce` emits) into recce
-    `Vuln`s (source="skoll", confidence="confirmed") so every proven finding lands
+    `Vuln`s (source="fieldkit", confidence="confirmed") so every proven finding lands
     in the Vulnerabilities sheet, the HTML/Markdown report and the DOCX write-ups.
 
 Nothing here scans, connects, or executes; it only transforms data recce already
-holds and text a Sköll operator brings back.
+holds and text a fieldkit operator brings back.
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ from .models import Host, Port, Vuln
 BRIDGE_VERSION = 1
 
 # --------------------------------------------------------------------------------------
-# Port -> Sköll generator map. Mirrors access/network/sweep.py's WINS table so recce's
-# suggestions match what Sköll's own triage would pick; kept here (not imported) so recce
+# Port -> fieldkit generator map. Mirrors access/network/sweep.py's WINS table so recce's
+# suggestions match what fieldkit's own triage would pick; kept here (not imported) so recce
 # stays standalone and airgap-safe. (label, "note + generator to run", juiciness 0=best).
 # --------------------------------------------------------------------------------------
 WINS: dict[int, tuple[str, str, int]] = {
@@ -72,13 +72,13 @@ WINS: dict[int, tuple[str, str, int]] = {
 }
 
 
-def skoll_module_for_port(port: int) -> tuple[str, str, int] | None:
-    """(label, note+generator, juiciness) for a port, or None if recce has no Sköll route."""
+def fieldkit_module_for_port(port: int) -> tuple[str, str, int] | None:
+    """(label, note+generator, juiciness) for a port, or None if recce has no fieldkit route."""
     return WINS.get(port)
 
 
 # --------------------------------------------------------------------------------------
-# recce -> Sköll : synthesize the handoff artifacts from the host model.
+# recce -> fieldkit : synthesize the handoff artifacts from the host model.
 # --------------------------------------------------------------------------------------
 
 
@@ -92,10 +92,10 @@ def _gnmap_service_field(p: Port) -> str:
 def build_gnmap(hosts: list[Host]) -> str:
     """Synthesize an nmap-greppable (`-oG`) scan from recce's host/port model.
 
-    Sköll's `sweep.py triage --nmap` only needs `Host: <ip> (<name>)  Ports: <p>/open/...`
-    lines, so this is a lossless-enough handoff that needs no change on the Sköll side.
+    fieldkit's `sweep.py triage --nmap` only needs `Host: <ip> (<name>)  Ports: <p>/open/...`
+    lines, so this is a lossless-enough handoff that needs no change on the fieldkit side.
     """
-    out: list[str] = ["# recce -> Sköll handoff (synthesized nmap-greppable). "
+    out: list[str] = ["# recce -> fieldkit handoff (synthesized nmap-greppable). "
                       "Feed: sweep.py triage --nmap ports.gnmap"]
     for h in hosts:
         openp = h.open_ports
@@ -107,7 +107,7 @@ def build_gnmap(hosts: list[Host]) -> str:
     return "\n".join(out) + "\n"
 
 
-# recce vuln signals that mean SMB is reachable without creds, so Sköll should treat
+# recce vuln signals that mean SMB is reachable without creds, so fieldkit should treat
 # the host as a null-session / relay candidate. Matched on the SMB null/anon/guest
 # wording recce writes (`recce smb` and the credsweep null/guest path) rather than on a
 # fixed port, so a finding recorded with port 139/None (or by a different module) still
@@ -134,9 +134,9 @@ def build_smb_null(hosts: list[Host]) -> str:
     """netexec-style lines for hosts recce saw a null/anonymous SMB session on.
 
     Matches the loose shape `sweep.py triage --nxc` scrapes (an IP on a line mentioning
-    READ/WRITE or 'Enumerated shares'), so those hosts float to the top of Sköll's board.
+    READ/WRITE or 'Enumerated shares'), so those hosts float to the top of fieldkit's board.
     """
-    lines: list[str] = ["# recce -> Sköll: hosts with a null/anonymous SMB session "
+    lines: list[str] = ["# recce -> fieldkit: hosts with a null/anonymous SMB session "
                         "(feed: sweep.py triage --nxc smb-null.txt)"]
     any_hit = False
     for h in hosts:
@@ -155,12 +155,12 @@ def _confirmed(v: Vuln) -> bool:
 
 
 def _suggest_for_host(h: Host) -> list[dict[str, Any]]:
-    """Per-open-port Sköll routes for a host, best-first (deduped by generator note)."""
+    """Per-open-port fieldkit routes for a host, best-first (deduped by generator note)."""
     routes: list[dict[str, Any]] = []
     seen: set[str] = set()
     scored = []
     for p in h.open_ports:
-        w = skoll_module_for_port(p.portid)
+        w = fieldkit_module_for_port(p.portid)
         if w:
             scored.append((w[2], p, w))
     for _j, p, (label, note, juic) in sorted(scored, key=lambda t: t[0]):
@@ -172,7 +172,7 @@ def _suggest_for_host(h: Host) -> list[dict[str, Any]]:
     return routes
 
 
-# Open-port -> the Sköll credential->shell proto (gen_shell.py --proto). Best-first.
+# Open-port -> the fieldkit credential->shell proto (gen_shell.py --proto). Best-first.
 _SHELL_PROTO = [
     (5985, "winrm"), (5986, "winrm"), (1433, "mssql"), (445, "smb"),
     (22, "ssh"), (3389, "rdp"),
@@ -366,7 +366,7 @@ def _host_findings(h: Host) -> list[dict[str, Any]]:
 
 def build_bridge(hosts: list[Host], engagement: str = "Recce Engagement",
                  generated: str = "", creds: list | None = None) -> dict[str, Any]:
-    """The rich recce -> Sköll feed consumed by `sweep.py triage --recce`."""
+    """The rich recce -> fieldkit feed consumed by `sweep.py triage --recce`."""
     creds = creds or []
     entries = []
     for h in hosts:
@@ -417,13 +417,13 @@ def build_plan_md(bridge: dict[str, Any]) -> str:
     actionable = [h for h in hosts
                   if h["suggested"] or h["findings"] or h.get("exploit_cmds")]
     L: list[str] = []
-    L.append(f"# Sköll attack plan — from recce engagement '{bridge.get('engagement','')}'")
+    L.append(f"# fieldkit attack plan — from recce engagement '{bridge.get('engagement','')}'")
     L.append("")
-    L.append(f"Generated by `recce skoll-export`{(' · ' + bridge['generated']) if bridge.get('generated') else ''}. "
-             f"{len(actionable)} of {len(hosts)} live host(s) have a Sköll route. Work top-down "
+    L.append(f"Generated by `recce fieldkit-export`{(' · ' + bridge['generated']) if bridge.get('generated') else ''}. "
+             f"{len(actionable)} of {len(hosts)} live host(s) have a fieldkit route. Work top-down "
              "(0 = exposed-RCE/unauth quick-win). **Authorized scope only.**")
     L.append("")
-    L.append("Feed the machine-readable version straight into Sköll's mass triage:")
+    L.append("Feed the machine-readable version straight into fieldkit's mass triage:")
     L.append("")
     L.append("```bash")
     L.append("python3 access/network/sweep.py triage --recce recce-bridge.json")
@@ -477,26 +477,26 @@ def build_plan_md(bridge: dict[str, Any]) -> str:
             L.append(f"> Foothold already recorded by recce: {h['access_detail']}")
             L.append("")
     if not actionable:
-        L.append("_(No host exposed a service recce maps to a Sköll generator. "
+        L.append("_(No host exposed a service recce maps to a fieldkit generator. "
                  "Run `recce vulns`/`sweep` for deeper coverage.)_")
     return "\n".join(L) + "\n"
 
 
 # --------------------------------------------------------------------------------------
-# Sköll -> recce : fold a Sköll findings.json back into recce Vulns.
+# fieldkit -> recce : fold a fieldkit findings.json back into recce Vulns.
 # --------------------------------------------------------------------------------------
 
-_SEV_MAP = {  # Sköll capitalizes; recce stores lowercase
+_SEV_MAP = {  # fieldkit capitalizes; recce stores lowercase
     "critical": "critical", "high": "high", "medium": "medium", "low": "low", "info": "info",
 }
 _IPV4 = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 
 
 def parse_affected_host(s: str) -> tuple[str, str]:
-    """Split Sköll's `affected_host` ('10.0.0.5 (WIN-SQL01)') into (ip, hostname).
+    """Split fieldkit's `affected_host` ('10.0.0.5 (WIN-SQL01)') into (ip, hostname).
 
     Returns ('', hostname-or-raw) when no IP is present, so a hostname-only finding
-    still folds onto a synthesized `skoll:<name>` host rather than being dropped.
+    still folds onto a synthesized `fieldkit:<name>` host rather than being dropped.
     """
     s = (s or "").strip()
     ip = ""
@@ -540,10 +540,10 @@ def _proof_blob(f: dict[str, Any]) -> str:
 
 
 def finding_to_vuln(f: dict[str, Any]) -> tuple[str, str, Vuln] | None:
-    """Map one Sköll finding -> (ip, hostname, Vuln). None if it has no host at all.
+    """Map one fieldkit finding -> (ip, hostname, Vuln). None if it has no host at all.
 
     Uses the enriched `_recce` block (from `gen_report.py --export-recce`) when present
-    for accurate severity/CWE/remediation without needing Sköll's KB here; otherwise
+    for accurate severity/CWE/remediation without needing fieldkit's KB here; otherwise
     degrades gracefully to the finding's own fields.
     """
     kb = f.get("_recce") or {}
@@ -567,16 +567,16 @@ def finding_to_vuln(f: dict[str, Any]) -> tuple[str, str, Vuln] | None:
     remediation = kb.get("remediation") or ""
     output = _proof_blob(f)
     v = Vuln(
-        ip=ip or f"skoll:{hostname}", port=port, protocol="tcp",
-        script_id=f"skoll:{vt}", state="finding", title=title,
-        severity=sev, source="skoll", confidence="confirmed",
+        ip=ip or f"fieldkit:{hostname}", port=port, protocol="tcp",
+        script_id=f"fieldkit:{vt}", state="finding", title=title,
+        severity=sev, source="fieldkit", confidence="confirmed",
         ids=ids, cwes=cwes, remediation=remediation, output=output,
     )
     return ip, hostname, v
 
 
 def findings_to_hosts(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Group a Sköll findings.json into {ip: {hostname, vulns[], access_detail}}.
+    """Group a fieldkit findings.json into {ip: {hostname, vulns[], access_detail}}.
 
     Accepts both a raw findings.json and the enriched recce_findings.json. Skips the
     advisory `_valid_vector_types` array and any entry with no resolvable host.
@@ -589,7 +589,7 @@ def findings_to_hosts(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if res is None:
             continue
         ip, hostname, v = res
-        key = v.ip                                        # real IP, or 'skoll:<name>'
+        key = v.ip                                        # real IP, or 'fieldkit:<name>'
         bucket = out.setdefault(key, {"ip": ip, "hostname": hostname,
                                       "vulns": [], "titles": set()})
         if not bucket["hostname"] and hostname:

@@ -5,6 +5,16 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Changed
+- **The Sköll-Fieldkit integration is now the fieldkit integration.** The companion kit
+  was renamed to [**fieldkit**](https://github.com/dloucks01/fieldkit), so the commands
+  follow: **`recce fieldkit-export`** / **`recce fieldkit-import`**, writing `eng/fieldkit/`
+  with a **`FIELDKIT.md`** plan. `skoll-export` / `skoll-import` still work as hidden
+  deprecated aliases (they print a nudge), so existing scripts keep running.
+  Imported findings are now tagged source **`fieldkit`** (was `skoll`), and hostname-only
+  findings synthesize a `fieldkit:<name>` host key. **Existing engagements need no
+  migration** - old `skoll`-tagged vulns still load and render, and re-importing merges
+  onto them rather than duplicating (dedup is by title + port, and a synthetic host is
+  matched by hostname).
 - **`recce ingest` auto-resolves the target host from the enum's own interface IPs.**
   Running `recce ingest enum.txt` with no `--host` now lands the loot on the real
   enumerated host in scope by matching the box's own `NET-IFACE` IP(s) from the ingested

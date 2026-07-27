@@ -4290,9 +4290,17 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_skoll_export(args: argparse.Namespace) -> int:
-    """Export the engagement as a seed for the Sköll-Fieldkit exploitation kit."""
-    from . import skoll
+def _deprecated_alias(fn, old: str, new: str):
+    """Wrap a command so a pre-rename spelling keeps working, with a nudge to the new one."""
+    def _run(args: argparse.Namespace) -> int:
+        print(f"[!] `recce {old}` is deprecated - use `recce {new}`.", file=sys.stderr)
+        return fn(args)
+    return _run
+
+
+def cmd_fieldkit_export(args: argparse.Namespace) -> int:
+    """Export the engagement as a seed for the fieldkit exploitation kit."""
+    from . import fieldkit
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
         print(f"[x] No datastore at {paths['db']} - run `enum` first.")
@@ -4309,17 +4317,17 @@ def cmd_skoll_export(args: argparse.Namespace) -> int:
         return 1
     title = store.get_meta("engagement") or args.title
     creds = store.all_credentials()
-    out_dir = os.path.join(args.output_dir, "skoll")
+    out_dir = os.path.join(args.output_dir, "fieldkit")
     os.makedirs(out_dir, exist_ok=True)
-    bridge = skoll.build_bridge(hosts, engagement=title, generated=_now(), creds=creds)
+    bridge = fieldkit.build_bridge(hosts, engagement=title, generated=_now(), creds=creds)
 
-    users = skoll.collect_users(hosts, creds)
-    cred_lines = skoll.collect_creds(creds)
+    users = fieldkit.collect_users(hosts, creds)
+    cred_lines = fieldkit.collect_creds(creds)
     files = {
-        "ports.gnmap": skoll.build_gnmap(hosts),
-        "smb-null.txt": skoll.build_smb_null(hosts),
+        "ports.gnmap": fieldkit.build_gnmap(hosts),
+        "smb-null.txt": fieldkit.build_smb_null(hosts),
         "recce-bridge.json": json.dumps(bridge, indent=2) + "\n",
-        "SKOLL.md": skoll.build_plan_md(bridge),
+        "FIELDKIT.md": fieldkit.build_plan_md(bridge),
         "users.txt": ("\n".join(users) + "\n") if users
                      else "# (recce enumerated no usernames yet — run credenum / ldap)\n",
         "creds.txt": ("# known credentials (reference for gen_shell.py) — "
@@ -4333,23 +4341,23 @@ def cmd_skoll_export(args: argparse.Namespace) -> int:
 
     actionable = sum(1 for h in bridge["hosts"]
                      if h["suggested"] or h["findings"] or h["exploit_cmds"])
-    print(f"[+] Sköll seed written to {out_dir}/ "
-          f"({len(bridge['hosts'])} live host(s), {actionable} with a Sköll route, "
+    print(f"[+] fieldkit seed written to {out_dir}/ "
+          f"({len(bridge['hosts'])} live host(s), {actionable} with a fieldkit route, "
           f"{len(users)} user(s), {len(creds)} cred(s)):")
     print(f"    ports.gnmap        -> sweep.py triage --nmap ports.gnmap")
     print(f"    smb-null.txt       -> sweep.py triage --nxc smb-null.txt")
     print(f"    recce-bridge.json  -> sweep.py triage --recce recce-bridge.json  (richest)")
-    print(f"    SKOLL.md           -> human, severity-ranked attack plan")
+    print(f"    FIELDKIT.md        -> human, severity-ranked attack plan")
     print(f"    users.txt/creds.txt-> gen_spray.py --users / gen_shell.py")
-    print(f"    Next (in the Sköll checkout): "
+    print(f"    Next (in the fieldkit checkout): "
           f"python3 access/network/sweep.py triage --recce {out_dir}/recce-bridge.json")
     store.close()
     return 0
 
 
-def cmd_skoll_import(args: argparse.Namespace) -> int:
-    """Fold a Sköll findings.json (proven exploitation) back into the workbook + report."""
-    from . import skoll
+def cmd_fieldkit_import(args: argparse.Namespace) -> int:
+    """Fold a fieldkit findings.json (proven exploitation) back into the workbook + report."""
+    from . import fieldkit
     from .models import Host, Port
     paths = _open_paths(args.output_dir)
     if not os.path.exists(paths["db"]):
@@ -4369,7 +4377,7 @@ def cmd_skoll_import(args: argparse.Namespace) -> int:
         return 1
     _import_excel_tracking(store, paths)
 
-    by_host = skoll.findings_to_hosts(data)
+    by_host = fieldkit.findings_to_hosts(data)
     if not by_host:
         print("[!] No usable findings in the file (need affected_host + steps).")
         store.close()
@@ -4378,7 +4386,7 @@ def cmd_skoll_import(args: argparse.Namespace) -> int:
     hosts_by_ip = {h.ip: h for h in all_hosts}
     # Resolve a hostname-only finding (affected_host had no IP) onto the host recce
     # already enumerated under that name, so it merges instead of forking a synthetic
-    # `skoll:<name>` entry. First hostname wins on a collision.
+    # `fieldkit:<name>` entry. First hostname wins on a collision.
     hosts_by_name = {}
     for h in all_hosts:
         for hn in h.hostnames:
@@ -4403,17 +4411,17 @@ def cmd_skoll_import(args: argparse.Namespace) -> int:
         for v in new:
             v.ip = h.ip                        # keep Vuln.ip aligned with the host it lands on
         h.vulns.extend(new)
-        # A proven Sköll finding is a confirmed foothold on the host.
+        # A proven fieldkit finding is a confirmed foothold on the host.
         if not h.access_gained:
             h.access_gained = True
-            h.access_detail = h.access_detail or "Sköll: proven exploitation (imported findings)"
+            h.access_detail = h.access_detail or "fieldkit: proven exploitation (imported findings)"
         store.upsert_host(h)
         added_total += len(new)
         touched += 1
 
-    print(f"[+] Imported {added_total} Sköll finding(s) across {touched} host(s)"
+    print(f"[+] Imported {added_total} fieldkit finding(s) across {touched} host(s)"
           + (f" ({created} new host entry/entries)" if created else "") + ".")
-    print("    Source 'skoll' (confidence 'confirmed') -> Vulnerabilities sheet, "
+    print("    Source 'fieldkit' (confidence 'confirmed') -> Vulnerabilities sheet, "
           "report, and write-ups. Hosts marked access-gained.")
     if added_total:
         title = store.get_meta("engagement") or args.title
@@ -5763,22 +5771,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _add_budget(kp)
     kp.set_defaults(func=cmd_kerberos)
 
-    sk = sub.add_parser("skoll-export",
-                        help="export the engagement as a seed for the Sköll-Fieldkit "
+    sk = sub.add_parser("fieldkit-export",
+                        help="export the engagement as a seed for the fieldkit "
                              "exploitation kit (gnmap + bridge JSON + attack plan)")
     sk.add_argument("targets", nargs="*",
                     help="restrict to these IPs / ranges / CIDRs / @file (default: all)")
     sk.add_argument("-o", "--output-dir", default="engagement")
     sk.add_argument("--title", default="Recce Engagement")
-    sk.set_defaults(func=cmd_skoll_export)
+    sk.set_defaults(func=cmd_fieldkit_export)
 
-    ski = sub.add_parser("skoll-import",
-                         help="fold a Sköll findings.json (proven exploitation) back "
+    ski = sub.add_parser("fieldkit-import",
+                         help="fold a fieldkit findings.json (proven exploitation) back "
                               "into the workbook + report")
-    ski.add_argument("findings", help="path to a Sköll findings.json or recce_findings.json")
+    ski.add_argument("findings", help="path to a fieldkit findings.json or recce_findings.json")
     ski.add_argument("-o", "--output-dir", default="engagement")
     ski.add_argument("--title", default="Recce Engagement")
-    ski.set_defaults(func=cmd_skoll_import)
+    ski.set_defaults(func=cmd_fieldkit_import)
+
+    # Pre-rename spellings (the kit was called Sköll) - hidden from --help, still functional.
+    # (no `help=` at all: argparse only lists a subcommand when the kwarg is present,
+    #  and it prints `help=SUPPRESS` literally rather than honouring it.)
+    sk_old = sub.add_parser("skoll-export")
+    sk_old.add_argument("targets", nargs="*")
+    sk_old.add_argument("-o", "--output-dir", default="engagement")
+    sk_old.add_argument("--title", default="Recce Engagement")
+    sk_old.set_defaults(func=_deprecated_alias(cmd_fieldkit_export,
+                                               "skoll-export", "fieldkit-export"))
+
+    ski_old = sub.add_parser("skoll-import")
+    ski_old.add_argument("findings")
+    ski_old.add_argument("-o", "--output-dir", default="engagement")
+    ski_old.add_argument("--title", default="Recce Engagement")
+    ski_old.set_defaults(func=_deprecated_alias(cmd_fieldkit_import,
+                                                "skoll-import", "fieldkit-import"))
 
     r = sub.add_parser("report", help="regenerate reports (preserves tracking)")
     r.add_argument("-o", "--output-dir", default="engagement")
