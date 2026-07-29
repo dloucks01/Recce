@@ -5,6 +5,32 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Fixed
+- **False-positive sweep across the finding/verdict pipeline.** A codebase audit found
+  several detections that asserted a finding from *presence* or a *loose substring*
+  rather than a confirmed positive; all are now tightened, with regression tests in
+  `tests/test_fp_sweep.py`:
+  - **proofs no longer reports version-db banner matches as "CONFIRMED / directly
+    observed".** Verdicts that claim recce actively *authenticated / read with no
+    credential / got an unauth reply* (Grafana/RabbitMQ default creds, Docker & Kubernetes
+    unauth API, unauth Redis) fired on `version-db` advisories recce never probed. Such a
+    finding is now capped at **LIKELY** with an honest "verify — not directly observed"
+    note; EOL/version-fact verdicts (the banner *is* the proof) still confirm.
+  - **vulndb product matching is word-boundary'd** — `bind` no longer matches `rpcbind`,
+    `php` no longer matches `phpMyAdmin`. The OpenSSH **regreSSHion** range no longer flags
+    a patched `9.8` (was read as `< 9.8p1`), and a concrete version match on a
+    **distro-packaged** build (backported fixes) is downgraded to a lead, not asserted.
+  - **web.py path checks tightened** — Tomcat Manager no longer "reachable" on any 401/403
+    (requires a Tomcat signature); `.svn/entries` no longer matches an HTML page's
+    `dir="ltr"`; Elasticsearch no longer "open" on a bare `[]`; Kibana requires the
+    `kibana` marker; MinIO default-creds require a real auth artifact; a SPA index page is
+    no longer mistaken for an exposed backup.
+  - **SSH access is only recorded on a real shell** — a failed auth / unreachable host
+    (stderr in the output) no longer registers an SSH foothold (`access_gained`).
+  - **AD/LDAP substrings tightened** — membership of *Helpdesk/SQL/DHCP Administrators* no
+    longer counts as tier-0 privileged; an LDAP server is tagged **Domain Controller** only
+    with a DC-specific RootDSE marker (not the universal `namingContexts`); "password in
+    description" uses word boundaries (no more `bypass`/`accredited`).
+  - **parser** no longer turns a *"not affected … CVE-XXXX"* mention into a finding.
 - **False "MSSQL blank password (sysadmin -> RCE)" critical on every instance.** The
   finding keyed off the mere *presence* of nmap's `ms-sql-empty-password` script — which
   runs on every 1433 during enum and lands in the port's script map even when it
