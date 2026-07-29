@@ -5,6 +5,19 @@ All notable changes to recce are documented here. Dates are UTC.
 ## [Unreleased]
 
 ### Fixed
+- **False "MSSQL blank password (sysadmin -> RCE)" critical on every instance.** The
+  finding keyed off the mere *presence* of nmap's `ms-sql-empty-password` script — which
+  runs on every 1433 during enum and lands in the port's script map even when it
+  authenticated nothing — instead of a positive result. It now requires the script's own
+  **"Login Success"** marker (or a parser-vetted empty-password vuln), so it fires only
+  when an account really logged in with an empty password.
+- **Plain domain users mislabeled LOCAL ADMIN, notably on domain controllers.** The
+  netexec/crackmapexec parsers (`parse_nxc_smb`, `parse_nxc_mssql`) matched a loose
+  `(admin)` substring in addition to the real `(Pwn3d!)` marker. A DC's output is
+  share/session/host-info heavy, and that stray substring flipped ordinary authenticated
+  users to admin — producing bogus "Local admin confirmed" findings and false foothold
+  (`access_gained`) on DCs. Admin is now keyed off the `Pwn3d!` token alone, which is the
+  only marker netexec actually emits. New regression tests in `tests/test_false_positives.py`.
 - **A host with real open ports could be reported as "0 open ports".** The port sweep
   is completeness-first (retries, congestion-adaptive verify re-scan, truncation flag),
   but its result was only used as the `-p` list handed to the enum phase — the final
