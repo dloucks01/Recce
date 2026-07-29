@@ -419,8 +419,13 @@ def run_ssh_local(ip: str, ssh: dict) -> tuple[dict | None, str | None]:
     out, err = _run(cmd, timeout=60)
     if err:
         return None, err
-    if not out.strip():
-        return None, "ssh: no output (auth failed or connection refused)"
+    # _run folds stderr into `out`, and parse_ssh_enum always returns a (truthy)
+    # fixed-key dict, so a failed auth ("Permission denied") or unreachable host
+    # ("Connection refused") would otherwise be recorded as an SSH foothold
+    # (access_gained + auth:True). The remote script emits `===ID===` as its first
+    # marker, so its presence is proof the login actually succeeded and the enum ran.
+    if "===ID===" not in out:
+        return None, "ssh: auth failed / no shell (enum did not run)"
     return parse_ssh_enum(out), None
 
 
